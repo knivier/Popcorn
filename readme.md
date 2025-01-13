@@ -33,7 +33,7 @@ Popcorn is a simple kernel framework designed to help you understand the basics 
 To build the project, follow the assembly and compilation instructions provided above. Ensure you have the necessary tools like `nasm`, `gcc`, and `ld` installed on your system.
 
 ### Running the Kernel
-After building the project, you can run the kernel using QEMU with the command provided above. This will start the system and display the kernel messages on the screen.
+After building the project, you can run the kernel using QEMU with the command provided above. This will start the system and display the kernel messages on the screen. "Pops" are other files that run that aren't kernel.c based
 
 ### Future Plans
 The project is still in its early stages and marked as unstable. Future updates will include more features and improvements to the kernel framework.
