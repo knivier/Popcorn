@@ -1,5 +1,6 @@
 {
     "files.associations": {
         "shimjapii.h": "c"
-    }
+    },
+    "C_Cpp.default.compilerPath": "C:\\MinGW\\bin\\gcc.exe"
 }
