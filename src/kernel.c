@@ -10,7 +10,7 @@ void delay(int count) {
 }
 
 void kmain(void) {
-    const char *str = "Popcorn v0.1-unstable Booted, awaiting pops";
+    const char *str = "[✓] Popcorn v0.1-unstable Booted, awaiting pops";
     char *vidptr = (char*)0xb8000;  // Video memory
     unsigned int i = 0, j = 0;
 
