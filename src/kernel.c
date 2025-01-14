@@ -1,5 +1,5 @@
-// kernel.c
-#include "shimjapii.h"  // Include the header for shimjapii.c
+// src/kernel.c
+#include "pop_module.h"
 
 void delay(int count) {
     while (count--) {
@@ -10,29 +10,33 @@ void delay(int count) {
 }
 
 void kmain(void) {
-    const char *str = "[✓] Popcorn v0.1-unstable Booted, awaiting pops";
-    char *vidptr = (char*)0xb8000;  // Video memory
+    const char* str = "[✓] Popcorn v0.2-unstable Booted, awaiting pops";
+    char* vidptr = (char*)0xb8000;
     unsigned int i = 0, j = 0;
 
-    // Clear the screen
+    // Clear screen
     while (j < 80 * 25 * 2) {
         vidptr[j] = ' ';
-        vidptr[j + 1] = 0x07;  // Light grey on black background
+        vidptr[j + 1] = 0x07;
         j = j + 2;
     }
 
-    // Write "Popcorn v0.1-unstable Booted, awaiting pops" to video memory
+    // Write boot message
     j = 0;
     while (str[j] != '\0') {
         vidptr[i] = str[j];
-        vidptr[i + 1] = 0x07;  // Light grey on black background
+        vidptr[i + 1] = 0x07;
         ++j;
         i = i + 2;
     }
 
-    // Wait for one second
+    // Register the Shimjapii module
+    extern const PopModule shimjapii_module;
+    register_pop_module(&shimjapii_module);
+
+    // Wait a second
     delay(1);
 
-    // Call the function from shimjapii.c to print the message
-    shimjapii_popped(i);  // Pass the current position so shimjapii_popped() can continue from there
+    // Execute all registered pop modules
+    execute_all_pops(i);
 }

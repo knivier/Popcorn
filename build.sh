@@ -1,3 +1,5 @@
+#!/bin/bash
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -5,19 +7,14 @@ NC='\033[0m' # No Color
 
 # Directory structure
 SRC_DIR="src"
-OBJ_DIR="obj"
-INCLUDE_DIR="$SRC_DIR/include"
-
-# Create necessary directories
-mkdir -p $OBJ_DIR
 
 # Compiler flags
-CFLAGS="-m32 -c -ffreestanding -O2 -Wall -Wextra -I$INCLUDE_DIR"
+CFLAGS="-m32 -c -ffreestanding -O2 -Wall -Wextra -I$SRC_DIR"
 LDFLAGS="-m elf_i386 -T $SRC_DIR/link.ld"
 
 # Source files
 ASM_FILES="kernel.asm"
-C_FILES="kernel.c shimjapii.c"
+C_FILES="kernel.c pop_module.c shimjapii_pop.c"
 
 # Function to print status
 print_status() {
@@ -30,27 +27,29 @@ print_status() {
 }
 
 # Clean old object files
-rm -f $OBJ_DIR/*.o
+echo "Cleaning old files..."
+rm -f $SRC_DIR/*.o
 rm -f kernel
+print_status $? "Cleaned old files"
 
 echo "Building Popcorn Kernel..."
 
 # Assemble ASM files
 for file in $ASM_FILES; do
     echo "Assembling $file..."
-    nasm -f elf32 $SRC_DIR/$file -o $OBJ_DIR/${file%.asm}.o
+    nasm -f elf32 $SRC_DIR/$file -o $SRC_DIR/${file%.asm}.o
     print_status $? "Assembled $file"
 done
 
 # Compile C files
 for file in $C_FILES; do
     echo "Compiling $file..."
-    gcc $CFLAGS $SRC_DIR/$file -o $OBJ_DIR/${file%.c}.o
+    gcc $CFLAGS $SRC_DIR/$file -o $SRC_DIR/${file%.c}.o
     print_status $? "Compiled $file"
 done
 
 # Get all object files
-OBJ_FILES=$(ls $OBJ_DIR/*.o)
+OBJ_FILES=$(ls $SRC_DIR/*.o)
 
 # Link everything together
 echo "Linking object files..."
