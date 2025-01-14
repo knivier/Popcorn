@@ -25,6 +25,11 @@ check_status() {
 # Start of the script
 echo -e "${YELLOW}Starting the build process...${NC}"
 
+# Clean old object files
+echo -e "${YELLOW}Cleaning old object files...${NC}"
+rm -f $OBJ_DIR/*.o
+check_status "Cleaning object files"
+
 # Compile the assembly file
 echo -e "${YELLOW}Compiling kernel.asm...${NC}"
 nasm -f elf32 kernel.asm -o $OBJ_DIR/kasm.o
