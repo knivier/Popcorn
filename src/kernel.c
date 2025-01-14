@@ -5,6 +5,7 @@
 #include "includes/input_init.h"
 
 extern const PopModule shimjapii_module;
+
 // Define the scancode to ASCII mapping
 const char scancode_to_ascii[128] = {
     0, 0, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', 0, 0,
@@ -13,8 +14,13 @@ const char scancode_to_ascii[128] = {
     'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 0, '*', 0, ' '
 };
 
-// Keyboard event callback function
-void keyboard_event(unsigned char scancode) {
+// Keyboard event callback function (ISR)
+void keyboard_event_isr(void) {
+    unsigned char scancode;
+
+    // Read the scancode from the keyboard controller
+    scancode = inb(0x60);
+
     // Ignore key release events (scancode with the most significant bit set)
     if (scancode & 0x80) {
         return;
@@ -29,6 +35,9 @@ void keyboard_event(unsigned char scancode) {
         vidptr[pos + 1] = 0x02;  // Green color
         pos += 2;
     }
+
+    // Send End of Interrupt (EOI) signal to the PIC
+    outb(0x20, 0x20);
 }
 
 // Define the __stack_chk_fail_local function to avoid linker errors
@@ -65,7 +74,7 @@ void kmain(void)
 
     // Initialize keyboard
     init_keyboard();
-    register_keyboard_callback(keyboard_event);
+    register_keyboard_callback(keyboard_event_isr);
 
     // Enable interrupts
     __asm__ __volatile__("sti");
@@ -76,6 +85,10 @@ void kmain(void)
 
     // Infinite loop to keep the kernel running
     while(1) {
+        // Perform other tasks here
+        // ...
+
+        // Halt the CPU until the next interrupt
         __asm__ __volatile__("hlt");
     }
 }
