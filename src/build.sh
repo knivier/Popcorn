@@ -30,10 +30,14 @@ echo -e "${YELLOW}Cleaning old object files...${NC}"
 rm -f $OBJ_DIR/*.o
 check_status "Cleaning object files"
 
-# Compile the assembly file
+# Compile the assembly files
 echo -e "${YELLOW}Compiling kernel.asm...${NC}"
 nasm -f elf32 kernel.asm -o $OBJ_DIR/kasm.o
 check_status "Compiling kernel.asm"
+
+echo -e "${YELLOW}Compiling idt.asm...${NC}"
+nasm -f elf32 idt.asm -o $OBJ_DIR/idt.o
+check_status "Compiling idt.asm"
 
 # Compile the C files
 echo -e "${YELLOW}Compiling kernel.c...${NC}"
@@ -48,9 +52,13 @@ echo -e "${YELLOW}Compiling shimjapii_pop.c...${NC}"
 gcc -m32 -c shimjapii_pop.c -o $OBJ_DIR/shimjapii_pop.o
 check_status "Compiling shimjapii_pop.c"
 
+echo -e "${YELLOW}Compiling input_init.c...${NC}"
+gcc -m32 -c input_init.c -o $OBJ_DIR/input_init.o
+check_status "Compiling input_init.c"
+
 # Link all object files into a final executable
 echo -e "${YELLOW}Linking object files...${NC}"
-ld -m elf_i386 -T link.ld -o kernel $OBJ_DIR/kasm.o $OBJ_DIR/kc.o $OBJ_DIR/pop_module.o $OBJ_DIR/shimjapii_pop.o
+ld -m elf_i386 -T link.ld -o kernel $OBJ_DIR/kasm.o $OBJ_DIR/kc.o $OBJ_DIR/pop_module.o $OBJ_DIR/shimjapii_pop.o $OBJ_DIR/idt.o $OBJ_DIR/input_init.o
 check_status "Linking object files"
 
 # Run the kernel with QEMU
