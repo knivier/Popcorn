@@ -14,7 +14,7 @@ LDFLAGS="-m elf_i386 -T $SRC_DIR/link.ld"
 
 # Source files
 ASM_FILES="kernel.asm"
-C_FILES="kernel.c pop_module.c shimjapii_pop.c"
+C_FILES="kernel.c pop_module.c shimjapii_pop.c" # Show all C files here
 
 # Function to print status
 print_status() {
