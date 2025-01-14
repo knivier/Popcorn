@@ -1,5 +1,5 @@
 // src/shimjapii_pop.c
-#include "pop_module.h"
+#include "includes/pop_module.h"
 
 void shimjapii_pop_func(unsigned int start_pos) {
     char* vidptr = (char*)0xb8000;

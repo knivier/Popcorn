@@ -1,5 +1,5 @@
 // src/kernel.c
-#include "pop_module.h"
+#include "includes/pop_module.h"
 
 void delay(int count) {
     while (count--) {

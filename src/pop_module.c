@@ -1,5 +1,5 @@
 // src/pop_module.c
-#include "pop_module.h"
+#include "includes/pop_module.h"
 
 #define MAX_MODULES 10
 
