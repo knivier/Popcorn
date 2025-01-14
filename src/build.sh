@@ -123,6 +123,7 @@ build_kernel() {
     compile_file "pop_module.c" "$OBJ_DIR/pop_module.o" "c"
     compile_file "shimjapii_pop.c" "$OBJ_DIR/shimjapii_pop.o" "c"
     compile_file "input_init.c" "$OBJ_DIR/input_init.o" "c"
+    compile_file "spinner_pop.c" "$OBJ_DIR/spinner_pop.o" "c"  # Added spinner_pop.c
     
     # Link files
     log "INFO" "Linking object files..."
@@ -132,7 +133,8 @@ build_kernel() {
         "$OBJ_DIR"/pop_module.o \
         "$OBJ_DIR"/shimjapii_pop.o \
         "$OBJ_DIR"/idt.o \
-        "$OBJ_DIR"/input_init.o
+        "$OBJ_DIR"/input_init.o \
+        "$OBJ_DIR"/spinner_pop.o  # Added spinner_pop.o to linking
     
     check_status "Linking object files"
 }

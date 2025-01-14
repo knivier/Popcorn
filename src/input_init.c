@@ -17,15 +17,8 @@ struct IDT_entry {
 struct IDT_entry IDT[256];
 
 // Function to load IDT
-extern void load_idt(unsigned long *idt_ptr);
-
-// Simple scancode to ASCII mapping for basic keys
-static const char scancode_to_ascii[] = {
-    0, 0, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', 0,
-    0, 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', 0,
-    0, 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`',
-    0, '\\', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 0,
-    '*', 0, ' '
+void load_idt_input_init(unsigned long *idt_ptr) {
+    __asm__ __volatile__("lidt (%0)" : : "r"(idt_ptr));
 };
 
 // Read from I/O port
@@ -91,7 +84,7 @@ void idt_init(void) {
     idt_address = (unsigned long)IDT;
     idt_ptr[0] = (sizeof(struct IDT_entry) * 256) + ((idt_address & 0xffff) << 16);
     idt_ptr[1] = idt_address >> 16;
-    load_idt(idt_ptr);
+    load_idt_input_init(idt_ptr);
 }
 
 // Register keyboard callback

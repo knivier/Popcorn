@@ -3,8 +3,10 @@
 */
 #include "includes/pop_module.h"
 #include "includes/input_init.h"
+#include "includes/spinner_pop.h"
 
 extern const PopModule shimjapii_module;
+extern const PopModule spinner_module;
 
 // Define the scancode to ASCII mapping
 const char scancode_to_ascii[128] = {
@@ -15,8 +17,7 @@ const char scancode_to_ascii[128] = {
 };
 
 // Keyboard event callback function (ISR)
-void keyboard_event_isr(void) {
-    unsigned char scancode;
+void keyboard_event_isr(unsigned char scancode) {
 
     // Read the scancode from the keyboard controller
     scancode = inb(0x60);
@@ -74,13 +75,14 @@ void kmain(void)
 
     // Initialize keyboard
     init_keyboard();
-    register_keyboard_callback(keyboard_event_isr);
+    register_keyboard_callback(&keyboard_event_isr);
 
     // Enable interrupts
     __asm__ __volatile__("sti");
 
     // Register and execute the shimjapii module
     register_pop_module(&shimjapii_module);
+    register_pop_module(&spinner_module);
     execute_all_pops(i);
 
     // Infinite loop to keep the kernel running
