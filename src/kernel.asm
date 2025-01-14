@@ -1,22 +1,22 @@
-; src/kernel.asm
+;;kernel.asm
+
+;nasm directive - 32 bit
 bits 32
-
-section .multiboot
-    align 4
-    dd 0x1BADB002            ; magic
-    dd 0x00                  ; flags
-    dd - (0x1BADB002 + 0x00) ; checksum. m + f + c should be zero
-
 section .text
-global _start
-extern kmain
+        align 4
+        dd 0x1BADB002            ;magic
+        dd 0x00                  ;flags
+        dd - (0x1BADB002 + 0x00) ;checksum. m+f+c should be zero
 
-_start:
-    cli                  ; block interrupts
-    mov esp, stack_space ; set stack pointer
-    call kmain
-    hlt                  ; halt the CPU
+global start
+extern kmain	        ;kmain in kernel.c
+
+start:
+  cli 			
+  mov esp, stack_space	;set stack pointer
+  call kmain
+  hlt		 	;halt the CPU
 
 section .bss
-resb 1048576      ; 1MB for stack
+resb 16000		;16KB for stack
 stack_space:

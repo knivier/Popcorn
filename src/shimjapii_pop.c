@@ -1,9 +1,9 @@
 // src/shimjapii_pop.c
-#include "pop_module.h"
+#include "includes/pop_module.h"
 
 void shimjapii_pop_func(unsigned int start_pos) {
     char* vidptr = (char*)0xb8000;
-    const char* msg = "Shimjapii popped!";
+    const char* msg = "Shimjapii popped!!!!";
     unsigned int i = start_pos;
     unsigned int j = 0;
     
@@ -17,6 +17,6 @@ void shimjapii_pop_func(unsigned int start_pos) {
 
 const PopModule shimjapii_module = {
     .name = "shimjapii",
-    .message = "Shimjapii popped!",
+    .message = "Shimjapii popped!!!",
     .pop_function = shimjapii_pop_func
 };

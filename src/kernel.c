@@ -1,42 +1,81 @@
-// src/kernel.c
-#include "pop_module.h"
+/*
+*  kernel.c
+*/
+#include "includes/pop_module.h"
+#include "includes/input_init.h"
 
-void delay(int count) {
-    while (count--) {
-        for (int i = 0; i < 1000000; i++) {
-            // Do nothing, just waste some time
-        }
+extern const PopModule shimjapii_module;
+// Define the scancode to ASCII mapping
+const char scancode_to_ascii[128] = {
+    0, 0, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', 0, 0,
+    'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n', 0,
+    'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`', 0, '\\',
+    'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 0, '*', 0, ' '
+};
+
+// Keyboard event callback function
+void keyboard_event(unsigned char scancode) {
+    // Ignore key release events (scancode with the most significant bit set)
+    if (scancode & 0x80) {
+        return;
+    }
+
+    // For now, we'll just print the ASCII character if available
+    if (scancode < 128 && scancode_to_ascii[scancode] != 0) {  // Standard scancode set is 128 keys
+        char *vidptr = (char*)0xb8000;
+        static unsigned int pos = 0;
+
+        vidptr[pos] = scancode_to_ascii[scancode];
+        vidptr[pos + 1] = 0x02;  // Green color
+        pos += 2;
     }
 }
 
-void kmain(void) {
-    const char* str = "[✓] Popcorn v0.2-unstable Booted, awaiting pops";
-    char* vidptr = (char*)0xb8000;
-    unsigned int i = 0, j = 0;
+// Define the __stack_chk_fail_local function to avoid linker errors
+void __stack_chk_fail_local(void) {
+    // This function is called when stack smashing is detected
+    while (1) {
+        __asm__ __volatile__("hlt");
+    }
+}
 
-    // Clear screen
-    while (j < 80 * 25 * 2) {
+void kmain(void)
+{
+    const char *str = "Popcorn v0.3 Popped!!!";
+    char *vidptr = (char*)0xb8000;     //video mem begins here.
+    unsigned int i = 0;
+    unsigned int j = 0;
+
+    // Clear the screen
+    while(j < 80 * 25 * 2) {
         vidptr[j] = ' ';
-        vidptr[j + 1] = 0x07;
+        vidptr[j+1] = 0x00;         
         j = j + 2;
     }
 
-    // Write boot message
     j = 0;
-    while (str[j] != '\0') {
+
+    // Print the welcome message
+    while(str[j] != '\0') {
         vidptr[i] = str[j];
-        vidptr[i + 1] = 0x07;
+        vidptr[i+1] = 0x02;  // Green color
         ++j;
         i = i + 2;
     }
 
-    // Register the Shimjapii module
-    extern const PopModule shimjapii_module;
+    // Initialize keyboard
+    init_keyboard();
+    register_keyboard_callback(keyboard_event);
+
+    // Enable interrupts
+    __asm__ __volatile__("sti");
+
+    // Register and execute the shimjapii module
     register_pop_module(&shimjapii_module);
-
-    // Wait a second
-    delay(1);
-
-    // Execute all registered pop modules
     execute_all_pops(i);
+
+    // Infinite loop to keep the kernel running
+    while(1) {
+        __asm__ __volatile__("hlt");
+    }
 }
