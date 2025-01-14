@@ -10,8 +10,9 @@ NC='\033[0m'
 
 # Configuration variables
 OBJ_DIR="obj"
-BUILD_LOG="build.log"
-CONFIG_FILE=".build_config"
+BUILD_BASE="buildbase"
+BUILD_LOG="$BUILD_BASE/build.log"
+CONFIG_FILE="$BUILD_BASE/.build_config"
 QEMU_MEMORY="256"
 QEMU_CORES="1"
 
@@ -42,6 +43,7 @@ load_config() {
 
 # Save configuration
 save_config() {
+    mkdir -p "$BUILD_BASE"
     echo "QEMU_MEMORY=$QEMU_MEMORY" > "$CONFIG_FILE"
     echo "QEMU_CORES=$QEMU_CORES" >> "$CONFIG_FILE"
 }
@@ -51,6 +53,7 @@ log() {
     local level=$1
     local message=$2
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    mkdir -p "$BUILD_BASE"
     echo "[$timestamp] [$level] $message" >> "$BUILD_LOG"
     
     case $level in
