@@ -198,7 +198,7 @@ settings_menu() {
 # Main menu
 main_menu() {
     while true; do
-        local choice=$(dialog --title "Kernel Build System" \
+        local choice=$(dialog --title "Popcorn Build System - Ultra" \
             --menu "Choose an operation:" 15 60 6 \
             1 "Build Kernel" \
             2 "Clean Build Files" \

@@ -16,11 +16,36 @@ const char scancode_to_ascii[128] = {
     'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 0, '*', 0, ' '
 };
 
+void printTerm(const char* str, unsigned char color) {
+    char *vidptr = (char*)0xb8000;
+    static unsigned int position = 0;
+    unsigned int i = 0;
+
+    // Print each character of the string
+    while(str[i] != '\0') {
+        // Handle newline character
+        if(str[i] == '\n') {
+            position = ((position / 160) + 1) * 160; // Move to start of next line
+            i++;
+            continue;
+        }
+
+        // Print character with color
+        vidptr[position] = str[i];
+        vidptr[position + 1] = color;
+        position += 2;
+        i++;
+
+        // Wrap around if we reach end of screen
+        if(position >= 80 * 25 * 2) {
+            position = 0;
+        }
+    }
+}
+
 // Keyboard event callback function (ISR)
 void keyboard_event_isr(unsigned char scancode) {
-
-    // Read the scancode from the keyboard controller
-    scancode = inb(0x60);
+    // Use the scancode passed as parameter instead of reading it again
 
     // Ignore key release events (scancode with the most significant bit set)
     if (scancode & 0x80) {
@@ -80,17 +105,16 @@ void kmain(void)
     // Enable interrupts
     __asm__ __volatile__("sti");
 
-    // Register and execute the shimjapii module
+    // Register modules once before the loop
     register_pop_module(&shimjapii_module);
     register_pop_module(&spinner_module);
-    execute_all_pops(i);
-
+   
     // Infinite loop to keep the kernel running
     while(1) {
-        // Perform other tasks here
-        // ...
-
-        // Halt the CPU until the next interrupt
-        __asm__ __volatile__("hlt");
+        // Execute all registered modules
+        execute_all_pops(i);
+        printTerm("Hanging here...", 0x0C);
+        // Add a small delay instead of halt
+        delay(1000);
     }
 }
