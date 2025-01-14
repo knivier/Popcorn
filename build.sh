@@ -7,6 +7,7 @@ NC='\033[0m' # No Color
 
 # Directory structure
 SRC_DIR="src"
+OBJ_DIR="src/obj"
 
 # Compiler flags
 CFLAGS="-m32 -c -ffreestanding -O2 -Wall -Wextra -I$SRC_DIR"
@@ -26,9 +27,12 @@ print_status() {
     fi
 }
 
+# Create obj directory if it doesn't exist
+mkdir -p $OBJ_DIR
+
 # Clean old object files
 echo "Cleaning old files..."
-rm -f $SRC_DIR/*.o
+rm -f $OBJ_DIR/*.o
 rm -f kernel
 print_status $? "Cleaned old files"
 
@@ -37,19 +41,19 @@ echo "Building Popcorn Kernel..."
 # Assemble ASM files
 for file in $ASM_FILES; do
     echo "Assembling $file..."
-    nasm -f elf32 $SRC_DIR/$file -o $SRC_DIR/${file%.asm}.o
+    nasm -f elf32 $SRC_DIR/$file -o $OBJ_DIR/${file%.asm}.o
     print_status $? "Assembled $file"
 done
 
 # Compile C files
 for file in $C_FILES; do
     echo "Compiling $file..."
-    gcc $CFLAGS $SRC_DIR/$file -o $SRC_DIR/${file%.c}.o
+    gcc $CFLAGS $SRC_DIR/$file -o $OBJ_DIR/${file%.c}.o
     print_status $? "Compiled $file"
 done
 
 # Get all object files
-OBJ_FILES=$(ls $SRC_DIR/*.o)
+OBJ_FILES=$(ls $OBJ_DIR/*.o)
 
 # Link everything together
 echo "Linking object files..."
