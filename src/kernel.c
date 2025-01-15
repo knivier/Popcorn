@@ -1,6 +1,7 @@
 #include "keyboard_map.h"
 #include "includes/pop_module.h"
 #include "includes/spinner_pop.h"
+#include <stddef.h>
 
 /* there are 25 lines each of 80 columns; each element takes 2 bytes */
 #define LINES 25
@@ -128,7 +129,14 @@ void printTerm(const char *str, unsigned char color)
         vidptr[current_loc++] = color;
     }
 }
-
+/* Simple implementation of memset */
+void *memset(void *s, int c, size_t n) {
+    unsigned char *p = s;
+    while (n--) {
+        *p++ = (unsigned char)c;
+    }
+    return s;
+}
 void keyboard_handler_main(void)
 {
     unsigned char status;
@@ -172,7 +180,7 @@ void kmain(void)
     const char *boot_msg = "Popcorn v0.3 Popped!!!";
     const char *help_msg = "help";
     const char *hang_msg = "Hanging...";
-    char input_buffer[256];
+    char input_buffer[4] = {0};
     unsigned int input_index = 0;
 
     // Clear the screen with dark blue background
@@ -182,7 +190,7 @@ void kmain(void)
         vidptr[j + 1] = 0x10; // Dark blue background
         j += 2;
     }
-
+    
     // Print the welcome message with green text on dark blue background
     unsigned int i = 0;
     while (boot_msg[i] != '\0') {
@@ -212,21 +220,22 @@ void kmain(void)
                 continue;
 
             if (keycode == ENTER_KEY_CODE) {
-                input_buffer[input_index] = '\0';
-                input_index = 0;
-
-                if (strcmp(input_buffer, "help") == 0) {
-                    printTerm(help_msg, 0x07);
-                    while (1); /* Hang */
-                } else if (strcmp(input_buffer, "hang") == 0) {
-                    spinner_pop_func(current_loc);
-                    uptime_module.pop_function(current_loc + 16);
-                    printTerm(hang_msg, 0x04); /* Red color */
-                    while (1); /* Hang */
-                } else {
-                    printTerm(input_buffer, 0x07);
+                if (input_index == 4) {
+                    if (strcmp(input_buffer, "help") == 0) {
+                        printTerm(help_msg, 0x07);
+                        while (1); /* Hang */
+                    } else if (strcmp(input_buffer, "hang") == 0) {
+                        spinner_pop_func(current_loc);
+                        uptime_module.pop_function(current_loc + 16);
+                        printTerm(hang_msg, 0x04); /* Red color */
+                        while (1); /* Hang */
+                    } else {
+                        printTerm(input_buffer, 0x07);
+                    }
+                    kprint_newline();
+                    input_index = 0;
+                    memset(input_buffer, 0, 4);
                 }
-                kprint_newline();
             } else {
                 input_buffer[input_index++] = keyboard_map[(unsigned char)keycode];
                 vidptr[current_loc++] = keyboard_map[(unsigned char)keycode];
@@ -234,4 +243,6 @@ void kmain(void)
             }
         }
     }
+
+    
 }
