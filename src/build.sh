@@ -68,11 +68,12 @@ log() {
 check_status() {
     local status=$?
     local operation=$1
+    local error_message=$2
     
     if [ $status -eq 0 ]; then
         log "SUCCESS" "$operation completed successfully"
     else
-        log "ERROR" "$operation failed with status $status"
+        log "ERROR" "$operation failed with status $status: $error_message"
         if [ -f "$BUILD_LOG" ]; then
             dialog --title "Build Error" --textbox "$BUILD_LOG" 20 70
         fi
@@ -123,6 +124,7 @@ build_kernel() {
     compile_file "pop_module.c" "$OBJ_DIR/pop_module.o" "c"
     compile_file "shimjapii_pop.c" "$OBJ_DIR/shimjapii_pop.o" "c"
     compile_file "input_init.c" "$OBJ_DIR/input_init.o" "c"
+    compile_file "spinner_pop.c" "$OBJ_DIR/spinner_pop.o" "c"  # Added spinner_pop.c
     
     # Link files
     log "INFO" "Linking object files..."
@@ -132,13 +134,19 @@ build_kernel() {
         "$OBJ_DIR"/pop_module.o \
         "$OBJ_DIR"/shimjapii_pop.o \
         "$OBJ_DIR"/idt.o \
-        "$OBJ_DIR"/input_init.o
+        "$OBJ_DIR"/input_init.o \
+        "$OBJ_DIR"/spinner_pop.o 
     
     check_status "Linking object files"
 }
 
 # Run QEMU
 run_qemu() {
+    if [ ! -f "kernel" ]; then
+        log "ERROR" "Kernel file not found. Please build the kernel first."
+        return 1
+    fi
+    
     log "INFO" "Starting QEMU with ${QEMU_MEMORY}MB RAM and ${QEMU_CORES} cores..."
     qemu-system-i386 \
         -kernel kernel \
@@ -196,7 +204,7 @@ settings_menu() {
 # Main menu
 main_menu() {
     while true; do
-        local choice=$(dialog --title "Kernel Build System" \
+        local choice=$(dialog --title "Popcorn Build System - Ultra" \
             --menu "Choose an operation:" 15 60 6 \
             1 "Build Kernel" \
             2 "Clean Build Files" \
