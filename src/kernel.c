@@ -23,6 +23,9 @@ extern char read_port(unsigned short port);
 extern void write_port(unsigned short port, unsigned char data);
 extern void load_idt(unsigned long *idt_ptr);
 
+/* Function forward declarations */
+void scroll_screen(void);
+
 /* current cursor location */
 unsigned int current_loc = 0;
 /* video memory begins at address 0xb8000 */
@@ -65,7 +68,7 @@ void idt_init(void)
     /* ICW2 - remap offset address of IDT */
     /*
     * In x86 protected mode, we have to remap the PICs beyond 0x20 because
-    * Intel have designated the first 32 interrupts as "reserved" for cpu exceptions
+    * Intel has designated the first 32 interrupts as "reserved" for CPU exceptions
     */
     write_port(0x21 , 0x20);
     write_port(0xA1 , 0x28);
@@ -93,7 +96,7 @@ void idt_init(void)
 
 void kb_init(void)
 {
-    /* 0xFD is 11111101 - enables only IRQ1 (keyboard)*/
+    /* 0xFD is 11111101 - enables only IRQ1 (keyboard) */
     write_port(0x21 , 0xFD);
 }
 
@@ -103,6 +106,9 @@ void kprint(const char *str)
     while (str[i] != '\0') {
         vidptr[current_loc++] = str[i++];
         vidptr[current_loc++] = 0x07;
+        if (current_loc >= SCREENSIZE) {
+            scroll_screen();
+        }
     }
 }
 
@@ -110,6 +116,9 @@ void kprint_newline(void)
 {
     unsigned int line_size = BYTES_FOR_EACH_ELEMENT * COLUMNS_IN_LINE;
     current_loc = current_loc + (line_size - current_loc % (line_size));
+    if (current_loc >= SCREENSIZE) {
+        scroll_screen();
+    }
 }
 
 void clear_screen(void)
@@ -119,6 +128,7 @@ void clear_screen(void)
         vidptr[i++] = ' ';
         vidptr[i++] = 0x07;
     }
+    current_loc = 0;
 }
 
 void printTerm(const char *str, unsigned char color)
@@ -127,8 +137,12 @@ void printTerm(const char *str, unsigned char color)
     while (str[i] != '\0') {
         vidptr[current_loc++] = str[i++];
         vidptr[current_loc++] = color;
+        if (current_loc >= SCREENSIZE) {
+            scroll_screen();
+        }
     }
 }
+
 /* Simple implementation of memset */
 void *memset(void *s, int c, size_t n) {
     unsigned char *p = s;
@@ -137,6 +151,7 @@ void *memset(void *s, int c, size_t n) {
     }
     return s;
 }
+
 void keyboard_handler_main(void)
 {
     unsigned char status;
@@ -149,16 +164,19 @@ void keyboard_handler_main(void)
     /* Lowest bit of status will be set if buffer is not empty */
     if (status & 0x01) {
         keycode = read_port(KEYBOARD_DATA_PORT);
-        if(keycode < 0)
+        if (keycode < 0)
             return;
 
-        if(keycode == ENTER_KEY_CODE) {
+        if (keycode == ENTER_KEY_CODE) {
             kprint_newline();
             return;
         }
 
         vidptr[current_loc++] = keyboard_map[(unsigned char) keycode];
         vidptr[current_loc++] = 0x07;
+        if (current_loc >= SCREENSIZE) {
+            scroll_screen();
+        }
     }
 }
 
@@ -175,12 +193,27 @@ extern const PopModule spinner_module;
 extern const PopModule uptime_module;
 extern const PopModule shimjapii_module;
 
+void scroll_screen(void)
+{
+    /* Move the content of the video memory up by one line */
+    for (unsigned int i = 0; i < (LINES - 1) * COLUMNS_IN_LINE * BYTES_FOR_EACH_ELEMENT; i++) {
+        vidptr[i] = vidptr[i + COLUMNS_IN_LINE * BYTES_FOR_EACH_ELEMENT];
+    }
+    /* Clear the last line */
+    for (unsigned int i = (LINES - 1) * COLUMNS_IN_LINE * BYTES_FOR_EACH_ELEMENT; i < SCREENSIZE; i += 2) {
+        vidptr[i] = ' ';
+        vidptr[i + 1] = 0x07;
+    }
+    /* Adjust the current location */
+    current_loc -= COLUMNS_IN_LINE * BYTES_FOR_EACH_ELEMENT;
+}
+
 void kmain(void)
 {
     const char *boot_msg = "Popcorn v0.3 Popped!!!";
-    const char *help_msg = "help";
+    const char *help_msg = "Help Command Executed!";
     const char *hang_msg = "Hanging...";
-    char input_buffer[4] = {0};
+    char input_buffer[5] = {0}; // Increased size to accommodate null terminator
     unsigned int input_index = 0;
 
     // Clear the screen with dark blue background
@@ -206,11 +239,11 @@ void kmain(void)
     register_pop_module(&spinner_module);
     register_pop_module(&uptime_module);
     
-
     while (1) {
         /* Wait for user input */
         unsigned char status;
         char keycode;
+
         execute_all_pops(current_loc);
 
         status = read_port(KEYBOARD_STATUS_PORT);
@@ -220,29 +253,33 @@ void kmain(void)
                 continue;
 
             if (keycode == ENTER_KEY_CODE) {
-                if (input_index == 4) {
-                    if (strcmp(input_buffer, "help") == 0) {
-                        printTerm(help_msg, 0x07);
-                        while (1); /* Hang */
-                    } else if (strcmp(input_buffer, "hang") == 0) {
-                        spinner_pop_func(current_loc);
-                        uptime_module.pop_function(current_loc + 16);
-                        printTerm(hang_msg, 0x04); /* Red color */
-                        while (1); /* Hang */
-                    } else {
-                        printTerm(input_buffer, 0x07);
-                    }
-                    kprint_newline();
-                    input_index = 0;
-                    memset(input_buffer, 0, 4);
+                input_buffer[input_index] = '\0'; // Null-terminate the input buffer
+                kprint("Input received: ");
+                kprint(input_buffer); // Print the input buffer for debugging
+                kprint("\n");
+
+                if (strcmp(input_buffer, "help") == 0) {
+                    kprint(help_msg);
+                    while (1); /* Hang */
+                } else if (strcmp(input_buffer, "hang") == 0) {
+                    spinner_pop_func(current_loc);
+                    uptime_module.pop_function(current_loc + 16);
+                    kprint(hang_msg);
+                    while (1); /* Hang */
+                } else {
+                    kprint(input_buffer);
                 }
-            } else {
+                kprint_newline();
+                input_index = 0;
+                memset(input_buffer, 0, sizeof(input_buffer));
+            } else if (input_index < sizeof(input_buffer) - 1) {
                 input_buffer[input_index++] = keyboard_map[(unsigned char)keycode];
                 vidptr[current_loc++] = keyboard_map[(unsigned char)keycode];
                 vidptr[current_loc++] = 0x07;
+                if (current_loc >= SCREENSIZE) {
+                    scroll_screen();
+                }
             }
         }
     }
-
-    
 }
