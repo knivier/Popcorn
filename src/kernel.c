@@ -2,6 +2,7 @@
 #include "includes/pop_module.h"
 #include "includes/spinner_pop.h"
 #include <stddef.h>
+#include <stdbool.h>
 
 /* there are 25 lines each of 80 columns; each element takes 2 bytes */
 #define LINES 25
@@ -23,8 +24,13 @@ extern char read_port(unsigned short port);
 extern void write_port(unsigned short port, unsigned char data);
 extern void load_idt(unsigned long *idt_ptr);
 
+/* Global variables */
+char input_buffer[128] = {0}; // Increased size to accommodate longer input
+unsigned int input_index = 0;
+
 /* Function forward declarations */
 void scroll_screen(void);
+void execute_command(const char *command);
 
 /* current cursor location */
 unsigned int current_loc = 0;
@@ -168,14 +174,24 @@ void keyboard_handler_main(void)
             return;
 
         if (keycode == ENTER_KEY_CODE) {
-            kprint_newline();
+            input_buffer[input_index] = '\0'; // Null-terminate the input buffer
+            kprint("Input received: ");
+            kprint(input_buffer); // Print the input buffer for debugging
+            kprint("\n");
+
+            execute_command(input_buffer);
+            input_index = 0;
+            memset(input_buffer, 0, sizeof(input_buffer));
             return;
         }
 
-        vidptr[current_loc++] = keyboard_map[(unsigned char) keycode];
-        vidptr[current_loc++] = 0x07;
-        if (current_loc >= SCREENSIZE) {
-            scroll_screen();
+        if (input_index < sizeof(input_buffer) - 1) {
+            input_buffer[input_index++] = keyboard_map[(unsigned char)keycode];
+            vidptr[current_loc++] = keyboard_map[(unsigned char)keycode];
+            vidptr[current_loc++] = 0x07;
+            if (current_loc >= SCREENSIZE) {
+                scroll_screen();
+            }
         }
     }
 }
@@ -196,25 +212,36 @@ extern const PopModule shimjapii_module;
 void scroll_screen(void)
 {
     /* Move the content of the video memory up by one line */
-    for (unsigned int i = 0; i < (LINES - 1) * COLUMNS_IN_LINE * BYTES_FOR_EACH_ELEMENT; i++) {
+    unsigned int i;
+    for (i = 0; i < (LINES - 1) * COLUMNS_IN_LINE * BYTES_FOR_EACH_ELEMENT; i++) {
         vidptr[i] = vidptr[i + COLUMNS_IN_LINE * BYTES_FOR_EACH_ELEMENT];
     }
-    /* Clear the last line */
-    for (unsigned int i = (LINES - 1) * COLUMNS_IN_LINE * BYTES_FOR_EACH_ELEMENT; i < SCREENSIZE; i += 2) {
+    /* Clear the last line with the same background color */
+    for (i = (LINES - 1) * COLUMNS_IN_LINE * BYTES_FOR_EACH_ELEMENT; i < SCREENSIZE; i += 2) {
         vidptr[i] = ' ';
-        vidptr[i + 1] = 0x07;
+        vidptr[i + 1] = 0x10; // Dark blue background with white text
     }
     /* Adjust the current location */
     current_loc -= COLUMNS_IN_LINE * BYTES_FOR_EACH_ELEMENT;
 }
 
+void execute_command(const char *command)
+{
+    if (strcmp(command, "help") == 0) {
+        kprint("Help Command Executed!");
+    } else if (strcmp(command, "hang") == 0) {
+        spinner_pop_func(current_loc);
+        uptime_module.pop_function(current_loc + 16);
+        kprint("Hanging...");
+    } else {
+        kprint(command);
+    }
+    kprint_newline();
+}
+
 void kmain(void)
 {
     const char *boot_msg = "Popcorn v0.3 Popped!!!";
-    const char *help_msg = "Help Command Executed!";
-    const char *hang_msg = "Hanging...";
-    char input_buffer[5] = {0}; // Increased size to accommodate null terminator
-    unsigned int input_index = 0;
 
     // Clear the screen with dark blue background
     unsigned int j = 0;
@@ -238,7 +265,7 @@ void kmain(void)
     register_pop_module(&shimjapii_module);
     register_pop_module(&spinner_module);
     register_pop_module(&uptime_module);
-    
+
     while (1) {
         /* Wait for user input */
         unsigned char status;
@@ -258,18 +285,7 @@ void kmain(void)
                 kprint(input_buffer); // Print the input buffer for debugging
                 kprint("\n");
 
-                if (strcmp(input_buffer, "help") == 0) {
-                    kprint(help_msg);
-                    while (1); /* Hang */
-                } else if (strcmp(input_buffer, "hang") == 0) {
-                    spinner_pop_func(current_loc);
-                    uptime_module.pop_function(current_loc + 16);
-                    kprint(hang_msg);
-                    while (1); /* Hang */
-                } else {
-                    kprint(input_buffer);
-                }
-                kprint_newline();
+                execute_command(input_buffer);
                 input_index = 0;
                 memset(input_buffer, 0, sizeof(input_buffer));
             } else if (input_index < sizeof(input_buffer) - 1) {
