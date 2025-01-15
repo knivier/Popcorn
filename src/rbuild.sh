@@ -20,22 +20,19 @@ build_kernel() {
     if [ $? -ne 0 ]; then exit 1; fi
     
     # Compile C files
-    gcc -m32 -c kernel.c -o "$OBJ_DIR/kc.o" -Wall -Wextra
+    gcc -m32 -c kernel.c -o "$OBJ_DIR/kc.o" -Wall -Wextra -fno-stack-protector
     if [ $? -ne 0 ]; then exit 1; fi
     
-    gcc -m32 -c pop_module.c -o "$OBJ_DIR/pop_module.o" -Wall -Wextra
+    gcc -m32 -c pop_module.c -o "$OBJ_DIR/pop_module.o" -Wall -Wextra -fno-stack-protector
     if [ $? -ne 0 ]; then exit 1; fi
     
-    gcc -m32 -c shimjapii_pop.c -o "$OBJ_DIR/shimjapii_pop.o" -Wall -Wextra
+    gcc -m32 -c shimjapii_pop.c -o "$OBJ_DIR/shimjapii_pop.o" -Wall -Wextra -fno-stack-protector
     if [ $? -ne 0 ]; then exit 1; fi
     
-    gcc -m32 -c input_init.c -o "$OBJ_DIR/input_init.o" -Wall -Wextra
-    if [ $? -ne 0 ]; then exit 1; fi
-    
-    gcc -m32 -c spinner_pop.c -o "$OBJ_DIR/spinner_pop.o" -Wall -Wextra
+    gcc -m32 -c spinner_pop.c -o "$OBJ_DIR/spinner_pop.o" -Wall -Wextra -fno-stack-protector
     if [ $? -ne 0 ]; then exit 1; fi
 
-    gcc -m32 -c uptime_pop.c -o "$OBJ_DIR/uptime_pop.o" -Wall -Wextra
+    gcc -m32 -c uptime_pop.c -o "$OBJ_DIR/uptime_pop.o" -Wall -Wextra -fno-stack-protector
     if [ $? -ne 0 ]; then exit 1; fi
 
 
@@ -46,7 +43,6 @@ build_kernel() {
         "$OBJ_DIR"/pop_module.o \
         "$OBJ_DIR"/shimjapii_pop.o \
         "$OBJ_DIR"/idt.o \
-        "$OBJ_DIR"/input_init.o \
         "$OBJ_DIR"/spinner_pop.o \
         "$OBJ_DIR"/uptime_pop.o
 }

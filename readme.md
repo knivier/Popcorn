@@ -37,3 +37,6 @@ After building the project, you can run the kernel using QEMU with the command p
 
 ### Future Plans
 The project is still in its early stages and marked as unstable. Future updates will include more features and improvements to the kernel framework.
+
+### Contributions
+Thank you to Swarnim A for showing me this intel book that made inputs possible for this kernel. 
