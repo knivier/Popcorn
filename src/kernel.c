@@ -132,7 +132,7 @@ void clear_screen(void)
     unsigned int i = 0;
     while (i < SCREENSIZE) {
         vidptr[i++] = ' ';
-        vidptr[i++] = 0x07;
+        vidptr[i++] = 0x10; // Dark blue background with white text
     }
     current_loc = 0;
 }
@@ -207,7 +207,6 @@ int strcmp(const char *str1, const char *str2) {
 
 extern const PopModule spinner_module;
 extern const PopModule uptime_module;
-extern const PopModule shimjapii_module;
 
 void scroll_screen(void)
 {
@@ -227,8 +226,14 @@ void scroll_screen(void)
 
 void execute_command(const char *command)
 {
-    if (strcmp(command, "help") == 0) {
-        kprint("Help Command Executed!");
+    if (strcmp(command, "help") == 0 || strcmp(command, "halp") == 0) {
+        kprint_newline();
+        kprint("hang T hangs the system in a loop");
+        kprint_newline();
+        kprint("cear T clears the screen");
+        kprint_newline();
+        kprint("upte T prints the uptime");
+        kprint_newline();
     } else if (strcmp(command, "hang") == 0) {
         spinner_pop_func(current_loc);
         uptime_module.pop_function(current_loc + 16);
@@ -236,6 +241,10 @@ void execute_command(const char *command)
     } else if (strcmp(command, "cear") == 0) {
         clear_screen();
         kprint("Screen cleared!");
+    } else if (strcmp(command, "upte") == 0) {
+        uptime_module.pop_function(current_loc);
+        kprint("Uptime: ");
+        kprint(uptime_module.message);
     } else {
         kprint(command);
     }
@@ -265,7 +274,6 @@ void kmain(void)
 
     idt_init();
     kb_init();
-    register_pop_module(&shimjapii_module);
     register_pop_module(&spinner_module);
     register_pop_module(&uptime_module);
 
@@ -275,19 +283,17 @@ void kmain(void)
         char keycode;
 
         execute_all_pops(current_loc);
-
         status = read_port(KEYBOARD_STATUS_PORT);
         if (status & 0x01) {
             keycode = read_port(KEYBOARD_DATA_PORT);
             if (keycode < 0)
                 continue;
-
             if (keycode == ENTER_KEY_CODE) {
                 input_buffer[input_index] = '\0'; // Null-terminate the input buffer
                 kprint_newline();
                 kprint("Input received: ");
                 kprint(input_buffer); // Print the input buffer for debugging
-                kprint("\n");
+                kprint_newline();
 
                 execute_command(input_buffer);
                 input_index = 0;
