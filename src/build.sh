@@ -68,11 +68,12 @@ log() {
 check_status() {
     local status=$?
     local operation=$1
+    local error_message=$2
     
     if [ $status -eq 0 ]; then
         log "SUCCESS" "$operation completed successfully"
     else
-        log "ERROR" "$operation failed with status $status"
+        log "ERROR" "$operation failed with status $status: $error_message"
         if [ -f "$BUILD_LOG" ]; then
             dialog --title "Build Error" --textbox "$BUILD_LOG" 20 70
         fi
@@ -134,13 +135,18 @@ build_kernel() {
         "$OBJ_DIR"/shimjapii_pop.o \
         "$OBJ_DIR"/idt.o \
         "$OBJ_DIR"/input_init.o \
-        "$OBJ_DIR"/spinner_pop.o  # Added spinner_pop.o to linking
+        "$OBJ_DIR"/spinner_pop.o 
     
     check_status "Linking object files"
 }
 
 # Run QEMU
 run_qemu() {
+    if [ ! -f "kernel" ]; then
+        log "ERROR" "Kernel file not found. Please build the kernel first."
+        return 1
+    fi
+    
     log "INFO" "Starting QEMU with ${QEMU_MEMORY}MB RAM and ${QEMU_CORES} cores..."
     qemu-system-i386 \
         -kernel kernel \

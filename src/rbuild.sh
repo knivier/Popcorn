@@ -46,12 +46,5 @@ build_kernel() {
         "$OBJ_DIR"/spinner_pop.o
 }
 
-# Run the kernel
-run_kernel() {
-    qemu-system-i386 -kernel kernel
-}
-
-run_kernel
-
 clean_build
 build_kernel

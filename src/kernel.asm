@@ -2,6 +2,7 @@
 
 ;nasm directive - 32 bit
 bits 32
+section .note.GNU-stack noalloc noexec nowrite progbits
 section .text
         align 4
         dd 0x1BADB002            ;magic
