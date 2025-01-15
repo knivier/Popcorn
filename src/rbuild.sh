@@ -1,5 +1,5 @@
 #!/bin/bash
-
+# The simple builder
 OBJ_DIR="obj"
 
 # Clean build files

@@ -58,7 +58,7 @@ void keyboard_event_isr(unsigned char scancode) {
         static unsigned int pos = 0;
 
         vidptr[pos] = scancode_to_ascii[scancode];
-        vidptr[pos + 1] = 0x02;  // Green color
+        vidptr[pos + 1] = 0x12;  // Green color on dark blue background
         pos += 2;
     }
 
@@ -81,19 +81,19 @@ void kmain(void)
     unsigned int i = 0;
     unsigned int j = 0;
 
-    // Clear the screen
+    // Clear the screen with dark blue background
     while(j < 80 * 25 * 2) {
         vidptr[j] = ' ';
-        vidptr[j+1] = 0x00;         
+        vidptr[j+1] = 0x10;         
         j = j + 2;
     }
 
     j = 0;
 
-    // Print the welcome message
+    // Print the welcome message with green text on dark blue background
     while(str[j] != '\0') {
         vidptr[i] = str[j];
-        vidptr[i+1] = 0x02;  // Green color
+        vidptr[i+1] = 0x12;  // Green color on dark blue background
         ++j;
         i = i + 2;
     }
@@ -113,7 +113,7 @@ void kmain(void)
     while(1) {
         // Execute all registered modules
         execute_all_pops(i);
-        printTerm("Hanging here...", 0x0C);
+        printTerm("Hanging here...", 0x1C);  // Red text on dark blue background
         // Add a small delay instead of halt
         delay(1000);
     }
