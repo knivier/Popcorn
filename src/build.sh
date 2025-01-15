@@ -18,7 +18,7 @@ QEMU_CORES="1"
 
 # Check for required tools
 check_dependencies() {
-    local DEPS=("nasm" "gcc" "ld" "qemu-system-i386" "dialog")
+    local DEPS=("nasm" "gcc" "ld" "qemu-system-i386" "dialog" "dialog")
     local MISSING=()
     
     for dep in "${DEPS[@]}"; do
@@ -64,7 +64,8 @@ log() {
     esac
 }
 
-# Enhanced status checker
+# filepath: src/build.sh
+# ...existing code...
 check_status() {
     local status=$?
     local operation=$1
@@ -80,6 +81,8 @@ check_status() {
         exit 1
     fi
 }
+# ...existing code...
+
 
 # Clean build files
 clean_build() {
@@ -103,7 +106,7 @@ compile_file() {
             nasm -f elf32 "$file" -o "$output"
             ;;
         "c")
-            gcc -m32 -c "$file" -o "$output" -Wall -Wextra
+            gcc -m32 -c "$file" -o "$output" -Wall -Wextra -fno-stack-protector
             ;;
     esac
     
@@ -123,21 +126,33 @@ build_kernel() {
     compile_file "kernel.c" "$OBJ_DIR/kc.o" "c"
     compile_file "pop_module.c" "$OBJ_DIR/pop_module.o" "c"
     compile_file "shimjapii_pop.c" "$OBJ_DIR/shimjapii_pop.o" "c"
-    compile_file "input_init.c" "$OBJ_DIR/input_init.o" "c"
     compile_file "spinner_pop.c" "$OBJ_DIR/spinner_pop.o" "c"  # Added spinner_pop.c
     compile_file "uptime_pop.c" "$OBJ_DIR/uptime_pop.o" "c"  # Added uptime_pop.c
     
     # Link files
     log "INFO" "Linking object files..."
+    
+    # Check if all object files exist
+    for obj in "$OBJ_DIR"/kasm.o "$OBJ_DIR"/kc.o "$OBJ_DIR"/pop_module.o "$OBJ_DIR"/shimjapii_pop.o "$OBJ_DIR"/idt.o "$OBJ_DIR"/spinner_pop.o "$OBJ_DIR"/uptime_pop.o; do
+        if [ ! -f "$obj" ]; then
+            log "ERROR" "Missing object file: $obj"
+            exit 1
+        fi
+    done
+    
+    if [ ! -f "link.ld" ]; then
+        log "ERROR" "Linker script link.ld not found."
+        exit 1
+    fi
+
     ld -m elf_i386 -T link.ld -o kernel \
-        "$OBJ_DIR"/kasm.o \
-        "$OBJ_DIR"/kc.o \
-        "$OBJ_DIR"/pop_module.o \
-        "$OBJ_DIR"/shimjapii_pop.o \
-        "$OBJ_DIR"/idt.o \
-        "$OBJ_DIR"/input_init.o \
-        "$OBJ_DIR"/spinner_pop.o \
-        "$OBJ_DIR"/uptime_pop.o
+        "$OBJ_DIR/kasm.o" \
+        "$OBJ_DIR/kc.o" \
+        "$OBJ_DIR/pop_module.o" \
+        "$OBJ_DIR/shimjapii_pop.o" \
+        "$OBJ_DIR/idt.o" \
+        "$OBJ_DIR/spinner_pop.o" \
+        "$OBJ_DIR/uptime_pop.o"
     
     check_status "Linking object files"
 }
