@@ -163,29 +163,48 @@ int strcmp(const char *str1, const char *str2) {
     return *(unsigned char *)str1 - *(unsigned char *)str2;
 }
 
-extern void uptime_pop_func(void);
+extern const PopModule spinner_module;
+extern const PopModule uptime_module;
+extern const PopModule shimjapii_module;
 
 void kmain(void)
 {
-    const char *boot_msg = "Popcorn 0.4 Booted!";
+    const char *boot_msg = "Popcorn v0.3 Popped!!!";
     const char *help_msg = "help";
     const char *hang_msg = "Hanging...";
     char input_buffer[256];
     unsigned int input_index = 0;
 
-    clear_screen();
-    printTerm(boot_msg, 0x07);
-    kprint_newline();
-    kprint_newline();
+    // Clear the screen with dark blue background
+    unsigned int j = 0;
+    while (j < 80 * 25 * 2) {
+        vidptr[j] = ' ';
+        vidptr[j + 1] = 0x10; // Dark blue background
+        j += 2;
+    }
+
+    // Print the welcome message with green text on dark blue background
+    unsigned int i = 0;
+    while (boot_msg[i] != '\0') {
+        vidptr[i * 2] = boot_msg[i];
+        vidptr[i * 2 + 1] = 0x12; // Green color on dark blue background
+        i++;
+    }
+    current_loc = i * 2;
 
     idt_init();
     kb_init();
+    register_pop_module(&shimjapii_module);
+    register_pop_module(&spinner_module);
+    register_pop_module(&uptime_module);
 
     while (1) {
         /* Wait for user input */
         unsigned char status;
         char keycode;
+        spinner_module.pop_function(current_loc);
 
+        printTerm(hang_msg, 0x04); /* Red color */
         status = read_port(KEYBOARD_STATUS_PORT);
         if (status & 0x01) {
             keycode = read_port(KEYBOARD_DATA_PORT);
@@ -201,7 +220,7 @@ void kmain(void)
                     while (1); /* Hang */
                 } else if (strcmp(input_buffer, "hang") == 0) {
                     spinner_pop_func(current_loc);
-                    uptime_pop_func();
+                    uptime_module.pop_function(current_loc + 16);
                     printTerm(hang_msg, 0x04); /* Red color */
                     while (1); /* Hang */
                 } else {
