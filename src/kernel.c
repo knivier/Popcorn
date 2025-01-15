@@ -197,14 +197,14 @@ void kmain(void)
     register_pop_module(&shimjapii_module);
     register_pop_module(&spinner_module);
     register_pop_module(&uptime_module);
+    
 
     while (1) {
         /* Wait for user input */
         unsigned char status;
         char keycode;
-        spinner_module.pop_function(current_loc);
+        execute_all_pops(current_loc);
 
-        printTerm(hang_msg, 0x04); /* Red color */
         status = read_port(KEYBOARD_STATUS_PORT);
         if (status & 0x01) {
             keycode = read_port(KEYBOARD_DATA_PORT);
