@@ -232,7 +232,10 @@ void execute_command(const char *command)
     } else if (strcmp(command, "hang") == 0) {
         spinner_pop_func(current_loc);
         uptime_module.pop_function(current_loc + 16);
-        kprint("Hanging...");
+        while (1) {kprint("Hanging..."); }
+    } else if (strcmp(command, "cear") == 0) {
+        clear_screen();
+        kprint("Screen cleared!");
     } else {
         kprint(command);
     }
@@ -281,6 +284,7 @@ void kmain(void)
 
             if (keycode == ENTER_KEY_CODE) {
                 input_buffer[input_index] = '\0'; // Null-terminate the input buffer
+                kprint_newline();
                 kprint("Input received: ");
                 kprint(input_buffer); // Print the input buffer for debugging
                 kprint("\n");
