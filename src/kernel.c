@@ -7,6 +7,7 @@
 
 extern const PopModule shimjapii_module;
 extern const PopModule spinner_module;
+extern const PopModule uptime_module;
 
 // Define the scancode to ASCII mapping
 const char scancode_to_ascii[128] = {
@@ -108,7 +109,8 @@ void kmain(void)
     // Register modules once before the loop
     register_pop_module(&shimjapii_module);
     register_pop_module(&spinner_module);
-   
+    register_pop_module(&uptime_module);
+
     // Infinite loop to keep the kernel running
     while(1) {
         // Execute all registered modules
