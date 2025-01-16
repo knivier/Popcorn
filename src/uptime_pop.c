@@ -47,6 +47,11 @@ void uptime_pop_func(unsigned int start_pos) {
     char* vidptr = (char*)0xb8000;
     j = 0;
 
+    // Calculate the starting position for the upper right corner
+    unsigned int screen_width = 80;
+    unsigned int buffer_length = i;
+    start_pos = (screen_width - buffer_length) * 2 - 2;
+
     while (buffer[j] != '\0') {
         vidptr[start_pos] = buffer[j];
         vidptr[start_pos + 1] = 0x07;  // White color

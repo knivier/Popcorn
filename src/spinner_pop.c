@@ -32,6 +32,7 @@ void spinner_pop_func(unsigned int start_pos) {
     delay(1000);
 }
 
+
 const PopModule spinner_module = {
     .name = "spinner",
     .message = "Spinning loader animation",

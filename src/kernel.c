@@ -175,6 +175,7 @@ void keyboard_handler_main(void)
 
         if (keycode == ENTER_KEY_CODE) {
             input_buffer[input_index] = '\0'; // Null-terminate the input buffer
+            kprint_newline();
             kprint("Input received: ");
             kprint(input_buffer); // Print the input buffer for debugging
             kprint("\n");
@@ -235,6 +236,7 @@ void execute_command(const char *command)
         kprint("upte T prints the uptime");
         kprint_newline();
     } else if (strcmp(command, "hang") == 0) {
+        kprint_newline();
         spinner_pop_func(current_loc);
         uptime_module.pop_function(current_loc + 16);
         while (1) {kprint("Hanging..."); }
@@ -242,14 +244,15 @@ void execute_command(const char *command)
         clear_screen();
         kprint("Screen cleared!");
     } else if (strcmp(command, "upte") == 0) {
-        uptime_module.pop_function(current_loc);
+        kprint_newline();
         kprint("Uptime: ");
-        kprint(uptime_module.message);
+        uptime_module.pop_function(current_loc);
+        kprint_newline();
     } else {
         kprint(command);
     }
     kprint_newline();
-}
+} 
 
 void kmain(void)
 {
@@ -294,7 +297,6 @@ void kmain(void)
                 kprint("Input received: ");
                 kprint(input_buffer); // Print the input buffer for debugging
                 kprint_newline();
-
                 execute_command(input_buffer);
                 input_index = 0;
                 memset(input_buffer, 0, sizeof(input_buffer));
