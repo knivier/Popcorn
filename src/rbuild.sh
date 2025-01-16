@@ -35,6 +35,8 @@ build_kernel() {
     gcc -m32 -c uptime_pop.c -o "$OBJ_DIR/uptime_pop.o" -Wall -Wextra -fno-stack-protector
     if [ $? -ne 0 ]; then exit 1; fi
 
+    gcc -m32 -c halt_pop.c -o "$OBJ_DIR/halt_pop.o" -Wall -Wextra -fno-stack-protector
+    if [ $? -ne 0 ]; then exit 1; fi
 
     # Link files
     ld -m elf_i386 -T link.ld -o kernel \
@@ -44,7 +46,8 @@ build_kernel() {
         "$OBJ_DIR"/shimjapii_pop.o \
         "$OBJ_DIR"/idt.o \
         "$OBJ_DIR"/spinner_pop.o \
-        "$OBJ_DIR"/uptime_pop.o
+        "$OBJ_DIR"/uptime_pop.o \
+        "$OBJ_DIR"/halt_pop.o
 }
 
 # Run the kernel

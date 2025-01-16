@@ -31,6 +31,8 @@ unsigned int input_index = 0;
 /* Function forward declarations */
 void scroll_screen(void);
 void execute_command(const char *command);
+void int_to_str(int num, char *str);
+int get_tick_count(void);
 
 /* current cursor location */
 unsigned int current_loc = 0;
@@ -175,6 +177,7 @@ void keyboard_handler_main(void)
 
         if (keycode == ENTER_KEY_CODE) {
             input_buffer[input_index] = '\0'; // Null-terminate the input buffer
+            kprint_newline();
             kprint("Input received: ");
             kprint(input_buffer); // Print the input buffer for debugging
             kprint("\n");
@@ -207,6 +210,7 @@ int strcmp(const char *str1, const char *str2) {
 
 extern const PopModule spinner_module;
 extern const PopModule uptime_module;
+extern const PopModule halt_module;
 
 void scroll_screen(void)
 {
@@ -234,7 +238,10 @@ void execute_command(const char *command)
         kprint_newline();
         kprint("upte T prints the uptime");
         kprint_newline();
+        kprint("halt T halts the system");
+        kprint_newline();
     } else if (strcmp(command, "hang") == 0) {
+        kprint_newline();
         spinner_pop_func(current_loc);
         uptime_module.pop_function(current_loc + 16);
         while (1) {kprint("Hanging..."); }
@@ -242,14 +249,48 @@ void execute_command(const char *command)
         clear_screen();
         kprint("Screen cleared!");
     } else if (strcmp(command, "upte") == 0) {
-        uptime_module.pop_function(current_loc);
+        kprint_newline();
+        char buffer[64];
+        int_to_str(get_tick_count(), buffer);
         kprint("Uptime: ");
-        kprint(uptime_module.message);
+        kprint(buffer);
+        kprint_newline();
+        int ticks = get_tick_count();
+        int ticks_per_second = ticks / 70; 
+        int_to_str(ticks_per_second, buffer);
+        kprint(" (");
+        kprint(buffer);
+        kprint(" seconds EST)");
+        kprint_newline(); 
+    } else if (strcmp(command, "halt") == 0) {
+        kprint_newline();
+        kprint("System halted. Press Enter to continue...");
+        while (1) {
+            unsigned char status = read_port(KEYBOARD_STATUS_PORT);
+            if (status & 0x01) {
+                char keycode = read_port(KEYBOARD_DATA_PORT);
+                if (keycode == ENTER_KEY_CODE) {
+                    clear_screen();
+                    kprint("System resumed!");
+                    break;
+                }
+            }
+            halt_module.pop_function(current_loc);
+        }
+    } else if (strcmp(command, "stop") == 0) {
+            kprint_newline();
+            kprint("Shutting down...");
+            // Send shutdown command to QEMU/Bochs via port 0x604
+            write_port(0x64, 0xFE);  // Send reset command to keyboard controller
+            // If shutdown fails, halt the CPU
+            asm volatile("hlt");
     } else {
         kprint(command);
+        kprint(" was not found");
+        kprint_newline();
     }
     kprint_newline();
-}
+} 
 
 void kmain(void)
 {
@@ -294,7 +335,6 @@ void kmain(void)
                 kprint("Input received: ");
                 kprint(input_buffer); // Print the input buffer for debugging
                 kprint_newline();
-
                 execute_command(input_buffer);
                 input_index = 0;
                 memset(input_buffer, 0, sizeof(input_buffer));
