@@ -31,6 +31,8 @@ unsigned int input_index = 0;
 /* Function forward declarations */
 void scroll_screen(void);
 void execute_command(const char *command);
+void int_to_str(int num, char *str);
+int get_tick_count(void);
 
 /* current cursor location */
 unsigned int current_loc = 0;
@@ -245,11 +247,22 @@ void execute_command(const char *command)
         kprint("Screen cleared!");
     } else if (strcmp(command, "upte") == 0) {
         kprint_newline();
+        char buffer[64];
+        int_to_str(get_tick_count(), buffer);
         kprint("Uptime: ");
-        uptime_module.pop_function(current_loc);
+        kprint(buffer);
+        kprint_newline();
+        int ticks = get_tick_count();
+        int ticks_per_second = ticks / 70; 
+        int_to_str(ticks_per_second, buffer);
+        kprint(" (");
+        kprint(buffer);
+        kprint(" seconds EST)");
         kprint_newline();
     } else {
         kprint(command);
+        kprint(" was not found");
+        kprint_newline();
     }
     kprint_newline();
 } 

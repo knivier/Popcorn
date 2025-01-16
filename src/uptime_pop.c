@@ -65,3 +65,6 @@ const PopModule uptime_module = {
     .message = "Displays the tick counter",
     .pop_function = uptime_pop_func
 };
+unsigned int get_tick_count(void) {
+    return tick_counter;
+}
