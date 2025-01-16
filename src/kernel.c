@@ -210,6 +210,7 @@ int strcmp(const char *str1, const char *str2) {
 
 extern const PopModule spinner_module;
 extern const PopModule uptime_module;
+extern const PopModule halt_module;
 
 void scroll_screen(void)
 {
@@ -237,6 +238,8 @@ void execute_command(const char *command)
         kprint_newline();
         kprint("upte T prints the uptime");
         kprint_newline();
+        kprint("halt T halts the system");
+        kprint_newline();
     } else if (strcmp(command, "hang") == 0) {
         kprint_newline();
         spinner_pop_func(current_loc);
@@ -258,7 +261,29 @@ void execute_command(const char *command)
         kprint(" (");
         kprint(buffer);
         kprint(" seconds EST)");
+        kprint_newline(); 
+    } else if (strcmp(command, "halt") == 0) {
         kprint_newline();
+        kprint("System halted. Press Enter to continue...");
+        while (1) {
+            unsigned char status = read_port(KEYBOARD_STATUS_PORT);
+            if (status & 0x01) {
+                char keycode = read_port(KEYBOARD_DATA_PORT);
+                if (keycode == ENTER_KEY_CODE) {
+                    clear_screen();
+                    kprint("System resumed!");
+                    break;
+                }
+            }
+            halt_module.pop_function(current_loc);
+        }
+    } else if (strcmp(command, "stop") == 0) {
+            kprint_newline();
+            kprint("Shutting down...");
+            // Send shutdown command to QEMU/Bochs via port 0x604
+            write_port(0x64, 0xFE);  // Send reset command to keyboard controller
+            // If shutdown fails, halt the CPU
+            asm volatile("hlt");
     } else {
         kprint(command);
         kprint(" was not found");
