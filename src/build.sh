@@ -18,7 +18,7 @@ QEMU_CORES="1"
 
 # Check for required tools
 check_dependencies() {
-    local DEPS=("nasm" "gcc" "ld" "qemu-system-i386" "dialog" "dialog")
+    local DEPS=("nasm" "gcc" "ld" "qemu-system-i386" "dialog")
     local MISSING=()
     
     for dep in "${DEPS[@]}"; do
@@ -28,9 +28,19 @@ check_dependencies() {
     done
     
     if [ ${#MISSING[@]} -ne 0 ]; then
-        echo -e "${RED}Error: Missing dependencies: ${MISSING[*]}${NC}"
-        echo "Please install the missing packages and try again."
-        exit 1
+        echo -e "${YELLOW}Attempting to install missing dependencies: ${MISSING[*]}${NC}"
+        for dep in "${MISSING[@]}"; do
+            if command -v apt-get >/dev/null 2>&1; then
+                sudo apt-get install -y "$dep"
+            elif command -v yum >/dev/null 2>&1; then
+                sudo yum install -y "$dep"
+            elif command -v pacman >/dev/null 2>&1; then
+                sudo pacman -S --noconfirm "$dep"
+            else
+                echo -e "${RED}Error: Package manager not found. Please install ${dep} manually.${NC}"
+                exit 1
+            fi
+        done
     fi
 }
 

@@ -214,12 +214,10 @@ extern const PopModule halt_module;
 
 void scroll_screen(void)
 {
-    /* Move the content of the video memory up by one line */
     unsigned int i;
     for (i = 0; i < (LINES - 1) * COLUMNS_IN_LINE * BYTES_FOR_EACH_ELEMENT; i++) {
         vidptr[i] = vidptr[i + COLUMNS_IN_LINE * BYTES_FOR_EACH_ELEMENT];
     }
-    /* Clear the last line with the same background color */
     for (i = (LINES - 1) * COLUMNS_IN_LINE * BYTES_FOR_EACH_ELEMENT; i < SCREENSIZE; i += 2) {
         vidptr[i] = ' ';
         vidptr[i + 1] = 0x10; // Dark blue background with white text
