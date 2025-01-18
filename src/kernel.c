@@ -242,11 +242,15 @@ void execute_command(const char *command)
         kprint_newline();
         kprint("halt T halts the system");
         kprint_newline();
-    } else if (strcmp(command, "hang") == 0) {
+    } else if (strcmp(command, "hang") == 0) { // Hang implementation causes graphics issues with blue flickering due to system not being able to catch up
         kprint_newline();
         spinner_pop_func(current_loc);
         uptime_module.pop_function(current_loc + 16);
         while (1) {kprint("Hanging..."); }
+    for (int i = 0; i < 5; i++) {
+        kprint(".");
+        for (volatile int j = 0; j < 10000000; j++); // Simple delay loop
+    }
     } else if (strcmp(command, "cear") == 0) {
         clear_screen();
         kprint("Screen cleared!");
