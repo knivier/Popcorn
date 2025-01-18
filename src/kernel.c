@@ -104,11 +104,10 @@ void idt_init(void)
 
 void kb_init(void)
 {
-    /* 0xFD is 11111101 - enables only IRQ1 (keyboard) */
     write_port(0x21 , 0xFD);
 }
 
-void kprint(const char *str)
+void kprint(const char *str) // prints the string to the screen with scrolling functionality
 {
     unsigned int i = 0;
     while (str[i] != '\0') {
@@ -120,7 +119,7 @@ void kprint(const char *str)
     }
 }
 
-void kprint_newline(void)
+void kprint_newline(void) // prints a newline character to the screen with scrolling functionality
 {
     unsigned int line_size = BYTES_FOR_EACH_ELEMENT * COLUMNS_IN_LINE;
     current_loc = current_loc + (line_size - current_loc % (line_size));
@@ -129,7 +128,7 @@ void kprint_newline(void)
     }
 }
 
-void clear_screen(void)
+void clear_screen(void) // Clears the output screen (fills with spaces and resets the cursor)
 {
     unsigned int i = 0;
     while (i < SCREENSIZE) {
@@ -151,7 +150,7 @@ void printTerm(const char *str, unsigned char color)
     }
 }
 
-/* Simple implementation of memset */
+/* Simple implementation of memset because we can't use too many external libraries */
 void *memset(void *s, int c, size_t n) {
     unsigned char *p = s;
     while (n--) {
@@ -160,7 +159,7 @@ void *memset(void *s, int c, size_t n) {
     return s;
 }
 
-void keyboard_handler_main(void)
+void keyboard_handler_main(void)  // Kinda buggy but a working 4char implementation
 {
     unsigned char status;
     char keycode;
@@ -199,7 +198,7 @@ void keyboard_handler_main(void)
     }
 }
 
-/* Simple implementation of strcmp */
+/* Simple implementation of strcmp because we can't use too many external libraries for this source */
 int strcmp(const char *str1, const char *str2) {
     while (*str1 && (*str1 == *str2)) {
         str1++;
@@ -226,8 +225,13 @@ void scroll_screen(void)
     current_loc -= COLUMNS_IN_LINE * BYTES_FOR_EACH_ELEMENT;
 }
 
+/*
+@brief Executes specific commands based on the input string that is given as char
+@param string buffer to store the string representation of the integer
+
+*/
 void execute_command(const char *command)
-{
+{ // uses strcmp to compare the command to the string 
     if (strcmp(command, "help") == 0 || strcmp(command, "halp") == 0) {
         kprint_newline();
         kprint("hang T hangs the system in a loop");
@@ -254,7 +258,7 @@ void execute_command(const char *command)
         kprint(buffer);
         kprint_newline();
         int ticks = get_tick_count();
-        int ticks_per_second = ticks / 70; 
+        int ticks_per_second = ticks / 150; // Inaccurate estimation, please be aware needs to eb tuned!
         int_to_str(ticks_per_second, buffer);
         kprint(" (");
         kprint(buffer);
@@ -290,6 +294,11 @@ void execute_command(const char *command)
     kprint_newline();
 } 
 
+/*
+Where the magic happens, authored by Knivier
+This is executed in kernel.asm and is the heart of the program
+It boots the system then initializes all pops, then waits for inputs in a while loop to keep the kernel running
+*/
 void kmain(void)
 {
     const char *boot_msg = "Popcorn v0.3 Popped!!!";
