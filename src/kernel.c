@@ -272,7 +272,7 @@ void execute_command(const char *command)
         kprint_newline();
         kprint("System halted. Press Enter to continue...");
         while (1) {
-            unsigned char status = read_port(KEYBOARD_STATUS_PORT);
+            unsigned char status = read_port(KEYBOARD_STATUS_PORT); // Waits for the enter key to resume functionality
             if (status & 0x01) {
                 char keycode = read_port(KEYBOARD_DATA_PORT);
                 if (keycode == ENTER_KEY_CODE) {
