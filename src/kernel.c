@@ -243,7 +243,7 @@ void execute_command(const char *command)
         kprint("halt T halts the system");
         kprint_newline();
     } else if (strcmp(command, "hang") == 0) { // Hang implementation causes graphics issues with blue flickering due to system not being able to catch up
-        kprint_newline();
+        kprint_newline(); // There is no escaping a hang
         spinner_pop_func(current_loc);
         uptime_module.pop_function(current_loc + 16);
         while (1) {kprint("Hanging..."); }
