@@ -38,6 +38,9 @@ build_kernel() {
     gcc -m32 -c halt_pop.c -o "$OBJ_DIR/halt_pop.o" -Wall -Wextra -fno-stack-protector
     if [ $? -ne 0 ]; then exit 1; fi
 
+    gcc -m32 -c filesystem_pop.c -o "$OBJ_DIR/filesystem_pop.o" -Wall -Wextra -fno-stack-protector
+    if [ $? -ne 0 ]; then exit 1; fi
+
     # Link files
     ld -m elf_i386 -T link.ld -o kernel \
         "$OBJ_DIR"/kasm.o \
@@ -47,7 +50,8 @@ build_kernel() {
         "$OBJ_DIR"/idt.o \
         "$OBJ_DIR"/spinner_pop.o \
         "$OBJ_DIR"/uptime_pop.o \
-        "$OBJ_DIR"/halt_pop.o
+        "$OBJ_DIR"/halt_pop.o \
+    "$OBJ_DIR"/filesystem_pop.o
 }
 
 # Run the kernel
@@ -55,6 +59,6 @@ run_kernel() {
     qemu-system-i386 -kernel kernel
 }
 
-run_kernel
 clean_build
 build_kernel
+run_kernel

@@ -210,6 +210,7 @@ int strcmp(const char *str1, const char *str2) {
 extern const PopModule spinner_module;
 extern const PopModule uptime_module;
 extern const PopModule halt_module;
+extern const PopModule filesystem_module;
 
 void scroll_screen(void)
 {
@@ -328,7 +329,8 @@ void kmain(void)
     kb_init();
     register_pop_module(&spinner_module);
     register_pop_module(&uptime_module);
-
+    register_pop_module(&filesystem_module);
+    filesystem_module.pop_function(current_loc);
     while (1) {
         /* Wait for user input */
         unsigned char status;
