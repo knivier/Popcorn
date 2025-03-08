@@ -254,9 +254,9 @@ void execute_command(const char *command)
         kprint_newline();
         kprint("hang T hangs the system in a loop");
         kprint_newline();
-        kprint("cear T clears the screen");
+        kprint("clear T clears the screen");
         kprint_newline();
-        kprint("upte T prints the uptime");
+        kprint("uptime T prints the uptime");
         kprint_newline();
         kprint("halt T halts the system");
         kprint_newline();
@@ -277,10 +277,10 @@ void execute_command(const char *command)
         kprint(".");
         for (volatile int j = 0; j < 10000000; j++); // Simple delay loop
     }
-    } else if (strcmp(command, "cear") == 0) {
+    } else if (strcmp(command, "clear") == 0) {
         clear_screen();
         kprint("Screen cleared!");
-    } else if (strcmp(command, "upte") == 0) {
+    } else if (strcmp(command, "uptime") == 0) {
         kprint_newline();
         char buffer[64];
         int_to_str(get_tick_count(), buffer);
@@ -328,6 +328,7 @@ void execute_command(const char *command)
             kprint("File created: ");
             kprint(filename);
         } else {
+            kprint_newline();
             kprint("Error: Could not create file");
         }
         kprint_newline();
@@ -355,6 +356,7 @@ void execute_command(const char *command)
                 kprint("Error: Could not write to file");
             }
         } else {
+            kprint_newline();
             kprint("Error: Invalid command format");
         }
         kprint_newline();
@@ -371,6 +373,7 @@ void execute_command(const char *command)
             kprint("File content: ");
             kprint(content);
         } else {
+            kprint_newline();
             kprint("Error: Could not read file");
         }
         kprint_newline();
@@ -386,6 +389,7 @@ void execute_command(const char *command)
             kprint("File deleted: ");
             kprint(filename);
         } else {
+            kprint_newline();
             kprint("Error: Could not delete file");
         }
         kprint_newline();
@@ -443,6 +447,7 @@ void kmain(void)
                 kprint_newline();
                 kprint("Input received: ");
                 kprint(input_buffer); // Print the input buffer for debugging
+                kprint_newline();
                 kprint_newline();
                 execute_command(input_buffer);
                 input_index = 0;

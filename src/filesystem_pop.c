@@ -50,9 +50,11 @@ bool write_file(const char* name, const char* content) {
             }
             if (file_system[i].name[j] == '\0' && name[j] == '\0') {
                 j = 0;
-                while (content[j] != '\0' && j < MAX_FILE_CONTENT_LENGTH) {
-                    file_system[i].content[j] = content[j];
+                int k = 0;
+                while (content[k] != '\0' && j < MAX_FILE_CONTENT_LENGTH) {
+                    file_system[i].content[j] = content[k];
                     j++;
+                    k++;
                 }
                 file_system[i].content[j] = '\0';
                 return true;
@@ -115,7 +117,7 @@ void filesystem_pop_func(unsigned int start_pos) {
 
     // Example file system operations
     create_file("test.txt");
-    write_file("test.txt", "Hello, Popcorn!");
+    write_file("test.txt", "Test.txt Activated!");
     const char* content = read_file("test.txt");
     if (content) {
         // Display the file content on the screen
@@ -131,6 +133,6 @@ void filesystem_pop_func(unsigned int start_pos) {
 
 const PopModule filesystem_module = {
     .name = "filesystem",
-    .message = "Filesystem Initialized",
+    .message = "Filesystem Initialized, type 'help' for commands",
     .pop_function = filesystem_pop_func
 };
