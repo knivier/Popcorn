@@ -335,15 +335,13 @@ void kmain(void)
         /* Wait for user input */
         unsigned char status;
         char keycode;
-
-        execute_all_pops(current_loc);
         status = read_port(KEYBOARD_STATUS_PORT);
         if (status & 0x01) {
             keycode = read_port(KEYBOARD_DATA_PORT);
             if (keycode < 0)
                 continue;
             if (keycode == ENTER_KEY_CODE) {
-                input_buffer[input_index] = '\0'; // Null-terminate the input buffer
+                input_buffer[input_index] = '\0'; // Null-terminate the input buffer, very important!
                 kprint_newline();
                 kprint("Input received: ");
                 kprint(input_buffer); // Print the input buffer for debugging
