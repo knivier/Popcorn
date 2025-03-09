@@ -464,7 +464,7 @@ It boots the system then initializes all pops, then waits for inputs in a while 
 */
 void kmain(void)
 {
-    const char *boot_msg = "Popcorn v0.3 Popped!!!";
+    const char *boot_msg = "Popcorn v0.4 Popped!";
 
     // Clear the screen with dark blue background
     unsigned int j = 0;
