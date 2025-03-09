@@ -14,21 +14,7 @@ If you are on Windows and don't want to use WSL (unrecommended), you can use bui
 
 Finally, all build systems are at your own risk. I'm not responsible for any installations not working correctly nor any inconfigurations nor any other errors that may occur. This software is provided AS-IS without warrenties as shown in the LICENSE (please see that). If you are on a version below v1 (so, 0.1, 0.2, 0.3, etc) you are using a trial version. 
 
-Assembly instructions on WSL if you don't want to use the build systems (built off, custom)
-### Assemble kernel.asm (if you have any assembly code)
-nasm -f elf32 kernel.asm -o kasm.
-
-### Compile shimjapii.c
-gcc -m32 -c shimjapii.c -o shimjapii.o
-
-### Compile kernel.c
-gcc -m32 -c kernel.c -o kernel.o
-
-### Link all object files together to create the final kernel executable
-ld -m elf_i386 -T link.ld -o kernel kasm.o kernel.o shimjapii.o
-
-### Start the system
-qemu-system-i386 -kernel kernel
+Assembly instructions for linux-based systems (or WSL) without a build maker are no longer provided due to the annoyance of keeping notes UTD. They are, therefore, not being included in this readme. Look through the trymake.sh to find out how you can implement it yourself instead.
 
 ## Project Overview
 Popcorn is a simple kernel framework designed to help you understand the basics of operating system development. The project includes a minimal bootloader, a kernel written in C, and some basic assembly code to get things started.
