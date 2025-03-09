@@ -39,6 +39,9 @@ bool write_file(const char* name, const char* content); // Declaration of write_
 const char* read_file(const char* name); // Declaration of read_file
 bool delete_file(const char* name); // Declaration of delete_file
 void list_files(void); // Declaration of list_files
+bool create_directory(const char* name); // Declaration of create_directory
+bool change_directory(const char* name); // Declaration of change_directory
+void list_hierarchy(char* vidptr); // Declaration of list_hierarchy
 
 /* current cursor location */
 unsigned int current_loc = 0;
@@ -269,6 +272,14 @@ void execute_command(const char *command)
         kprint_newline();
         kprint("delete <filename> T deletes a file");
         kprint_newline();
+        kprint("mkdir <dirname> T creates a new directory");
+        kprint_newline();
+        kprint("go <dirname> T changes to the specified directory");
+        kprint_newline();
+        kprint("back T goes back to the previous directory");
+        kprint_newline();
+        kprint("listsys T lists the entire file system hierarchy");
+        kprint_newline();
     } else if (strcmp(command, "hang") == 0) { // Hang implementation causes graphics issues with blue flickering due to system not being able to catch up
         kprint_newline(); // There is no escaping a hang
         spinner_pop_func(current_loc);
@@ -394,9 +405,49 @@ void execute_command(const char *command)
             kprint("Error: Could not delete file");
         }
         kprint_newline();
-    } else if (strncmp(command, "listfilesys", 11) == 0) {
+    } else if (strncmp(command, "mkdir ", 6) == 0) {
+        char dirname[21];
+        int i = 0;
+        while (command[6 + i] != '\0' && i < 20) {
+            dirname[i] = command[6 + i];
+            i++;
+        }
+        dirname[i] = '\0';
+        if (create_directory(dirname)) {
+            kprint("Directory created: ");
+            kprint(dirname);
+        } else {
+            kprint_newline();
+            kprint("Error: Could not create directory");
+        }
         kprint_newline();
-        list_files();
+    } else if (strncmp(command, "go ", 3) == 0) {
+        char dirname[21];
+        int i = 0;
+        while (command[3 + i] != '\0' && i < 20) {
+            dirname[i] = command[3 + i];
+            i++;
+        }
+        dirname[i] = '\0';
+        if (change_directory(dirname)) {
+            kprint("Changed to directory: ");
+            kprint(dirname);
+        } else {
+            kprint_newline();
+            kprint("Error: Could not change directory");
+        }
+        kprint_newline();
+    } else if (strcmp(command, "back") == 0) {
+        if (change_directory("back")) {
+            kprint("Changed to parent directory");
+        } else {
+            kprint_newline();
+            kprint("Error: Could not change directory");
+        }
+        kprint_newline();
+    } else if (strcmp(command, "listsys") == 0) {
+        kprint_newline();
+        list_hierarchy(vidptr);
         kprint_newline();
     } else {
         kprint(command);
@@ -438,6 +489,7 @@ void kmain(void)
     register_pop_module(&uptime_module);
     register_pop_module(&filesystem_module);
     filesystem_module.pop_function(current_loc); // Test initialization of filesystem pop 
+
     while (1) {
         /* Wait for user input */
         unsigned char status;
@@ -452,7 +504,6 @@ void kmain(void)
                 kprint_newline();
                 kprint("Input received: ");
                 kprint(input_buffer); // Print the input buffer for debugging
-                kprint_newline();
                 kprint_newline();
                 execute_command(input_buffer);
                 input_index = 0;
