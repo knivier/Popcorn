@@ -1,0 +1,5 @@
+obj/
+buildbase/
+.idea/
+.vscode/
+src/kernel

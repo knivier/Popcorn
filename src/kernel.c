@@ -1,4 +1,4 @@
-#include "keyboard_map.h"
+#include "includes/keyboard_map.h"
 #include "includes/pop_module.h"
 #include "includes/spinner_pop.h"
 #include <stddef.h>
@@ -33,6 +33,15 @@ void scroll_screen(void);
 void execute_command(const char *command);
 void int_to_str(int num, char *str);
 int get_tick_count(void);
+int strncmp(const char *str1, const char *str2, unsigned int n); // Declaration of strncmp
+bool create_file(const char* name); // Declaration of create_file
+bool write_file(const char* name, const char* content); // Declaration of write_file
+const char* read_file(const char* name); // Declaration of read_file
+bool delete_file(const char* name); // Declaration of delete_file
+void list_files(void); // Declaration of list_files
+bool create_directory(const char* name); // Declaration of create_directory
+bool change_directory(const char* name); // Declaration of change_directory
+void list_hierarchy(char* vidptr); // Declaration of list_hierarchy
 
 /* current cursor location */
 unsigned int current_loc = 0;
@@ -207,9 +216,22 @@ int strcmp(const char *str1, const char *str2) {
     return *(unsigned char *)str1 - *(unsigned char *)str2;
 }
 
+/* Simple implementation of strncmp because we can't use too many external libraries for this source */
+int strncmp(const char *str1, const char *str2, unsigned int n) {
+    unsigned int i = 0;
+    while (i < n && str1[i] && str2[i] && str1[i] == str2[i]) {
+        i++;
+    }
+    if (i == n) {
+        return 0;
+    }
+    return (unsigned char)str1[i] - (unsigned char)str2[i];
+}
+
 extern const PopModule spinner_module;
 extern const PopModule uptime_module;
 extern const PopModule halt_module;
+extern const PopModule filesystem_module;
 
 void scroll_screen(void)
 {
@@ -236,11 +258,27 @@ void execute_command(const char *command)
         kprint_newline();
         kprint("hang T hangs the system in a loop");
         kprint_newline();
-        kprint("cear T clears the screen");
+        kprint("clear T clears the screen");
         kprint_newline();
-        kprint("upte T prints the uptime");
+        kprint("uptime T prints the uptime");
         kprint_newline();
         kprint("halt T halts the system");
+        kprint_newline();
+        kprint("create <filename> T creates a new file");
+        kprint_newline();
+        kprint("write <filename> <content> T writes content to a file");
+        kprint_newline();
+        kprint("read <filename> T reads the content of a file");
+        kprint_newline();
+        kprint("delete <filename> T deletes a file");
+        kprint_newline();
+        kprint("mkdir <dirname> T creates a new directory");
+        kprint_newline();
+        kprint("go <dirname> T changes to the specified directory");
+        kprint_newline();
+        kprint("back T goes back to the previous directory");
+        kprint_newline();
+        kprint("listsys T lists the entire file system hierarchy");
         kprint_newline();
     } else if (strcmp(command, "hang") == 0) { // Hang implementation causes graphics issues with blue flickering due to system not being able to catch up
         kprint_newline(); // There is no escaping a hang
@@ -251,10 +289,10 @@ void execute_command(const char *command)
         kprint(".");
         for (volatile int j = 0; j < 10000000; j++); // Simple delay loop
     }
-    } else if (strcmp(command, "cear") == 0) {
+    } else if (strcmp(command, "clear") == 0) {
         clear_screen();
         kprint("Screen cleared!");
-    } else if (strcmp(command, "upte") == 0) {
+    } else if (strcmp(command, "uptime") == 0) {
         kprint_newline();
         char buffer[64];
         int_to_str(get_tick_count(), buffer);
@@ -262,7 +300,7 @@ void execute_command(const char *command)
         kprint(buffer);
         kprint_newline();
         int ticks = get_tick_count();
-        int ticks_per_second = ticks / 150; // Inaccurate estimation, please be aware needs to eb tuned!
+        int ticks_per_second = ticks / 150; // Inaccurate estimation, please be aware needs to be tuned!
         int_to_str(ticks_per_second, buffer);
         kprint(" (");
         kprint(buffer);
@@ -290,13 +328,134 @@ void execute_command(const char *command)
             write_port(0x64, 0xFE);  // Send reset command to keyboard controller
             // If shutdown fails, halt the CPU
             asm volatile("hlt");
+    } else if (strncmp(command, "create ", 7) == 0) {
+        char filename[21];
+        int i = 0;
+        while (command[7 + i] != '\0' && i < 20) {
+            filename[i] = command[7 + i];
+            i++;
+        }
+        filename[i] = '\0';
+        if (create_file(filename)) {
+            kprint("File created: ");
+            kprint(filename);
+        } else {
+            kprint_newline();
+            kprint("Error: Could not create file");
+        }
+        kprint_newline();
+    } else if (strncmp(command, "write ", 6) == 0) {
+        char filename[21];
+        char content[101];
+        int i = 0;
+        int j = 0;
+        while (command[6 + i] != ' ' && i < 20 && command[6 + i] != '\0') {
+            filename[i] = command[6 + i];
+            i++;
+        }
+        filename[i] = '\0';
+        if (command[6 + i] == ' ') {
+            i++;
+            while (command[6 + i + j] != '\0' && j < 100) {
+                content[j] = command[6 + i + j];
+                j++;
+            }
+            content[j] = '\0';
+            if (write_file(filename, content)) {
+                kprint("File written: ");
+                kprint(filename);
+            } else {
+                kprint("Error: Could not write to file");
+            }
+        } else {
+            kprint_newline();
+            kprint("Error: Invalid command format");
+        }
+        kprint_newline();
+    } else if (strncmp(command, "read ", 5) == 0) {
+        char filename[21];
+        int i = 0;
+        while (command[5 + i] != '\0' && i < 20) {
+            filename[i] = command[5 + i];
+            i++;
+        }
+        filename[i] = '\0';
+        const char* content = read_file(filename);
+        if (content) {
+            kprint("File content: ");
+            kprint(content);
+        } else {
+            kprint_newline();
+            kprint("Error: Could not read file");
+        }
+        kprint_newline();
+    } else if (strncmp(command, "delete ", 7) == 0) {
+        char filename[21];
+        int i = 0;
+        while (command[7 + i] != '\0' && i < 20) {
+            filename[i] = command[7 + i];
+            i++;
+        }
+        filename[i] = '\0';
+        if (delete_file(filename)) {
+            kprint("File deleted: ");
+            kprint(filename);
+        } else {
+            kprint_newline();
+            kprint("Error: Could not delete file");
+        }
+        kprint_newline();
+    } else if (strncmp(command, "mkdir ", 6) == 0) {
+        char dirname[21];
+        int i = 0;
+        while (command[6 + i] != '\0' && i < 20) {
+            dirname[i] = command[6 + i];
+            i++;
+        }
+        dirname[i] = '\0';
+        if (create_directory(dirname)) {
+            kprint("Directory created: ");
+            kprint(dirname);
+        } else {
+            kprint_newline();
+            kprint("Error: Could not create directory");
+        }
+        kprint_newline();
+    } else if (strncmp(command, "go ", 3) == 0) {
+        char dirname[21];
+        int i = 0;
+        while (command[3 + i] != '\0' && i < 20) {
+            dirname[i] = command[3 + i];
+            i++;
+        }
+        dirname[i] = '\0';
+        if (change_directory(dirname)) {
+            kprint("Changed to directory: ");
+            kprint(dirname);
+        } else {
+            kprint_newline();
+            kprint("Error: Could not change directory");
+        }
+        kprint_newline();
+    } else if (strcmp(command, "back") == 0) {
+        if (change_directory("back")) {
+            kprint("Changed to parent directory");
+        } else {
+            kprint_newline();
+            kprint("Error: Could not change directory");
+        }
+        kprint_newline();
+    } else if (strcmp(command, "listsys") == 0) {
+        kprint_newline();
+        list_hierarchy(vidptr);
+        kprint_newline();
     } else {
         kprint(command);
         kprint(" was not found");
         kprint_newline();
     }
     kprint_newline();
-} 
+}
 
 /*
 Where the magic happens, authored by Knivier
@@ -305,7 +464,7 @@ It boots the system then initializes all pops, then waits for inputs in a while 
 */
 void kmain(void)
 {
-    const char *boot_msg = "Popcorn v0.3 Popped!!!";
+    const char *boot_msg = "Popcorn v0.4 Popped!";
 
     // Clear the screen with dark blue background
     unsigned int j = 0;
@@ -328,20 +487,22 @@ void kmain(void)
     kb_init();
     register_pop_module(&spinner_module);
     register_pop_module(&uptime_module);
+    register_pop_module(&filesystem_module);
+    filesystem_module.pop_function(current_loc); // Test initialization of filesystem pop 
 
     while (1) {
+        spinner_pop_func(current_loc);
+        uptime_module.pop_function(current_loc + 16);
         /* Wait for user input */
         unsigned char status;
         char keycode;
-
-        execute_all_pops(current_loc);
         status = read_port(KEYBOARD_STATUS_PORT);
         if (status & 0x01) {
             keycode = read_port(KEYBOARD_DATA_PORT);
             if (keycode < 0)
                 continue;
             if (keycode == ENTER_KEY_CODE) {
-                input_buffer[input_index] = '\0'; // Null-terminate the input buffer
+                input_buffer[input_index] = '\0'; // Null-terminate the input buffer, very important!
                 kprint_newline();
                 kprint("Input received: ");
                 kprint(input_buffer); // Print the input buffer for debugging

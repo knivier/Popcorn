@@ -139,6 +139,7 @@ build_kernel() {
     compile_file "spinner_pop.c" "$OBJ_DIR/spinner_pop.o" "c" 
     compile_file "uptime_pop.c" "$OBJ_DIR/uptime_pop.o" "c"
     compile_file "halt_pop.c" "$OBJ_DIR/halt_pop.o" "c"
+    compile_file "filesystem_pop.c" "$OBJ_DIR/filesystem_pop.o" "c"
     
     # Link files
     log "INFO" "Linking object files..."
@@ -164,7 +165,8 @@ build_kernel() {
         "$OBJ_DIR/idt.o" \
         "$OBJ_DIR/spinner_pop.o" \
         "$OBJ_DIR/uptime_pop.o" \
-        "$OBJ_DIR/halt_pop.o"
+        "$OBJ_DIR/halt_pop.o" \
+        "$OBJ_DIR/filesystem_pop.o"
     
     check_status "Linking object files"
 }
