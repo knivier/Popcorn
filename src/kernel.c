@@ -1,4 +1,4 @@
-#include "keyboard_map.h"
+#include "includes/keyboard_map.h"
 #include "includes/pop_module.h"
 #include "includes/spinner_pop.h"
 #include <stddef.h>
@@ -38,6 +38,7 @@ bool create_file(const char* name); // Declaration of create_file
 bool write_file(const char* name, const char* content); // Declaration of write_file
 const char* read_file(const char* name); // Declaration of read_file
 bool delete_file(const char* name); // Declaration of delete_file
+void list_files(void); // Declaration of list_files
 
 /* current cursor location */
 unsigned int current_loc = 0;
@@ -392,6 +393,10 @@ void execute_command(const char *command)
             kprint_newline();
             kprint("Error: Could not delete file");
         }
+        kprint_newline();
+    } else if (strncmp(command, "listfilesys", 11) == 0) {
+        kprint_newline();
+        list_files();
         kprint_newline();
     } else {
         kprint(command);

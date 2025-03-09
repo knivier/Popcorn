@@ -80,6 +80,23 @@ const char* read_file(const char* name) {
     return NULL;
 }
 
+// Function to list all files
+void list_files() {
+    for (int i = 0; i < MAX_FILES; ++i) {
+        if (file_system[i].in_use) {
+            // Print file name
+            char* vidptr = (char*)0xb8000;
+            unsigned int j = 0;
+            unsigned int pos = i * 160; // Assuming 80 characters per line, 2 bytes per character
+            while (file_system[i].name[j] != '\0') {
+                vidptr[pos] = file_system[i].name[j];
+                vidptr[pos + 1] = 0x07;  // Light grey color
+                ++j;
+                pos += 2;
+            }
+        }
+    }
+}
 // Function to delete a file
 bool delete_file(const char* name) {
     for (int i = 0; i < MAX_FILES; ++i) {
