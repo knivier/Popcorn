@@ -491,6 +491,8 @@ void kmain(void)
     filesystem_module.pop_function(current_loc); // Test initialization of filesystem pop 
 
     while (1) {
+        spinner_pop_func(current_loc);
+        uptime_module.pop_function(current_loc + 16);
         /* Wait for user input */
         unsigned char status;
         char keycode;

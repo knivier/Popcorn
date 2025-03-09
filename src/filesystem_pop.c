@@ -286,14 +286,6 @@ void filesystem_pop_func(unsigned int start_pos) {
     unsigned int i = start_pos;
     unsigned int j = 0;
 
-    // Display the initialization message on the screen
-    while (msg[j] != '\0') {
-        vidptr[i] = msg[j];
-        vidptr[i + 1] = 0x02;  // Green color
-        ++j;
-        i = i + 2;
-    }
-
     // Initialize the file system
     init_filesystem();
 
@@ -301,16 +293,7 @@ void filesystem_pop_func(unsigned int start_pos) {
     create_file("test.txt");
     write_file("test.txt", "Test.txt Activated!");
     const char* content = read_file("test.txt");
-    if (content) {
-        // Display the file content on the screen
-        j = 0;
-        while (content[j] != '\0') {
-            vidptr[i] = content[j];
-            vidptr[i + 1] = 0x02;  // Green color
-            ++j;
-            i = i + 2;
-        }
-    }
+    
 }
 
 const PopModule filesystem_module = {
