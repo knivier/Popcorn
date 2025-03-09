@@ -94,23 +94,49 @@ const char* read_file(const char* name) {
     return NULL;
 }
 
+// Function to calculate the length of a string
+size_t strrlen(const char* str) {
+    size_t length = 0;
+    while (str[length] != '\0') {
+        length++;
+    }
+    return length;
+}
+
+// Function to compare two strings up to a given number of characters
+int strrncmp(const char* str1, const char* str2, size_t num) {
+    for (size_t i = 0; i < num; i++) {
+        if (str1[i] != str2[i]) {
+            return (unsigned char)str1[i] - (unsigned char)str2[i];
+        }
+        if (str1[i] == '\0') {
+            return 0;
+        }
+    }
+    return 0;
+}
+
 // Function to list all files in the current directory
 void list_files() {
     char* vidptr = (char*)0xb8000;
     unsigned int pos = 0;
 
     for (int i = 0; i < MAX_FILES; ++i) {
-        if (file_system[i].in_use && strrcmp(file_system[i].path, current_path) == 0) {
-            unsigned int j = 0;
-            while (file_system[i].name[j] != '\0') {
-                vidptr[pos] = file_system[i].name[j];
-                vidptr[pos + 1] = 0x07;  // Light grey color
-                ++j;
+        // Check if the file or directory is in the current path
+        if (file_system[i].in_use && strrncmp(file_system[i].path, current_path, strrlen(current_path)) == 0) {
+            // Ensure we are not listing files from a subdirectory
+            if (file_system[i].path[strrlen(current_path)] == '\0' || file_system[i].path[strrlen(current_path)] == '|') {
+                unsigned int j = 0;
+                while (file_system[i].name[j] != '\0') {
+                    vidptr[pos] = file_system[i].name[j];
+                    vidptr[pos + 1] = 0x07;  // Light grey color
+                    ++j;
+                    pos += 2;
+                }
+                vidptr[pos] = ' ';
+                vidptr[pos + 1] = 0x07; // Light grey color
                 pos += 2;
             }
-            vidptr[pos] = ' ';
-            vidptr[pos + 1] = 0x07; // Light grey color
-            pos += 2;
         }
     }
 }
