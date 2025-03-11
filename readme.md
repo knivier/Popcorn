@@ -23,31 +23,57 @@ Popcorn is a simple kernel framework designed to help you understand the basics 
 
 (taken from Gitingest, not UTD for 0.3+)
 ROOT
+
 └── knivier-popcorn/
+
     ├── readme.md
+    
     ├── LICENSE
+    
     ├── cmdlet.txt
+    
     ├── pop.md
+    
     ├── roadmap.md
+    
     └── src/
+    
         ├── build.sh
+        
         ├── halt_pop.c
+        
         ├── idt.asm
+        
         ├── kernel
+        
         ├── kernel.asm
+        
         ├── kernel.c
+        
         ├── keyboard_map.h
+        
         ├── link.ld
+        
         ├── pop_module.c
+        
         ├── rbuild.sh
+        
         ├── shimjapii_pop.c
+        
         ├── spinner_pop.c
+        
         ├── uptime_pop.c
+        
         ├── buildbase/
+        
         │   └── .build_config
+        
         ├── includes/
+        
         │   ├── pop_module.h
+        
         │   └── spinner_pop.h
+        
         └── obj/
 
 
