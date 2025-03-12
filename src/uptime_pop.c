@@ -1,7 +1,7 @@
 #include "includes/pop_module.h"
 
 // Global tick counter
-static unsigned int tick_counter = 0;
+static unsigned long long tick_counter = 0;
 
 void int_to_str(int value, char* buffer) {
     char temp[10];

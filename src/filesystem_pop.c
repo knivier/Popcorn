@@ -5,9 +5,9 @@
 // Forward declaration of strrcmp
 int strrcmp(const char* str1, const char* str2);
 
-#define MAX_FILES 10
-#define MAX_FILENAME_LENGTH 20
-#define MAX_FILE_CONTENT_LENGTH 100
+#define MAX_FILES 100
+#define MAX_FILENAME_LENGTH 15
+#define MAX_FILE_CONTENT_LENGTH 1000
 #define MAX_PATH_LENGTH 100
 
 // Structure to represent a file
@@ -281,18 +281,20 @@ void list_hierarchy(char* vidptr) {
 
 // Function to initialize the file system pop module
 void filesystem_pop_func(unsigned int start_pos) {
-    char* vidptr = (char*)0xb8000;
-    const char* msg = "Filesystem Initialized";
-    unsigned int i = start_pos;
-    unsigned int j = 0;
-
     // Initialize the file system
     init_filesystem();
+    char* vidptr = (char*)0xb8000;
+    const char* message = "File Systems Ready";
+    unsigned int pos = 24 * 80 * 2; // Start at the bottom left of the screen
+    unsigned int i = 0;
 
+    while (message[i] != '\0') {
+        vidptr[pos] = message[i];
+        vidptr[pos + 1] = 0x07;  // Light grey color
+        ++i;
+        pos += 2;
+    }
     // Example file system operations
-    create_file("test.txt");
-    write_file("test.txt", "Test.txt Activated!");
-    const char* content = read_file("test.txt");
     
 }
 
