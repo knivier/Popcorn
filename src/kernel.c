@@ -1,6 +1,7 @@
 #include "includes/keyboard_map.h"
 #include "includes/pop_module.h"
 #include "includes/spinner_pop.h"
+#include "includes/console.h"
 #include <stddef.h>
 #include <stdbool.h>
 
@@ -47,6 +48,9 @@ void list_hierarchy(char* vidptr); // Declaration of list_hierarchy
 unsigned int current_loc = 0;
 /* video memory begins at address 0xb8000 */
 char *vidptr = (char*)0xb8000;
+
+// Console state
+ConsoleState console_state = {0, 0, CONSOLE_FG_COLOR, true};
 
 struct IDT_entry {
     unsigned short int offset_lowerbits;
@@ -116,47 +120,20 @@ void kb_init(void)
     write_port(0x21 , 0xFD);
 }
 
-void kprint(const char *str) // prints the string to the screen with scrolling functionality
-{
-    unsigned int i = 0;
-    while (str[i] != '\0') {
-        vidptr[current_loc++] = str[i++];
-        vidptr[current_loc++] = 0x07;
-        if (current_loc >= SCREENSIZE) {
-            scroll_screen();
-        }
-    }
+void kprint(const char *str) {
+    console_print(str);
 }
 
-void kprint_newline(void) // prints a newline character to the screen with scrolling functionality
-{
-    unsigned int line_size = BYTES_FOR_EACH_ELEMENT * COLUMNS_IN_LINE;
-    current_loc = current_loc + (line_size - current_loc % (line_size));
-    if (current_loc >= SCREENSIZE) {
-        scroll_screen();
-    }
+void kprint_newline(void) {
+    console_newline();
 }
 
-void clear_screen(void) // Clears the output screen (fills with spaces and resets the cursor)
-{
-    unsigned int i = 0;
-    while (i < SCREENSIZE) {
-        vidptr[i++] = ' ';
-        vidptr[i++] = 0x10; // Dark blue background with white text
-    }
-    current_loc = 0;
+void clear_screen(void) {
+    console_clear();
 }
 
-void printTerm(const char *str, unsigned char color)
-{
-    unsigned int i = 0;
-    while (str[i] != '\0') {
-        vidptr[current_loc++] = str[i++];
-        vidptr[current_loc++] = color;
-        if (current_loc >= SCREENSIZE) {
-            scroll_screen();
-        }
-    }
+void printTerm(const char *str, unsigned char color) {
+    console_print_color(str, color);
 }
 
 /* Simple implementation of memset because we can't use too many external libraries */
@@ -168,8 +145,7 @@ void *memset(void *s, int c, size_t n) {
     return s;
 }
 
-void keyboard_handler_main(void)  // Kinda buggy but a working 4char implementation
-{
+void keyboard_handler_main(void) {
     unsigned char status;
     char keycode;
 
@@ -185,10 +161,10 @@ void keyboard_handler_main(void)  // Kinda buggy but a working 4char implementat
 
         if (keycode == ENTER_KEY_CODE) {
             input_buffer[input_index] = '\0'; // Null-terminate the input buffer
-            kprint_newline();
-            kprint("Input received: ");
-            kprint(input_buffer); // Print the input buffer for debugging
-            kprint("\n");
+            console_newline();
+            console_print_color("Input received: ", CONSOLE_INFO_COLOR);
+            console_print_color(input_buffer, CONSOLE_FG_COLOR); // Print the input buffer for debugging
+            console_newline();
 
             execute_command(input_buffer);
             input_index = 0;
@@ -198,11 +174,7 @@ void keyboard_handler_main(void)  // Kinda buggy but a working 4char implementat
 
         if (input_index < sizeof(input_buffer) - 1) {
             input_buffer[input_index++] = keyboard_map[(unsigned char)keycode];
-            vidptr[current_loc++] = keyboard_map[(unsigned char)keycode];
-            vidptr[current_loc++] = 0x07;
-            if (current_loc >= SCREENSIZE) {
-                scroll_screen();
-            }
+            console_putchar(keyboard_map[(unsigned char)keycode]);
         }
     }
 }
@@ -252,82 +224,98 @@ void scroll_screen(void)
 @param string buffer to store the string representation of the integer
 
 */
-void execute_command(const char *command)
-{ // uses strcmp to compare the command to the string 
+void execute_command(const char *command) {
     if (strcmp(command, "help") == 0 || strcmp(command, "halp") == 0) {
-        kprint_newline();
-        kprint("hang T hangs the system in a loop");
-        kprint_newline();
-        kprint("clear T clears the screen");
-        kprint_newline();
-        kprint("uptime T prints the uptime");
-        kprint_newline();
-        kprint("halt T halts the system");
-        kprint_newline();
-        kprint("create <filename> T creates a new file");
-        kprint_newline();
-        kprint("write <filename> <content> T writes content to a file");
-        kprint_newline();
-        kprint("read <filename> T reads the content of a file");
-        kprint_newline();
-        kprint("delete <filename> T deletes a file");
-        kprint_newline();
-        kprint("mkdir <dirname> T creates a new directory");
-        kprint_newline();
-        kprint("go <dirname> T changes to the specified directory");
-        kprint_newline();
-        kprint("back T goes back to the previous directory");
-        kprint_newline();
-        kprint("listsys T lists the entire file system hierarchy");
-        kprint_newline();
-    } else if (strcmp(command, "hang") == 0) { // Hang implementation causes graphics issues with blue flickering due to system not being able to catch up
-        kprint_newline(); // There is no escaping a hang
+        console_println_color("Available Commands:", CONSOLE_HEADER_COLOR);
+        console_draw_separator(console_state.cursor_y, CONSOLE_FG_COLOR);
+        
+        console_print_color("  hang", CONSOLE_PROMPT_COLOR);
+        console_println(" - Hangs the system in a loop");
+        
+        console_print_color("  clear", CONSOLE_PROMPT_COLOR);
+        console_println(" - Clears the screen");
+        
+        console_print_color("  uptime", CONSOLE_PROMPT_COLOR);
+        console_println(" - Prints the system uptime");
+        
+        console_print_color("  halt", CONSOLE_PROMPT_COLOR);
+        console_println(" - Halts the system");
+        
+        console_print_color("  create <filename>", CONSOLE_PROMPT_COLOR);
+        console_println(" - Creates a new file");
+        
+        console_print_color("  write <filename> <content>", CONSOLE_PROMPT_COLOR);
+        console_println(" - Writes content to a file");
+        
+        console_print_color("  read <filename>", CONSOLE_PROMPT_COLOR);
+        console_println(" - Reads the content of a file");
+        
+        console_print_color("  delete <filename>", CONSOLE_PROMPT_COLOR);
+        console_println(" - Deletes a file");
+        
+        console_print_color("  mkdir <dirname>", CONSOLE_PROMPT_COLOR);
+        console_println(" - Creates a new directory");
+        
+        console_print_color("  go <dirname>", CONSOLE_PROMPT_COLOR);
+        console_println(" - Changes to the specified directory");
+        
+        console_print_color("  back", CONSOLE_PROMPT_COLOR);
+        console_println(" - Goes back to the previous directory");
+        
+        console_print_color("  listsys", CONSOLE_PROMPT_COLOR);
+        console_println(" - Lists the entire file system hierarchy");
+        
+        console_print_color("  stop", CONSOLE_PROMPT_COLOR);
+        console_println(" - Shuts down the system");
+        
+        console_newline();
+    } else if (strcmp(command, "hang") == 0) {
+        console_print_warning("System hanging...");
         spinner_pop_func(current_loc);
         uptime_module.pop_function(current_loc + 16);
-        while (1) {kprint("Hanging..."); }
-    for (int i = 0; i < 5; i++) {
-        kprint(".");
-        for (volatile int j = 0; j < 10000000; j++); // Simple delay loop
-    }
+        while (1) {
+            console_print_color("Hanging...", CONSOLE_ERROR_COLOR);
+        }
     } else if (strcmp(command, "clear") == 0) {
-        clear_screen();
-        kprint("Screen cleared!");
+        console_clear();
+        console_draw_header("Popcorn Kernel v0.4");
+        console_print_success("Screen cleared!");
+        console_draw_prompt();
     } else if (strcmp(command, "uptime") == 0) {
-        kprint_newline();
+        console_newline();
         char buffer[64];
         int_to_str(get_tick_count(), buffer);
-        kprint("Uptime: ");
-        kprint(buffer);
-        kprint_newline();
+        console_print_color("Uptime: ", CONSOLE_INFO_COLOR);
+        console_print_color(buffer, CONSOLE_FG_COLOR);
+        console_println(" ticks");
+        
         int ticks = get_tick_count();
         int ticks_per_second = ticks / 150; // Inaccurate estimation, please be aware needs to be tuned!
         int_to_str(ticks_per_second, buffer);
-        kprint(" (");
-        kprint(buffer);
-        kprint(" seconds EST)");
-        kprint_newline(); 
+        console_print_color("Estimated seconds: ", CONSOLE_INFO_COLOR);
+        console_println_color(buffer, CONSOLE_FG_COLOR);
     } else if (strcmp(command, "halt") == 0) {
-        kprint_newline();
-        kprint("System halted. Press Enter to continue...");
+        console_print_warning("System halted. Press Enter to continue...");
         while (1) {
-            unsigned char status = read_port(KEYBOARD_STATUS_PORT); // Waits for the enter key to resume functionality
+            unsigned char status = read_port(KEYBOARD_STATUS_PORT);
             if (status & 0x01) {
                 char keycode = read_port(KEYBOARD_DATA_PORT);
                 if (keycode == ENTER_KEY_CODE) {
-                    clear_screen();
-                    kprint("System resumed!");
+                    console_clear();
+                    console_draw_header("Popcorn Kernel v0.4");
+                    console_print_success("System resumed!");
+                    console_draw_prompt();
                     break;
                 }
             }
             halt_module.pop_function(current_loc);
         }
     } else if (strcmp(command, "stop") == 0) {
-            kprint_newline();
-            kprint("Shutting down...");
-            // Send shutdown command to QEMU/Bochs via port 0x604
-            write_port(0x64, 0xFE);  // Send reset command to keyboard controller
-            // If shutdown fails, halt the CPU
-            asm volatile("hlt");
+        console_print_warning("Shutting down...");
+        // Send shutdown command to QEMU/Bochs via port 0x604
+        write_port(0x64, 0xFE);  // Send reset command to keyboard controller
+        // If shutdown fails, halt the CPU
+        asm volatile("hlt");
     } else if (strncmp(command, "create ", 7) == 0) {
         char filename[21];
         int i = 0;
@@ -337,13 +325,12 @@ void execute_command(const char *command)
         }
         filename[i] = '\0';
         if (create_file(filename)) {
-            kprint("File created: ");
-            kprint(filename);
+            console_print_success("File created successfully");
+            console_print_color("Filename: ", CONSOLE_INFO_COLOR);
+            console_println_color(filename, CONSOLE_FG_COLOR);
         } else {
-            kprint_newline();
-            kprint("Error: Could not create file");
+            console_print_error("Could not create file");
         }
-        kprint_newline();
     } else if (strncmp(command, "write ", 6) == 0) {
         char filename[21];
         char content[101];
@@ -362,16 +349,15 @@ void execute_command(const char *command)
             }
             content[j] = '\0';
             if (write_file(filename, content)) {
-                kprint("File written: ");
-                kprint(filename);
+                console_print_success("File written successfully");
+                console_print_color("Filename: ", CONSOLE_INFO_COLOR);
+                console_println_color(filename, CONSOLE_FG_COLOR);
             } else {
-                kprint("Error: Could not write to file");
+                console_print_error("Could not write to file");
             }
         } else {
-            kprint_newline();
-            kprint("Error: Invalid command format");
+            console_print_error("Invalid command format. Use: write <filename> <content>");
         }
-        kprint_newline();
     } else if (strncmp(command, "read ", 5) == 0) {
         char filename[21];
         int i = 0;
@@ -382,13 +368,11 @@ void execute_command(const char *command)
         filename[i] = '\0';
         const char* content = read_file(filename);
         if (content) {
-            kprint("File content: ");
-            kprint(content);
+            console_print_color("File content: ", CONSOLE_INFO_COLOR);
+            console_println_color(content, CONSOLE_FG_COLOR);
         } else {
-            kprint_newline();
-            kprint("Error: Could not read file");
+            console_print_error("Could not read file");
         }
-        kprint_newline();
     } else if (strncmp(command, "delete ", 7) == 0) {
         char filename[21];
         int i = 0;
@@ -398,13 +382,12 @@ void execute_command(const char *command)
         }
         filename[i] = '\0';
         if (delete_file(filename)) {
-            kprint("File deleted: ");
-            kprint(filename);
+            console_print_success("File deleted successfully");
+            console_print_color("Filename: ", CONSOLE_INFO_COLOR);
+            console_println_color(filename, CONSOLE_FG_COLOR);
         } else {
-            kprint_newline();
-            kprint("Error: Could not delete file");
+            console_print_error("Could not delete file");
         }
-        kprint_newline();
     } else if (strncmp(command, "mkdir ", 6) == 0) {
         char dirname[21];
         int i = 0;
@@ -414,13 +397,12 @@ void execute_command(const char *command)
         }
         dirname[i] = '\0';
         if (create_directory(dirname)) {
-            kprint("Directory created: ");
-            kprint(dirname);
+            console_print_success("Directory created successfully");
+            console_print_color("Directory: ", CONSOLE_INFO_COLOR);
+            console_println_color(dirname, CONSOLE_FG_COLOR);
         } else {
-            kprint_newline();
-            kprint("Error: Could not create directory");
+            console_print_error("Could not create directory");
         }
-        kprint_newline();
     } else if (strncmp(command, "go ", 3) == 0) {
         char dirname[21];
         int i = 0;
@@ -430,31 +412,31 @@ void execute_command(const char *command)
         }
         dirname[i] = '\0';
         if (change_directory(dirname)) {
-            kprint("Changed to directory: ");
-            kprint(dirname);
+            console_print_success("Changed directory successfully");
+            console_print_color("Directory: ", CONSOLE_INFO_COLOR);
+            console_println_color(dirname, CONSOLE_FG_COLOR);
         } else {
-            kprint_newline();
-            kprint("Error: Could not change directory");
+            console_print_error("Could not change directory");
         }
-        kprint_newline();
     } else if (strcmp(command, "back") == 0) {
         if (change_directory("back")) {
-            kprint("Changed to parent directory");
+            console_print_success("Changed to parent directory");
         } else {
-            kprint_newline();
-            kprint("Error: Could not change directory");
+            console_print_error("Could not change directory");
         }
-        kprint_newline();
     } else if (strcmp(command, "listsys") == 0) {
-        kprint_newline();
+        console_newline();
+        console_println_color("File System Hierarchy:", CONSOLE_HEADER_COLOR);
+        console_draw_separator(console_state.cursor_y, CONSOLE_FG_COLOR);
         list_hierarchy(vidptr);
-        kprint_newline();
+        console_newline();
     } else {
-        kprint(command);
-        kprint(" was not found");
-        kprint_newline();
+        console_print_error("Command not found");
+        console_print_color("Command: ", CONSOLE_INFO_COLOR);
+        console_println_color(command, CONSOLE_FG_COLOR);
+        console_println_color("Type 'help' for available commands", CONSOLE_INFO_COLOR);
     }
-    kprint_newline();
+    console_newline();
 }
 
 /*
@@ -462,38 +444,43 @@ Where the magic happens, authored by Knivier
 This is executed in kernel.asm and is the heart of the program
 It boots the system then initializes all pops, then waits for inputs in a while loop to keep the kernel running
 */
-void kmain(void)
-{
-    const char *boot_msg = "Popcorn v0.4 Popped!";
-
-    // Clear the screen with dark blue background
-    unsigned int j = 0;
-    while (j < 80 * 25 * 2) {
-        vidptr[j] = ' ';
-        vidptr[j + 1] = 0x10; // Dark blue background
-        j += 2;
-    }
+void kmain(void) {
+    // Initialize the console system
+    console_init();
     
-    // Print the welcome message with green text on dark blue background
-    unsigned int i = 0;
-    while (boot_msg[i] != '\0') {
-        vidptr[i * 2] = boot_msg[i];
-        vidptr[i * 2 + 1] = 0x12; // Green color on dark blue background
-        i++;
-    }
-    current_loc = i * 2;
-
+    // Draw the header
+    console_draw_header("Popcorn Kernel v0.4");
+    
+    // Print welcome message
+    console_println_color("Welcome to Popcorn Kernel!", CONSOLE_SUCCESS_COLOR);
+    console_println_color("A modular metal kernel framework for learning OS development", CONSOLE_INFO_COLOR);
+    console_newline();
+    
+    // Initialize system components
     idt_init();
     kb_init();
+    
+    // Register pop modules
     register_pop_module(&spinner_module);
     register_pop_module(&uptime_module);
     register_pop_module(&filesystem_module);
-    filesystem_module.pop_function(current_loc); // Test initialization of filesystem pop 
+    
+    // Initialize filesystem
+    filesystem_module.pop_function(current_loc);
+    
+    // Draw initial prompt
+    console_draw_prompt();
+    
+    // Print status bar
+    console_print_status_bar();
 
+    // Main input loop
     while (1) {
+        // Update status displays
         spinner_pop_func(current_loc);
         uptime_module.pop_function(current_loc + 16);
-        /* Wait for user input */
+        
+        // Handle keyboard input
         unsigned char status;
         char keycode;
         status = read_port(KEYBOARD_STATUS_PORT);
@@ -502,21 +489,18 @@ void kmain(void)
             if (keycode < 0)
                 continue;
             if (keycode == ENTER_KEY_CODE) {
-                input_buffer[input_index] = '\0'; // Null-terminate the input buffer, very important!
-                kprint_newline();
-                kprint("Input received: ");
-                kprint(input_buffer); // Print the input buffer for debugging
-                kprint_newline();
+                input_buffer[input_index] = '\0';
+                console_newline();
+                console_print_color("Input received: ", CONSOLE_INFO_COLOR);
+                console_print_color(input_buffer, CONSOLE_FG_COLOR);
+                console_newline();
                 execute_command(input_buffer);
                 input_index = 0;
                 memset(input_buffer, 0, sizeof(input_buffer));
+                console_draw_prompt();
             } else if (input_index < sizeof(input_buffer) - 1) {
                 input_buffer[input_index++] = keyboard_map[(unsigned char)keycode];
-                vidptr[current_loc++] = keyboard_map[(unsigned char)keycode];
-                vidptr[current_loc++] = 0x07;
-                if (current_loc >= SCREENSIZE) {
-                    scroll_screen();
-                }
+                console_putchar(keyboard_map[(unsigned char)keycode]);
             }
         }
     }

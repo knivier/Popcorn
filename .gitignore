@@ -3,3 +3,8 @@ buildbase/
 .idea/
 .vscode/
 src/kernel
+slnx.sqlite
+FileContentIndex/
+v17/
+CoPilotIndices/
+VSWorkspaceState.json

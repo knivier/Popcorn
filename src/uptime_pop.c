@@ -1,4 +1,5 @@
 #include "includes/pop_module.h"
+#include "includes/console.h"
 
 // Global tick counter
 static unsigned long long tick_counter = 0;
@@ -21,7 +22,11 @@ void int_to_str(int value, char* buffer) {
     buffer[i] = '\0';
 }
 
+// Access console state to save/restore cursor
+extern ConsoleState console_state;
+
 void uptime_pop_func(unsigned int start_pos) {
+    (void)start_pos;
     // Increment the tick counter
     tick_counter++;
 
@@ -44,20 +49,18 @@ void uptime_pop_func(unsigned int start_pos) {
     }
     buffer[i] = '\0';
 
-    char* vidptr = (char*)0xb8000;
-    j = 0;
+    // Save and restore console state so cursor doesn't move
+    unsigned int prev_x = console_state.cursor_x;
+    unsigned int prev_y = console_state.cursor_y;
+    unsigned char prev_color = console_state.current_color;
 
-    // Calculate the starting position for the upper right corner
-    unsigned int screen_width = 80;
-    unsigned int buffer_length = i;
-    start_pos = (screen_width - buffer_length) * 2 - 2;
+    // Place at top-left after header (row 3, col 1)
+    console_set_cursor(1, 3);
+    console_print_color(buffer, CONSOLE_INFO_COLOR);
 
-    while (buffer[j] != '\0') {
-        vidptr[start_pos] = buffer[j];
-        vidptr[start_pos + 1] = 0x07;  // White color
-        ++j;
-        start_pos += 2;
-    }
+    // Restore state
+    console_set_color(prev_color);
+    console_set_cursor(prev_x, prev_y);
 }
 
 const PopModule uptime_module = {
@@ -65,6 +68,7 @@ const PopModule uptime_module = {
     .message = "Displays the tick counter",
     .pop_function = uptime_pop_func
 };
+
 unsigned int get_tick_count(void) {
     return tick_counter;
 }
