@@ -31,7 +31,6 @@ char input_buffer[128] = {0}; // Increased size to accommodate longer input
 unsigned int input_index = 0;
 
 /* Function forward declarations */
-void scroll_screen(void);
 void execute_command(const char *command);
 void int_to_str(int num, char *str);
 int get_tick_count(void);
@@ -179,20 +178,6 @@ extern const PopModule spinner_module;
 extern const PopModule uptime_module;
 extern const PopModule halt_module;
 extern const PopModule filesystem_module;
-
-void scroll_screen(void)
-{
-    unsigned int i;
-    for (i = 0; i < (LINES - 1) * COLUMNS_IN_LINE * BYTES_FOR_EACH_ELEMENT; i++) {
-        vidptr[i] = vidptr[i + COLUMNS_IN_LINE * BYTES_FOR_EACH_ELEMENT];
-    }
-    for (i = (LINES - 1) * COLUMNS_IN_LINE * BYTES_FOR_EACH_ELEMENT; i < SCREENSIZE; i += 2) {
-        vidptr[i] = ' ';
-        vidptr[i + 1] = 0x10; // Dark blue background with white text
-    }
-    /* Adjust the current location */
-    current_loc -= COLUMNS_IN_LINE * BYTES_FOR_EACH_ELEMENT;
-}
 
 /*
 @brief Executes specific commands based on the input string that is given as char

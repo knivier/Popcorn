@@ -135,6 +135,7 @@ build_kernel() {
     # Compile C files
     compile_file "kernel.c" "$OBJ_DIR/kc.o" "c"
     compile_file "console.c" "$OBJ_DIR/console.o" "c"
+    compile_file "utils.c" "$OBJ_DIR/utils.o" "c"
     compile_file "pop_module.c" "$OBJ_DIR/pop_module.o" "c"
     compile_file "shimjapii_pop.c" "$OBJ_DIR/shimjapii_pop.o" "c"
     compile_file "spinner_pop.c" "$OBJ_DIR/spinner_pop.o" "c" 
@@ -146,7 +147,7 @@ build_kernel() {
     log "INFO" "Linking object files..."
     
     # Check if all object files exist
-    for obj in "$OBJ_DIR"/kasm.o "$OBJ_DIR"/kc.o "$OBJ_DIR"/console.o "$OBJ_DIR"/pop_module.o "$OBJ_DIR"/shimjapii_pop.o "$OBJ_DIR"/idt.o "$OBJ_DIR"/spinner_pop.o "$OBJ_DIR"/uptime_pop.o "$OBJ_DIR"/halt_pop.o "$OBJ_DIR"/filesystem_pop.o; do
+    for obj in "$OBJ_DIR"/kasm.o "$OBJ_DIR"/kc.o "$OBJ_DIR"/console.o "$OBJ_DIR"/utils.o "$OBJ_DIR"/pop_module.o "$OBJ_DIR"/shimjapii_pop.o "$OBJ_DIR"/idt.o "$OBJ_DIR"/spinner_pop.o "$OBJ_DIR"/uptime_pop.o "$OBJ_DIR"/halt_pop.o "$OBJ_DIR"/filesystem_pop.o; do
         if [ ! -f "$obj" ]; then
             log "ERROR" "Missing object file: $obj"
             exit 1
@@ -162,6 +163,7 @@ build_kernel() {
         "$OBJ_DIR/kasm.o" \
         "$OBJ_DIR/kc.o" \
         "$OBJ_DIR/console.o" \
+        "$OBJ_DIR/utils.o" \
         "$OBJ_DIR/pop_module.o" \
         "$OBJ_DIR/shimjapii_pop.o" \
         "$OBJ_DIR/idt.o" \

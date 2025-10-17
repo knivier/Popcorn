@@ -11,20 +11,61 @@ Popcorn is a modular and custom kernel framework for developers. It aims to prov
 - Building the Project
 - Running the Kernel
 
+### Version 0.5 Improvements
+- Implemented complete console system for VGA text mode management
+- Created shared utilities module (utils.c) to reduce code duplication
+- Updated all pop modules to use console system with cursor save/restore
+- Fixed keyboard input handling to prevent duplicate processing
+- Added proper backspace support
+- Modernized display output with professional console appearance
+- Improved status display layout (Ticks and Running indicators at top)
+
 ## Features
+- **Console System**
+  - Complete VGA text mode abstraction layer
+  - Cursor management and positioning
+  - Color styling with predefined themes
+  - Screen scrolling and clearing
+  - Status bar and header support
+  
 - **Pop Module System**
-  - Ability to register and execute custom pop modules.
-  - Modular design to easily add new pops without modifying the existing code.
+  - Ability to register and execute custom pop modules
+  - Modular design to easily add new pops without modifying the existing code
+  - All modules use console system for consistent behavior
+  - Cursor state preservation to prevent input interference
+
+- **Utilities Framework**
+  - Shared helper functions across modules
+  - Common delay function for animations
+  - Reduces code duplication
 
 ## Current Pops
 ### Shimjapii Pop
-- **Description**: Displays the message "Shimjapii popped!!!", this is an example pop module for developers
+- **Description**: Example pop module for developers
+- **Location**: Displays in bottom right corner
+- **Integration**: Uses console system with cursor save/restore
 
 ### Spinner Pop
-- **Description**: Displays a spinning loader animation with the message "Loading..."
+- **Description**: Animated loading indicator
+- **Location**: Top-right corner (row 0)
+- **Display**: "Running... |/-\" with rotating animation
+- **Integration**: Updates without interfering with user input
 
 ### Uptime Pop
-- **Description**: Displays the tick counter
+- **Description**: System tick counter
+- **Location**: Top-left corner (row 0)
+- **Display**: "Ticks: XXXXXX"
+- **Integration**: Real-time counter that preserves cursor position
+
+### Halt Pop
+- **Description**: Visual halt screen with animations
+- **Features**: Green screen effect, rainbow colors, fade to black
+- **Integration**: Uses shared util_delay function
+
+### Filesystem Pop
+- **Description**: In-memory filesystem with directories
+- **Commands**: create, write, read, delete, mkdir, go, back, listsys
+- **Integration**: Uses console system for status messages
 
 ## Pops in Progress
 
@@ -43,17 +84,25 @@ Popcorn is a modular and custom kernel framework for developers. It aims to prov
 
 ## Next Steps
 - **Module Development**
-  - Create and integrate additional pop modules.
-  - Ensure that each module is well-documented and tested.
+  - Create and integrate additional pop modules using the console system
+  - Ensure that each module follows the cursor save/restore pattern
+  - All new pops should use shared utilities where appropriate
   - The ability to run C++ files to build the project in C++ but natively in C
   
+- **Console Enhancements**
+  - Add more color schemes and themes
+  - Implement double-buffering for flicker-free animations
+  - Add support for custom fonts or character sets
+  
 - **Community Engagement**
-  - Encourage contributions from other developers.
-  - Provide clear guidelines for contributing and reporting issues.
+  - Encourage contributions from other developers
+  - Provide clear guidelines for contributing and reporting issues
+  - Maintain pop.md with updated examples for new developers
 
 - **Documentation**
-  - Improve and expand the documentation to cover more aspects of the project.
-  - Create tutorials and examples to help new developers get started with Popcorn.
+  - Improve and expand the documentation to cover the console system
+  - Create tutorials and examples to help new developers get started with Popcorn
+  - Document best practices for pop module development
 
 ## Long-term Goals
 - **Advanced Features**
@@ -66,4 +115,4 @@ Popcorn is a modular and custom kernel framework for developers. It aims to prov
 
 ---
 
-We welcome any contributions and feedback from the community to help improve Popcorn. 
+We welcome any contributions and feedback from the community to help improve Popcorn.

@@ -21,16 +21,13 @@ Popcorn is a simple kernel framework designed to help you understand the basics 
 
 ### Directory Structure
 
-(taken from Gitingest, not UTD for 0.3+)
 ROOT
 
-└── knivier-popcorn/
+└── Popcorn/
 
     ├── readme.md
     
     ├── LICENSE
-    
-    ├── cmdlet.txt
     
     ├── pop.md
     
@@ -38,50 +35,73 @@ ROOT
     
     └── src/
     
-        ├── build.sh
+        ├── build.sh          (Interactive build system)
         
-        ├── halt_pop.c
+        ├── build.ps1         (PowerShell build script)
         
-        ├── idt.asm
+        ├── trymake.sh        (Simple build script)
         
-        ├── kernel
+        ├── kernel.c          (Main kernel)
         
-        ├── kernel.asm
+        ├── kernel.asm        (Bootloader)
         
-        ├── kernel.c
+        ├── console.c         (Console system)
         
-        ├── keyboard_map.h
+        ├── utils.c           (Shared utilities)
         
-        ├── link.ld
+        ├── pop_module.c      (Pop module manager)
         
-        ├── pop_module.c
+        ├── halt_pop.c        (Halt module)
         
-        ├── rbuild.sh
+        ├── spinner_pop.c     (Spinner animation)
         
-        ├── shimjapii_pop.c
+        ├── uptime_pop.c      (Uptime counter)
         
-        ├── spinner_pop.c
+        ├── filesystem_pop.c  (Filesystem module)
         
-        ├── uptime_pop.c
+        ├── shimjapii_pop.c   (Example pop)
+        
+        ├── idt.asm           (Interrupt descriptor)
+        
+        ├── link.ld           (Linker script)
         
         ├── buildbase/
         
-        │   └── .build_config
+        │   ├── .build_config
+        
+        │   └── build.log
         
         ├── includes/
         
-        │   ├── pop_module.h
+        │   ├── console.h     (Console system header)
         
-        │   └── spinner_pop.h
+        │   ├── utils.h       (Utilities header)
         
-        └── obj/
+        │   ├── pop_module.h  (Pop module header)
+        
+        │   ├── spinner_pop.h (Spinner header)
+        
+        │   └── keyboard_map.h
+        
+        └── obj/              (Compiled objects)
 
 
 ### Building the Project
 To build the project, follow the assembly and compilation instructions provided above. Ensure you have the necessary tools like `nasm`, `gcc`, and `ld` installed on your system.
 
 ### Running the Kernel
-After building the project, you can run the kernel using QEMU with the command provided above. This will start the system and display the kernel messages on the screen. "Pops" are other files that run that aren't kernel.c based
+After building the project, you can run the kernel using QEMU with the command provided above. This will start the system and display the kernel messages on the screen. "Pops" are modular components that extend kernel functionality without modifying the core kernel.c file.
+
+### Architecture Overview
+Popcorn v0.5 introduces a modern console system and modular architecture:
+
+- Console System: A complete VGA text mode abstraction layer that handles all screen output, cursor management, and color styling. All display operations go through the console system for consistency.
+
+- Pop Modules: Self-contained modules that register with the kernel and can display information or provide functionality. Each pop module saves and restores console state to avoid interfering with user input.
+
+- Utilities: Shared helper functions (like delay) used across multiple modules to reduce code duplication.
+
+- Keyboard Input: Handled through interrupt-driven system with proper IDT setup and keyboard controller initialization.
 
 ### Future Plans
 The project is still in its early stages and marked as unstable. Future updates will include more features and improvements to the kernel framework.

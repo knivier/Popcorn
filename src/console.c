@@ -199,11 +199,11 @@ void console_draw_box(unsigned int x, unsigned int y, unsigned int width, unsign
 
 // Draw a header with title (using ASCII characters for compatibility)
 void console_draw_header(const char* title) {
-    console_set_cursor(0, 0);
+    console_set_cursor(0, 1);
     console_print_color("+------------------------------------------------------------------------------+", CONSOLE_HEADER_COLOR);
     console_newline();
     
-    console_set_cursor(0, 1);
+    console_set_cursor(0, 2);
     console_print_color("|", CONSOLE_HEADER_COLOR);
     
     // Center the title
@@ -221,7 +221,7 @@ void console_draw_header(const char* title) {
     console_print_color("|", CONSOLE_HEADER_COLOR);
     console_newline();
     
-    console_set_cursor(0, 2);
+    console_set_cursor(0, 3);
     console_print_color("+------------------------------------------------------------------------------+", CONSOLE_HEADER_COLOR);
     console_newline();
     console_newline();

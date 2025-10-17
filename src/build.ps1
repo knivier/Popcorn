@@ -19,7 +19,7 @@ function Build-Kernel {
     if ($LASTEXITCODE -ne 0) { exit 1 }
 
     # Compile C files
-    $cFiles = @("kernel.c", "console.c", "pop_module.c", "shimjapii_pop.c", "spinner_pop.c", "uptime_pop.c", "halt_pop.c", "filesystem_pop.c")
+    $cFiles = @("kernel.c", "console.c", "utils.c", "pop_module.c", "shimjapii_pop.c", "spinner_pop.c", "uptime_pop.c", "halt_pop.c", "filesystem_pop.c")
 
     foreach ($file in $cFiles) {
         $outputFile = "$OBJ_DIR/" + [System.IO.Path]::GetFileNameWithoutExtension($file) + ".o"
@@ -32,6 +32,7 @@ function Build-Kernel {
         "$OBJ_DIR/kasm.o" `
         "$OBJ_DIR/kernel.o" `
         "$OBJ_DIR/console.o" `
+        "$OBJ_DIR/utils.o" `
         "$OBJ_DIR/pop_module.o" `
         "$OBJ_DIR/shimjapii_pop.o" `
         "$OBJ_DIR/idt.o" `
