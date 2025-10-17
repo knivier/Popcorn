@@ -1,4 +1,5 @@
 #include "includes/pop_module.h"
+#include "includes/console.h"
 #include <stdbool.h>
 #include <stddef.h> // Include for NULL
 
@@ -279,23 +280,28 @@ void list_hierarchy(char* vidptr) {
     }
 }
 
+// Access console state to save/restore cursor
+extern ConsoleState console_state;
+
 // Function to initialize the file system pop module
 void filesystem_pop_func(unsigned int start_pos) {
+    (void)start_pos;
+    
     // Initialize the file system
     init_filesystem();
-    char* vidptr = (char*)0xb8000;
-    const char* message = "File Systems Ready";
-    unsigned int pos = 24 * 80 * 2; // Start at the bottom left of the screen
-    unsigned int i = 0;
-
-    while (message[i] != '\0') {
-        vidptr[pos] = message[i];
-        vidptr[pos + 1] = 0x07;  // Light grey color
-        ++i;
-        pos += 2;
-    }
-    // Example file system operations
     
+    // Save current console state
+    unsigned int prev_x = console_state.cursor_x;
+    unsigned int prev_y = console_state.cursor_y;
+    unsigned char prev_color = console_state.current_color;
+    
+    // Write message at bottom left of screen (row 24, col 0)
+    console_set_cursor(0, 24);
+    console_print_color("File Systems Ready", CONSOLE_SUCCESS_COLOR);
+    
+    // Restore previous cursor/color so normal typing is unaffected
+    console_set_color(prev_color);
+    console_set_cursor(prev_x, prev_y);
 }
 
 const PopModule filesystem_module = {

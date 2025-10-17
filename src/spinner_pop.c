@@ -47,8 +47,8 @@ void spinner_pop_func(unsigned int start_pos) {
     // Update spinner state for next call
     spinner_state = (spinner_state + 1) % 4;
 
-    // Small delay to make animation readable
-    delay(100);
+    // Very small delay to avoid interfering with typing
+    delay(10);
 }
 
 const PopModule spinner_module = {

@@ -18,6 +18,7 @@
 #define KERNEL_CODE_SEGMENT_OFFSET 0x08
 
 #define ENTER_KEY_CODE 0x1C
+#define BACKSPACE_KEY_CODE 0x0E
 
 extern unsigned char keyboard_map[128];
 extern void keyboard_handler(void);
@@ -146,37 +147,11 @@ void *memset(void *s, int c, size_t n) {
 }
 
 void keyboard_handler_main(void) {
-    unsigned char status;
-    char keycode;
-
-    /* write EOI */
+    /* write EOI - End of Interrupt */
     write_port(0x20, 0x20);
-
-    status = read_port(KEYBOARD_STATUS_PORT);
-    /* Lowest bit of status will be set if buffer is not empty */
-    if (status & 0x01) {
-        keycode = read_port(KEYBOARD_DATA_PORT);
-        if (keycode < 0)
-            return;
-
-        if (keycode == ENTER_KEY_CODE) {
-            input_buffer[input_index] = '\0'; // Null-terminate the input buffer
-            console_newline();
-            console_print_color("Input received: ", CONSOLE_INFO_COLOR);
-            console_print_color(input_buffer, CONSOLE_FG_COLOR); // Print the input buffer for debugging
-            console_newline();
-
-            execute_command(input_buffer);
-            input_index = 0;
-            memset(input_buffer, 0, sizeof(input_buffer));
-            return;
-        }
-
-        if (input_index < sizeof(input_buffer) - 1) {
-            input_buffer[input_index++] = keyboard_map[(unsigned char)keycode];
-            console_putchar(keyboard_map[(unsigned char)keycode]);
-        }
-    }
+    
+    /* The actual keyboard input is handled in the main loop */
+    /* This function just acknowledges the interrupt */
 }
 
 /* Simple implementation of strcmp because we can't use too many external libraries for this source */
@@ -226,6 +201,7 @@ void scroll_screen(void)
 */
 void execute_command(const char *command) {
     if (strcmp(command, "help") == 0 || strcmp(command, "halp") == 0) {
+        console_newline();
         console_println_color("Available Commands:", CONSOLE_HEADER_COLOR);
         console_draw_separator(console_state.cursor_y, CONSOLE_FG_COLOR);
         
@@ -267,8 +243,6 @@ void execute_command(const char *command) {
         
         console_print_color("  stop", CONSOLE_PROMPT_COLOR);
         console_println(" - Shuts down the system");
-        
-        console_newline();
     } else if (strcmp(command, "hang") == 0) {
         console_print_warning("System hanging...");
         spinner_pop_func(current_loc);
@@ -280,7 +254,6 @@ void execute_command(const char *command) {
         console_clear();
         console_draw_header("Popcorn Kernel v0.4");
         console_print_success("Screen cleared!");
-        console_draw_prompt();
     } else if (strcmp(command, "uptime") == 0) {
         console_newline();
         char buffer[64];
@@ -304,7 +277,6 @@ void execute_command(const char *command) {
                     console_clear();
                     console_draw_header("Popcorn Kernel v0.4");
                     console_print_success("System resumed!");
-                    console_draw_prompt();
                     break;
                 }
             }
@@ -436,7 +408,6 @@ void execute_command(const char *command) {
         console_println_color(command, CONSOLE_FG_COLOR);
         console_println_color("Type 'help' for available commands", CONSOLE_INFO_COLOR);
     }
-    console_newline();
 }
 
 /*
@@ -465,8 +436,11 @@ void kmain(void) {
     register_pop_module(&uptime_module);
     register_pop_module(&filesystem_module);
     
-    // Initialize filesystem
+    // Initialize filesystem (but don't let it move cursor)
+    unsigned int save_x = console_state.cursor_x;
+    unsigned int save_y = console_state.cursor_y;
     filesystem_module.pop_function(current_loc);
+    console_set_cursor(save_x, save_y);
     
     // Draw initial prompt
     console_draw_prompt();
@@ -476,7 +450,7 @@ void kmain(void) {
 
     // Main input loop
     while (1) {
-        // Update status displays
+        // Update status displays (always safe since they save/restore cursor)
         spinner_pop_func(current_loc);
         uptime_module.pop_function(current_loc + 16);
         
@@ -488,19 +462,28 @@ void kmain(void) {
             keycode = read_port(KEYBOARD_DATA_PORT);
             if (keycode < 0)
                 continue;
+            
             if (keycode == ENTER_KEY_CODE) {
                 input_buffer[input_index] = '\0';
-                console_newline();
-                console_print_color("Input received: ", CONSOLE_INFO_COLOR);
-                console_print_color(input_buffer, CONSOLE_FG_COLOR);
                 console_newline();
                 execute_command(input_buffer);
                 input_index = 0;
                 memset(input_buffer, 0, sizeof(input_buffer));
+                console_newline();
                 console_draw_prompt();
+            } else if (keycode == BACKSPACE_KEY_CODE) {
+                // Handle backspace: remove from buffer and screen
+                if (input_index > 0) {
+                    input_index--;
+                    input_buffer[input_index] = '\0';
+                    console_backspace();
+                }
             } else if (input_index < sizeof(input_buffer) - 1) {
-                input_buffer[input_index++] = keyboard_map[(unsigned char)keycode];
-                console_putchar(keyboard_map[(unsigned char)keycode]);
+                char ch = keyboard_map[(unsigned char)keycode];
+                if (ch != 0) {  // Only add printable characters
+                    input_buffer[input_index++] = ch;
+                    console_putchar(ch);
+                }
             }
         }
     }

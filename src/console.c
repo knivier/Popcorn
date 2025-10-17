@@ -147,6 +147,14 @@ void console_backspace(void) {
         vga_memory[pos] = ' ';
         vga_memory[pos + 1] = CONSOLE_BG_COLOR | CONSOLE_FG_COLOR;
         current_loc = pos;
+    } else if (console_state.cursor_y > 0) {
+        // Move to end of previous line if at start of line
+        console_state.cursor_y--;
+        console_state.cursor_x = VGA_WIDTH - 1;
+        unsigned int pos = (console_state.cursor_y * VGA_WIDTH + console_state.cursor_x) * 2;
+        vga_memory[pos] = ' ';
+        vga_memory[pos + 1] = CONSOLE_BG_COLOR | CONSOLE_FG_COLOR;
+        current_loc = pos;
     }
 }
 
@@ -189,14 +197,14 @@ void console_draw_box(unsigned int x, unsigned int y, unsigned int width, unsign
     }
 }
 
-// Draw a header with title
+// Draw a header with title (using ASCII characters for compatibility)
 void console_draw_header(const char* title) {
     console_set_cursor(0, 0);
-    console_print_color("╔══════════════════════════════════════════════════════════════════════════════╗", CONSOLE_HEADER_COLOR);
+    console_print_color("+------------------------------------------------------------------------------+", CONSOLE_HEADER_COLOR);
     console_newline();
     
     console_set_cursor(0, 1);
-    console_print_color("║", CONSOLE_HEADER_COLOR);
+    console_print_color("|", CONSOLE_HEADER_COLOR);
     
     // Center the title
     unsigned int title_len = 0;
@@ -210,11 +218,11 @@ void console_draw_header(const char* title) {
     for (unsigned int i = 0; i < 78 - title_len - padding; i++) {
         console_print_color(" ", CONSOLE_HEADER_COLOR);
     }
-    console_print_color("║", CONSOLE_HEADER_COLOR);
+    console_print_color("|", CONSOLE_HEADER_COLOR);
     console_newline();
     
     console_set_cursor(0, 2);
-    console_print_color("╚══════════════════════════════════════════════════════════════════════════════╝", CONSOLE_HEADER_COLOR);
+    console_print_color("+------------------------------------------------------------------------------+", CONSOLE_HEADER_COLOR);
     console_newline();
     console_newline();
 }
@@ -226,6 +234,11 @@ void console_draw_prompt(void) {
 
 // Print status bar at bottom
 void console_print_status_bar(void) {
+    // Save current cursor position
+    unsigned int prev_x = console_state.cursor_x;
+    unsigned int prev_y = console_state.cursor_y;
+    unsigned char prev_color = console_state.current_color;
+    
     console_set_cursor(0, VGA_HEIGHT - 1);
     
     // Clear the line first
@@ -238,6 +251,10 @@ void console_print_status_bar(void) {
     console_set_cursor(0, VGA_HEIGHT - 1);
     console_print_color("Status: Ready | ", CONSOLE_INFO_COLOR);
     console_print_color("Press 'help' for commands", CONSOLE_SUCCESS_COLOR);
+    
+    // Restore cursor position
+    console_set_color(prev_color);
+    console_set_cursor(prev_x, prev_y);
 }
 
 // Print error message
@@ -283,11 +300,11 @@ void console_center_text(const char* text, unsigned int y, unsigned char color) 
     console_print_color(text, color);
 }
 
-// Draw a separator line
+// Draw a separator line (using ASCII characters)
 void console_draw_separator(unsigned int y, unsigned char color) {
     console_set_cursor(0, y);
     for (unsigned int i = 0; i < VGA_WIDTH; i++) {
-        console_print_color("─", color);
+        console_print_color("-", color);
     }
     console_newline();
 }
