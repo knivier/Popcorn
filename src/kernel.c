@@ -24,7 +24,10 @@ extern unsigned char keyboard_map[128];
 extern void keyboard_handler(void);
 extern char read_port(unsigned short port);
 extern void write_port(unsigned short port, unsigned char data);
-extern void load_idt(unsigned long *idt_ptr);
+
+/* Forward declaration for IDT_ptr structure */
+struct IDT_ptr;
+extern void load_idt(struct IDT_ptr *idt_ptr);
 
 /* Global variables */
 char input_buffer[128] = {0}; // Increased size to accommodate longer input
@@ -34,7 +37,7 @@ unsigned int input_index = 0;
 void execute_command(const char *command);
 void int_to_str(int num, char *str);
 int get_tick_count(void);
-int strncmp(const char *str1, const char *str2, unsigned int n); // Declaration of strncmp
+int strncmp(const char *str1, const char *str2, size_t n); // Declaration of strncmp
 bool create_file(const char* name); // Declaration of create_file
 bool write_file(const char* name, const char* content); // Declaration of write_file
 const char* read_file(const char* name); // Declaration of read_file
@@ -56,29 +59,39 @@ char *vidptr = (char*)0xb8000;
 // Console state
 ConsoleState console_state = {0, 0, CONSOLE_FG_COLOR, true, false};
 
+/* 64-bit IDT entry structure (16 bytes) */
 struct IDT_entry {
-    unsigned short int offset_lowerbits;
-    unsigned short int selector;
-    unsigned char zero;
-    unsigned char type_attr;
-    unsigned short int offset_higherbits;
-};
+    unsigned short int offset_low;      /* offset bits 0..15 */
+    unsigned short int selector;        /* code segment selector */
+    unsigned char ist;                  /* bits 0..2 holds Interrupt Stack Table offset, rest reserved */
+    unsigned char type_attr;            /* type and attributes */
+    unsigned short int offset_mid;      /* offset bits 16..31 */
+    unsigned int offset_high;           /* offset bits 32..63 */
+    unsigned int reserved;              /* reserved */
+} __attribute__((packed));
 
 struct IDT_entry IDT[IDT_SIZE];
+
+/* IDT descriptor for LIDT instruction */
+struct IDT_ptr {
+    unsigned short limit;
+    unsigned long base;
+} __attribute__((packed));
 
 void idt_init(void)
 {
     unsigned long keyboard_address;
-    unsigned long idt_address;
-    unsigned long idt_ptr[2];
+    struct IDT_ptr idt_ptr;
 
     /* populate IDT entry of keyboard's interrupt */
     keyboard_address = (unsigned long)keyboard_handler;
-    IDT[0x21].offset_lowerbits = keyboard_address & 0xffff;
+    IDT[0x21].offset_low = keyboard_address & 0xFFFF;
     IDT[0x21].selector = KERNEL_CODE_SEGMENT_OFFSET;
-    IDT[0x21].zero = 0;
+    IDT[0x21].ist = 0;                   /* no IST */
     IDT[0x21].type_attr = INTERRUPT_GATE;
-    IDT[0x21].offset_higherbits = (keyboard_address & 0xffff0000) >> 16;
+    IDT[0x21].offset_mid = (keyboard_address >> 16) & 0xFFFF;
+    IDT[0x21].offset_high = (keyboard_address >> 32) & 0xFFFFFFFF;
+    IDT[0x21].reserved = 0;
 
     /*     Ports
     *    PIC1    PIC2
@@ -112,11 +125,10 @@ void idt_init(void)
     write_port(0xA1 , 0xff);
 
     /* fill the IDT descriptor */
-    idt_address = (unsigned long)IDT ;
-    idt_ptr[0] = (sizeof (struct IDT_entry) * IDT_SIZE) + ((idt_address & 0xffff) << 16);
-    idt_ptr[1] = idt_address >> 16 ;
+    idt_ptr.limit = (sizeof(struct IDT_entry) * IDT_SIZE) - 1;
+    idt_ptr.base = (unsigned long)IDT;
 
-    load_idt(idt_ptr);
+    load_idt(&idt_ptr);
 }
 
 void kb_init(void)
@@ -167,8 +179,8 @@ int strcmp(const char *str1, const char *str2) {
 }
 
 /* Simple implementation of strncmp because we can't use too many external libraries for this source */
-int strncmp(const char *str1, const char *str2, unsigned int n) {
-    unsigned int i = 0;
+int strncmp(const char *str1, const char *str2, size_t n) {
+    size_t i = 0;
     while (i < n && str1[i] && str2[i] && str1[i] == str2[i]) {
         i++;
     }

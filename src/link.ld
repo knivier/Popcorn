@@ -1,22 +1,31 @@
 /*
-*  link.ld
+*  link.ld - 64-bit version
 */
-OUTPUT_FORMAT(elf32-i386)
+OUTPUT_FORMAT(elf64-x86-64)
 ENTRY(start)
 SECTIONS
 {
    . = 0x100000;
+   
+   .multiboot : {
+      *(.multiboot)
+   } :code
+   
    .text : {
       *(.text)
    } :code
+   
    .rodata : {
       *(.rodata*)
    } :data
+   
    .data : {
       *(.data)
    } :data
+   
    .bss : {
       *(.bss)
+      *(COMMON)
    } :data
 }
 
