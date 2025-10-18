@@ -54,7 +54,6 @@ void uptime_pop_func(unsigned int start_pos) {
     unsigned int prev_y = console_state.cursor_y;
     unsigned char prev_color = console_state.current_color;
 
-    unsigned int buffer_length = i;
     console_set_cursor(1, 0);
     console_print_color(buffer, CONSOLE_INFO_COLOR);
 

@@ -40,9 +40,13 @@ bool write_file(const char* name, const char* content); // Declaration of write_
 const char* read_file(const char* name); // Declaration of read_file
 bool delete_file(const char* name); // Declaration of delete_file
 void list_files(void); // Declaration of list_files
+void list_files_console(void); // Declaration of list_files_console
 bool create_directory(const char* name); // Declaration of create_directory
 bool change_directory(const char* name); // Declaration of change_directory
 void list_hierarchy(char* vidptr); // Declaration of list_hierarchy
+const char* get_current_directory(void); // Declaration of get_current_directory
+const char* search_file(const char* name); // Declaration of search_file
+bool copy_file(const char* src_name, const char* dest_path); // Declaration of copy_file
 
 /* current cursor location */
 unsigned int current_loc = 0;
@@ -50,7 +54,7 @@ unsigned int current_loc = 0;
 char *vidptr = (char*)0xb8000;
 
 // Console state
-ConsoleState console_state = {0, 0, CONSOLE_FG_COLOR, true};
+ConsoleState console_state = {0, 0, CONSOLE_FG_COLOR, true, false};
 
 struct IDT_entry {
     unsigned short int offset_lowerbits;
@@ -181,10 +185,15 @@ extern const PopModule filesystem_module;
 
 /*
 @brief Executes specific commands based on the input string that is given as char
-@param string buffer to store the string representation of the integer
+@param command Command string to execute
 
 */
 void execute_command(const char *command) {
+    // Validate input command is not NULL or empty
+    if (command == NULL || command[0] == '\0') {
+        return;
+    }
+    
     if (strcmp(command, "help") == 0 || strcmp(command, "halp") == 0) {
         console_newline();
         console_println_color("Available Commands:", CONSOLE_HEADER_COLOR);
@@ -214,6 +223,9 @@ void execute_command(const char *command) {
         console_print_color("  delete <filename>", CONSOLE_PROMPT_COLOR);
         console_println(" - Deletes a file");
         
+        console_print_color("  rm <filename>", CONSOLE_PROMPT_COLOR);
+        console_println(" - Removes a file (alias for delete)");
+        
         console_print_color("  mkdir <dirname>", CONSOLE_PROMPT_COLOR);
         console_println(" - Creates a new directory");
         
@@ -222,6 +234,15 @@ void execute_command(const char *command) {
         
         console_print_color("  back", CONSOLE_PROMPT_COLOR);
         console_println(" - Goes back to the previous directory");
+        
+        console_print_color("  ls", CONSOLE_PROMPT_COLOR);
+        console_println(" - Lists files and directories in current directory");
+        
+        console_print_color("  search <filename>", CONSOLE_PROMPT_COLOR);
+        console_println(" - Searches for a file and shows its location");
+        
+        console_print_color("  cp <filename> <directory>", CONSOLE_PROMPT_COLOR);
+        console_println(" - Copies a file to another directory");
         
         console_print_color("  listsys", CONSOLE_PROMPT_COLOR);
         console_println(" - Lists the entire file system hierarchy");
@@ -237,7 +258,7 @@ void execute_command(const char *command) {
         }
     } else if (strcmp(command, "clear") == 0) {
         console_clear();
-        console_draw_header("Popcorn Kernel v0.4");
+        console_draw_header("Popcorn Kernel v0.5");
         console_print_success("Screen cleared!");
     } else if (strcmp(command, "uptime") == 0) {
         console_newline();
@@ -260,7 +281,7 @@ void execute_command(const char *command) {
                 char keycode = read_port(KEYBOARD_DATA_PORT);
                 if (keycode == ENTER_KEY_CODE) {
                     console_clear();
-                    console_draw_header("Popcorn Kernel v0.4");
+                    console_draw_header("Popcorn Kernel v0.5");
                     console_print_success("System resumed!");
                     break;
                 }
@@ -274,21 +295,40 @@ void execute_command(const char *command) {
         // If shutdown fails, halt the CPU
         asm volatile("hlt");
     } else if (strncmp(command, "create ", 7) == 0) {
+        // Validate that there is a filename after "create "
+        if (command[7] == '\0' || command[7] == ' ') {
+            console_print_error("Usage: create <filename>");
+            return;
+        }
+        
         char filename[21];
         int i = 0;
-        while (command[7 + i] != '\0' && i < 20) {
+        while (command[7 + i] != '\0' && command[7 + i] != ' ' && i < 20) {
             filename[i] = command[7 + i];
             i++;
         }
         filename[i] = '\0';
+        
+        // Validate filename is not empty after trimming
+        if (i == 0) {
+            console_print_error("Filename cannot be empty");
+            return;
+        }
+        
         if (create_file(filename)) {
             console_print_success("File created successfully");
             console_print_color("Filename: ", CONSOLE_INFO_COLOR);
             console_println_color(filename, CONSOLE_FG_COLOR);
         } else {
-            console_print_error("Could not create file");
+            console_print_error("Could not create file (file may already exist, name too long, or filesystem full)");
         }
     } else if (strncmp(command, "write ", 6) == 0) {
+        // Validate that there is content after "write "
+        if (command[6] == '\0' || command[6] == ' ') {
+            console_print_error("Usage: write <filename> <content>");
+            return;
+        }
+        
         char filename[21];
         char content[101];
         int i = 0;
@@ -298,88 +338,272 @@ void execute_command(const char *command) {
             i++;
         }
         filename[i] = '\0';
+        
+        // Validate filename is not empty
+        if (i == 0) {
+            console_print_error("Filename cannot be empty");
+            return;
+        }
+        
         if (command[6 + i] == ' ') {
             i++;
+            // Check if content is provided
+            if (command[6 + i] == '\0') {
+                console_print_error("Content cannot be empty");
+                return;
+            }
+            
             while (command[6 + i + j] != '\0' && j < 100) {
                 content[j] = command[6 + i + j];
                 j++;
             }
             content[j] = '\0';
+            
             if (write_file(filename, content)) {
                 console_print_success("File written successfully");
                 console_print_color("Filename: ", CONSOLE_INFO_COLOR);
                 console_println_color(filename, CONSOLE_FG_COLOR);
             } else {
-                console_print_error("Could not write to file");
+                console_print_error("Could not write to file (file may not exist, content too long, or invalid filename)");
             }
         } else {
             console_print_error("Invalid command format. Use: write <filename> <content>");
         }
     } else if (strncmp(command, "read ", 5) == 0) {
+        // Validate that there is a filename after "read "
+        if (command[5] == '\0' || command[5] == ' ') {
+            console_print_error("Usage: read <filename>");
+            return;
+        }
+        
         char filename[21];
         int i = 0;
-        while (command[5 + i] != '\0' && i < 20) {
+        while (command[5 + i] != '\0' && command[5 + i] != ' ' && i < 20) {
             filename[i] = command[5 + i];
             i++;
         }
         filename[i] = '\0';
+        
+        // Validate filename is not empty
+        if (i == 0) {
+            console_print_error("Filename cannot be empty");
+            return;
+        }
+        
         const char* content = read_file(filename);
         if (content) {
             console_print_color("File content: ", CONSOLE_INFO_COLOR);
             console_println_color(content, CONSOLE_FG_COLOR);
         } else {
-            console_print_error("Could not read file");
+            console_print_error("Could not read file (file may not exist or invalid filename)");
         }
     } else if (strncmp(command, "delete ", 7) == 0) {
+        // Validate that there is a filename after "delete "
+        if (command[7] == '\0' || command[7] == ' ') {
+            console_print_error("Usage: delete <filename>");
+            return;
+        }
+        
         char filename[21];
         int i = 0;
-        while (command[7 + i] != '\0' && i < 20) {
+        while (command[7 + i] != '\0' && command[7 + i] != ' ' && i < 20) {
             filename[i] = command[7 + i];
             i++;
         }
         filename[i] = '\0';
+        
+        // Validate filename is not empty
+        if (i == 0) {
+            console_print_error("Filename cannot be empty");
+            return;
+        }
+        
         if (delete_file(filename)) {
             console_print_success("File deleted successfully");
             console_print_color("Filename: ", CONSOLE_INFO_COLOR);
             console_println_color(filename, CONSOLE_FG_COLOR);
         } else {
-            console_print_error("Could not delete file");
+            console_print_error("Could not delete file (file may not exist or invalid filename)");
         }
     } else if (strncmp(command, "mkdir ", 6) == 0) {
+        // Validate that there is a directory name after "mkdir "
+        if (command[6] == '\0' || command[6] == ' ') {
+            console_print_error("Usage: mkdir <dirname>");
+            return;
+        }
+        
         char dirname[21];
         int i = 0;
-        while (command[6 + i] != '\0' && i < 20) {
+        while (command[6 + i] != '\0' && command[6 + i] != ' ' && i < 20) {
             dirname[i] = command[6 + i];
             i++;
         }
         dirname[i] = '\0';
+        
+        // Validate directory name is not empty
+        if (i == 0) {
+            console_print_error("Directory name cannot be empty");
+            return;
+        }
+        
         if (create_directory(dirname)) {
             console_print_success("Directory created successfully");
             console_print_color("Directory: ", CONSOLE_INFO_COLOR);
             console_println_color(dirname, CONSOLE_FG_COLOR);
         } else {
-            console_print_error("Could not create directory");
+            console_print_error("Could not create directory (directory may already exist, name too long, or filesystem full)");
         }
     } else if (strncmp(command, "go ", 3) == 0) {
+        // Validate that there is a directory name after "go "
+        if (command[3] == '\0' || command[3] == ' ') {
+            console_print_error("Usage: go <dirname>");
+            return;
+        }
+        
         char dirname[21];
         int i = 0;
-        while (command[3 + i] != '\0' && i < 20) {
+        while (command[3 + i] != '\0' && command[3 + i] != ' ' && i < 20) {
             dirname[i] = command[3 + i];
             i++;
         }
         dirname[i] = '\0';
+        
+        // Validate directory name is not empty
+        if (i == 0) {
+            console_print_error("Directory name cannot be empty");
+            return;
+        }
+        
         if (change_directory(dirname)) {
             console_print_success("Changed directory successfully");
             console_print_color("Directory: ", CONSOLE_INFO_COLOR);
             console_println_color(dirname, CONSOLE_FG_COLOR);
         } else {
-            console_print_error("Could not change directory");
+            console_print_error("Could not change directory (directory may not exist or invalid name)");
+        }
+    } else if (strncmp(command, "rm ", 3) == 0) {
+        // rm command - alias for delete with better error handling
+        if (command[3] == '\0' || command[3] == ' ') {
+            console_print_error("Usage: rm <filename>");
+            return;
+        }
+        
+        char filename[21];
+        int i = 0;
+        while (command[3 + i] != '\0' && command[3 + i] != ' ' && i < 20) {
+            filename[i] = command[3 + i];
+            i++;
+        }
+        filename[i] = '\0';
+        
+        if (i == 0) {
+            console_print_error("Filename cannot be empty");
+            return;
+        }
+        
+        if (delete_file(filename)) {
+            console_print_success("File removed successfully");
+            console_print_color("Filename: ", CONSOLE_INFO_COLOR);
+            console_println_color(filename, CONSOLE_FG_COLOR);
+        } else {
+            console_print_error("File not found or could not be removed");
+            console_print_color("Filename: ", CONSOLE_INFO_COLOR);
+            console_println_color(filename, CONSOLE_FG_COLOR);
         }
     } else if (strcmp(command, "back") == 0) {
         if (change_directory("back")) {
             console_print_success("Changed to parent directory");
         } else {
             console_print_error("Could not change directory");
+        }
+    } else if (strcmp(command, "ls") == 0) {
+        list_files_console();
+    } else if (strncmp(command, "search ", 7) == 0) {
+        // Search command - find file and return its directory
+        if (command[7] == '\0' || command[7] == ' ') {
+            console_print_error("Usage: search <filename>");
+            return;
+        }
+        
+        char filename[21];
+        int i = 0;
+        while (command[7 + i] != '\0' && command[7 + i] != ' ' && i < 20) {
+            filename[i] = command[7 + i];
+            i++;
+        }
+        filename[i] = '\0';
+        
+        if (i == 0) {
+            console_print_error("Filename cannot be empty");
+            return;
+        }
+        
+        const char* file_path = search_file(filename);
+        if (file_path) {
+            console_print_success("File found!");
+            console_print_color("Filename: ", CONSOLE_INFO_COLOR);
+            console_println_color(filename, CONSOLE_FG_COLOR);
+            console_print_color("Location: ", CONSOLE_INFO_COLOR);
+            console_println_color(file_path, CONSOLE_SUCCESS_COLOR);
+        } else {
+            console_print_error("File not found in filesystem");
+            console_print_color("Filename: ", CONSOLE_INFO_COLOR);
+            console_println_color(filename, CONSOLE_FG_COLOR);
+        }
+    } else if (strncmp(command, "cp ", 3) == 0) {
+        // Copy command - copy file to another directory
+        if (command[3] == '\0' || command[3] == ' ') {
+            console_print_error("Usage: cp <filename> <directory>");
+            return;
+        }
+        
+        char filename[21];
+        char destdir[100]; // MAX_PATH_LENGTH from filesystem
+        int i = 0;
+        int j = 0;
+        
+        // Parse filename
+        while (command[3 + i] != ' ' && i < 20 && command[3 + i] != '\0') {
+            filename[i] = command[3 + i];
+            i++;
+        }
+        filename[i] = '\0';
+        
+        if (i == 0) {
+            console_print_error("Filename cannot be empty");
+            return;
+        }
+        
+        // Skip spaces
+        while (command[3 + i] == ' ') {
+            i++;
+        }
+        
+        // Parse destination directory
+        if (command[3 + i] == '\0') {
+            console_print_error("Usage: cp <filename> <directory>");
+            return;
+        }
+        
+        while (command[3 + i + j] != '\0' && command[3 + i + j] != ' ' && j < 99) {
+            destdir[j] = command[3 + i + j];
+            j++;
+        }
+        destdir[j] = '\0';
+        
+        if (j == 0) {
+            console_print_error("Directory cannot be empty");
+            return;
+        }
+        
+        if (copy_file(filename, destdir)) {
+            console_print_success("File copied successfully");
+            console_print_color("From: ", CONSOLE_INFO_COLOR);
+            console_println_color(filename, CONSOLE_FG_COLOR);
+            console_print_color("To: ", CONSOLE_INFO_COLOR);
+            console_println_color(destdir, CONSOLE_FG_COLOR);
+        } else {
+            console_print_error("Could not copy file (file not found, destination doesn't exist, or already exists there)");
         }
     } else if (strcmp(command, "listsys") == 0) {
         console_newline();
@@ -405,11 +629,11 @@ void kmain(void) {
     console_init();
     
     // Draw the header
-    console_draw_header("Popcorn Kernel v0.4");
+    console_draw_header("Popcorn Kernel v0.5");
     
     // Print welcome message
     console_println_color("Welcome to Popcorn Kernel!", CONSOLE_SUCCESS_COLOR);
-    console_println_color("A modular metal kernel framework for learning OS development", CONSOLE_INFO_COLOR);
+    console_println_color("A modular kernel framework for learning OS development", CONSOLE_INFO_COLOR);
     console_newline();
     
     // Initialize system components
@@ -427,8 +651,8 @@ void kmain(void) {
     filesystem_module.pop_function(current_loc);
     console_set_cursor(save_x, save_y);
     
-    // Draw initial prompt
-    console_draw_prompt();
+    // Draw initial prompt with path
+    console_draw_prompt_with_path(get_current_directory());
     
     // Print status bar
     console_print_status_bar();
@@ -455,7 +679,7 @@ void kmain(void) {
                 input_index = 0;
                 memset(input_buffer, 0, sizeof(input_buffer));
                 console_newline();
-                console_draw_prompt();
+                console_draw_prompt_with_path(get_current_directory());
             } else if (keycode == BACKSPACE_KEY_CODE) {
                 // Handle backspace: remove from buffer and screen
                 if (input_index > 0) {

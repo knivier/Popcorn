@@ -61,6 +61,7 @@ typedef struct {
     unsigned int cursor_y;
     unsigned char current_color;
     bool cursor_visible;
+    bool double_buffer_enabled;
 } ConsoleState;
 
 // Function declarations
@@ -79,6 +80,7 @@ void console_backspace(void);
 void console_draw_box(unsigned int x, unsigned int y, unsigned int width, unsigned int height, unsigned char color);
 void console_draw_header(const char* title);
 void console_draw_prompt(void);
+void console_draw_prompt_with_path(const char* path);
 void console_print_status_bar(void);
 void console_print_error(const char* message);
 void console_print_success(const char* message);
@@ -89,5 +91,10 @@ void console_print_warning(const char* message);
 unsigned char make_color(unsigned char foreground, unsigned char background);
 void console_center_text(const char* text, unsigned int y, unsigned char color);
 void console_draw_separator(unsigned int y, unsigned char color);
+
+// Double buffering functions
+void console_enable_double_buffer(bool enable);
+void console_swap_buffers(void);
+void console_flush(void);
 
 #endif // CONSOLE_H

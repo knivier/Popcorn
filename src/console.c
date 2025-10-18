@@ -4,6 +4,10 @@
 extern ConsoleState console_state;
 static char* vga_memory = (char*)VGA_MEMORY_ADDRESS;
 
+// Double buffering support
+static char back_buffer[VGA_MEMORY_SIZE];
+static bool buffer_dirty = false;
+
 // External variables from kernel.c
 extern unsigned int current_loc;
 extern char input_buffer[128];
@@ -15,6 +19,14 @@ void console_init(void) {
     console_state.cursor_y = 0;
     console_state.current_color = CONSOLE_FG_COLOR;
     console_state.cursor_visible = true;
+    console_state.double_buffer_enabled = false;
+    
+    // Initialize back buffer
+    for (unsigned int i = 0; i < VGA_MEMORY_SIZE; i += 2) {
+        back_buffer[i] = ' ';
+        back_buffer[i + 1] = CONSOLE_BG_COLOR | CONSOLE_FG_COLOR;
+    }
+    
     console_clear();
 }
 
@@ -65,9 +77,15 @@ void console_putchar(char c) {
     // Calculate position in VGA memory
     unsigned int pos = (console_state.cursor_y * VGA_WIDTH + console_state.cursor_x) * 2;
     
-    // Write character and color
-    vga_memory[pos] = c;
-    vga_memory[pos + 1] = console_state.current_color;
+    // Write character and color to appropriate buffer
+    if (console_state.double_buffer_enabled) {
+        back_buffer[pos] = c;
+        back_buffer[pos + 1] = console_state.current_color;
+        buffer_dirty = true;
+    } else {
+        vga_memory[pos] = c;
+        vga_memory[pos + 1] = console_state.current_color;
+    }
     
     // Move cursor
     console_state.cursor_x++;
@@ -232,6 +250,13 @@ void console_draw_prompt(void) {
     console_print_color("popcorn@kernel:~$ ", CONSOLE_PROMPT_COLOR);
 }
 
+// Draw command prompt with current directory path
+void console_draw_prompt_with_path(const char* path) {
+    console_print_color("popcorn@kernel:", CONSOLE_PROMPT_COLOR);
+    console_print_color(path, CONSOLE_INFO_COLOR);
+    console_print_color("$ ", CONSOLE_PROMPT_COLOR);
+}
+
 // Print status bar at bottom
 void console_print_status_bar(void) {
     // Save current cursor position
@@ -307,4 +332,39 @@ void console_draw_separator(unsigned int y, unsigned char color) {
         console_print_color("-", color);
     }
     console_newline();
+}
+
+// Enable or disable double buffering
+void console_enable_double_buffer(bool enable) {
+    console_state.double_buffer_enabled = enable;
+    if (enable) {
+        // Copy current VGA memory to back buffer
+        for (unsigned int i = 0; i < VGA_MEMORY_SIZE; i++) {
+            back_buffer[i] = vga_memory[i];
+        }
+    } else {
+        // Flush any pending changes
+        console_flush();
+    }
+}
+
+// Swap buffers (copy back buffer to VGA memory)
+void console_swap_buffers(void) {
+    if (!console_state.double_buffer_enabled) {
+        return;
+    }
+    
+    if (buffer_dirty) {
+        for (unsigned int i = 0; i < VGA_MEMORY_SIZE; i++) {
+            vga_memory[i] = back_buffer[i];
+        }
+        buffer_dirty = false;
+    }
+}
+
+// Flush back buffer to screen
+void console_flush(void) {
+    if (console_state.double_buffer_enabled) {
+        console_swap_buffers();
+    }
 }
