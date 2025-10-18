@@ -24,24 +24,11 @@ python3 popcorn_builder_gui.py
 ```
 
 Features:
-- 🚀 **Full Automation**: One-click build and run
-- 🔨 **Manual Mode**: Individual build steps with verbose output
-- 📊 **Real-time Logs**: See build progress in real-time
-- 🎨 **Modern UI**: Clean, intuitive interface
 
-### Quick Start (Command Line)
-
-```bash
-cd src
-./create_iso.sh    # Build bootable ISO
-qemu-system-x86_64 -cdrom popcorn.iso -m 256
-```
-
-Or use the convenience script:
-```bash
-cd src
-./run_iso.sh       # Builds and runs automatically
-```
+- **Full Automation**: One-click build and run
+- **Manual Mode**: Individual build steps with verbose output
+- **Real-time Logs**: See build progress in real-time
+- **Modern UI**: Clean, intuitive interface
 
 ### Alternative: Interactive Build System
 
@@ -49,11 +36,10 @@ cd src
 
 2. Select "build kernel". This will automatically erase and build the kernel for you. If you have missing dependencies, the build should tell you. You will need NASM, GCC, LD, QEMU (x86_64 version), and GRUB tools. If you have build errors, it will not show the specific errors; use trymake.sh to have a non-fancy version of the building system
 
-3. Run `./create_iso.sh` to create a bootable ISO, then run with `qemu-system-x86_64 -cdrom popcorn.iso`
-
-**Note:** Direct kernel loading with `-kernel` may not work with all QEMU versions for 64-bit multiboot kernels. The ISO method is recommended.
+**Note:** Direct kernel loading with `-kernel` may not work with all QEMU versions for 64-bit multiboot kernels. The ISO method is rhighly ecommended.
 
 **Required tools for 64-bit build:**
+
 - `nasm` (for 64-bit assembly)
 - `gcc` with 64-bit support (`-m64`)
 - `ld` with x86-64 support
@@ -63,11 +49,13 @@ cd src
 Install all dependencies:
 
 **Fedora/RHEL:**
+
 ```bash
 sudo dnf install nasm gcc qemu-system-x86 grub2-tools-extra grub2-pc-modules xorriso mtools
 ```
 
 **Ubuntu/Debian:**
+
 ```bash
 sudo apt-get install nasm gcc qemu-system-x86 grub-pc-bin grub-common xorriso
 ```
@@ -85,7 +73,7 @@ Assembly instructions for linux-based systems (or WSL) without a build maker are
 Popcorn is a simple kernel framework designed to help you understand the basics of operating system development. The project includes a minimal bootloader, a kernel written in C, and some basic assembly code to get things started.
 
 ### Directory Structure
-
+```
 ROOT
 
 └── Popcorn/
@@ -149,6 +137,7 @@ ROOT
         │   └── keyboard_map.h
         
         └── obj/              (Compiled objects)
+```
 
 ### Building the Project
 

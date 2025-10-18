@@ -19,6 +19,7 @@ Popcorn is a modular and custom kernel framework for developers. It aims to prov
 - Added proper backspace support
 - Modernized display output with professional console appearance
 - Improved status display layout (Ticks and Running indicators at top)
+- x64 conversion, ISO creation can run natively on systems without VM
 
 ## Features
 - **Console System**
