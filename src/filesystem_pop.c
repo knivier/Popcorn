@@ -406,8 +406,8 @@ bool change_directory(const char* name) {
     
     if (strrcmp(name, "back") == 0) {
         if (strrcmp(current_path, "root") == 0) {
-            last_filesystem_error = ERR_SUCCESS;
-            return true; // Already at root, cannot go back further
+            last_filesystem_error = ERR_INVALID_OPERATION;
+            return false; // Already at root, cannot go back further
         }
         int i = 0;
         while (current_path[i] != '\0') {

@@ -474,6 +474,12 @@ void execute_command(const char *command) {
             return;
         }
         
+        // Prevent "go back" - user should use "back" command instead
+        if (strcmp(dirname, "back") == 0) {
+            console_print_error("Use 'back' command to go to parent directory (not 'go back')");
+            return;
+        }
+        
         if (change_directory(dirname)) {
             console_print_success("Changed directory successfully");
             console_print_color("Directory: ", CONSOLE_INFO_COLOR);
@@ -514,7 +520,7 @@ void execute_command(const char *command) {
         if (change_directory("back")) {
             console_print_success("Changed to parent directory");
         } else {
-            console_print_error("Could not change directory");
+            console_print_error("Already at root directory - cannot go back further");
         }
     } else if (strcmp(command, "ls") == 0) {
         list_files_console();
