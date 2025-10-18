@@ -23,6 +23,12 @@ build_kernel() {
     gcc -m32 -c kernel.c -o "$OBJ_DIR/kc.o" -Wall -Wextra -fno-stack-protector -lc
     if [ $? -ne 0 ]; then exit 1; fi
     
+    gcc -m32 -c console.c -o "$OBJ_DIR/console.o" -Wall -Wextra -fno-stack-protector -lc
+    if [ $? -ne 0 ]; then exit 1; fi
+    
+    gcc -m32 -c utils.c -o "$OBJ_DIR/utils.o" -Wall -Wextra -fno-stack-protector -lc
+    if [ $? -ne 0 ]; then exit 1; fi
+    
     gcc -m32 -c pop_module.c -o "$OBJ_DIR/pop_module.o" -Wall -Wextra -fno-stack-protector -lc
     if [ $? -ne 0 ]; then exit 1; fi
     
@@ -45,6 +51,8 @@ build_kernel() {
     ld -m elf_i386 -T link.ld -o kernel \
         "$OBJ_DIR"/kasm.o \
         "$OBJ_DIR"/kc.o \
+        "$OBJ_DIR"/console.o \
+        "$OBJ_DIR"/utils.o \
         "$OBJ_DIR"/pop_module.o \
         "$OBJ_DIR"/shimjapii_pop.o \
         "$OBJ_DIR"/idt.o \

@@ -1,6 +1,7 @@
 #include "includes/keyboard_map.h"
 #include "includes/pop_module.h"
 #include "includes/spinner_pop.h"
+#include "includes/console.h"
 #include <stddef.h>
 #include <stdbool.h>
 
@@ -17,6 +18,7 @@
 #define KERNEL_CODE_SEGMENT_OFFSET 0x08
 
 #define ENTER_KEY_CODE 0x1C
+#define BACKSPACE_KEY_CODE 0x0E
 
 extern unsigned char keyboard_map[128];
 extern void keyboard_handler(void);
@@ -29,7 +31,6 @@ char input_buffer[128] = {0}; // Increased size to accommodate longer input
 unsigned int input_index = 0;
 
 /* Function forward declarations */
-void scroll_screen(void);
 void execute_command(const char *command);
 void int_to_str(int num, char *str);
 int get_tick_count(void);
@@ -39,14 +40,21 @@ bool write_file(const char* name, const char* content); // Declaration of write_
 const char* read_file(const char* name); // Declaration of read_file
 bool delete_file(const char* name); // Declaration of delete_file
 void list_files(void); // Declaration of list_files
+void list_files_console(void); // Declaration of list_files_console
 bool create_directory(const char* name); // Declaration of create_directory
 bool change_directory(const char* name); // Declaration of change_directory
 void list_hierarchy(char* vidptr); // Declaration of list_hierarchy
+const char* get_current_directory(void); // Declaration of get_current_directory
+const char* search_file(const char* name); // Declaration of search_file
+bool copy_file(const char* src_name, const char* dest_path); // Declaration of copy_file
 
 /* current cursor location */
 unsigned int current_loc = 0;
 /* video memory begins at address 0xb8000 */
 char *vidptr = (char*)0xb8000;
+
+// Console state
+ConsoleState console_state = {0, 0, CONSOLE_FG_COLOR, true, false};
 
 struct IDT_entry {
     unsigned short int offset_lowerbits;
@@ -116,47 +124,20 @@ void kb_init(void)
     write_port(0x21 , 0xFD);
 }
 
-void kprint(const char *str) // prints the string to the screen with scrolling functionality
-{
-    unsigned int i = 0;
-    while (str[i] != '\0') {
-        vidptr[current_loc++] = str[i++];
-        vidptr[current_loc++] = 0x07;
-        if (current_loc >= SCREENSIZE) {
-            scroll_screen();
-        }
-    }
+void kprint(const char *str) {
+    console_print(str);
 }
 
-void kprint_newline(void) // prints a newline character to the screen with scrolling functionality
-{
-    unsigned int line_size = BYTES_FOR_EACH_ELEMENT * COLUMNS_IN_LINE;
-    current_loc = current_loc + (line_size - current_loc % (line_size));
-    if (current_loc >= SCREENSIZE) {
-        scroll_screen();
-    }
+void kprint_newline(void) {
+    console_newline();
 }
 
-void clear_screen(void) // Clears the output screen (fills with spaces and resets the cursor)
-{
-    unsigned int i = 0;
-    while (i < SCREENSIZE) {
-        vidptr[i++] = ' ';
-        vidptr[i++] = 0x10; // Dark blue background with white text
-    }
-    current_loc = 0;
+void clear_screen(void) {
+    console_clear();
 }
 
-void printTerm(const char *str, unsigned char color)
-{
-    unsigned int i = 0;
-    while (str[i] != '\0') {
-        vidptr[current_loc++] = str[i++];
-        vidptr[current_loc++] = color;
-        if (current_loc >= SCREENSIZE) {
-            scroll_screen();
-        }
-    }
+void printTerm(const char *str, unsigned char color) {
+    console_print_color(str, color);
 }
 
 /* Simple implementation of memset because we can't use too many external libraries */
@@ -168,43 +149,12 @@ void *memset(void *s, int c, size_t n) {
     return s;
 }
 
-void keyboard_handler_main(void)  // Kinda buggy but a working 4char implementation
-{
-    unsigned char status;
-    char keycode;
-
-    /* write EOI */
+void keyboard_handler_main(void) {
+    /* write EOI - End of Interrupt */
     write_port(0x20, 0x20);
-
-    status = read_port(KEYBOARD_STATUS_PORT);
-    /* Lowest bit of status will be set if buffer is not empty */
-    if (status & 0x01) {
-        keycode = read_port(KEYBOARD_DATA_PORT);
-        if (keycode < 0)
-            return;
-
-        if (keycode == ENTER_KEY_CODE) {
-            input_buffer[input_index] = '\0'; // Null-terminate the input buffer
-            kprint_newline();
-            kprint("Input received: ");
-            kprint(input_buffer); // Print the input buffer for debugging
-            kprint("\n");
-
-            execute_command(input_buffer);
-            input_index = 0;
-            memset(input_buffer, 0, sizeof(input_buffer));
-            return;
-        }
-
-        if (input_index < sizeof(input_buffer) - 1) {
-            input_buffer[input_index++] = keyboard_map[(unsigned char)keycode];
-            vidptr[current_loc++] = keyboard_map[(unsigned char)keycode];
-            vidptr[current_loc++] = 0x07;
-            if (current_loc >= SCREENSIZE) {
-                scroll_screen();
-            }
-        }
-    }
+    
+    /* The actual keyboard input is handled in the main loop */
+    /* This function just acknowledges the interrupt */
 }
 
 /* Simple implementation of strcmp because we can't use too many external libraries for this source */
@@ -233,118 +183,152 @@ extern const PopModule uptime_module;
 extern const PopModule halt_module;
 extern const PopModule filesystem_module;
 
-void scroll_screen(void)
-{
-    unsigned int i;
-    for (i = 0; i < (LINES - 1) * COLUMNS_IN_LINE * BYTES_FOR_EACH_ELEMENT; i++) {
-        vidptr[i] = vidptr[i + COLUMNS_IN_LINE * BYTES_FOR_EACH_ELEMENT];
-    }
-    for (i = (LINES - 1) * COLUMNS_IN_LINE * BYTES_FOR_EACH_ELEMENT; i < SCREENSIZE; i += 2) {
-        vidptr[i] = ' ';
-        vidptr[i + 1] = 0x10; // Dark blue background with white text
-    }
-    /* Adjust the current location */
-    current_loc -= COLUMNS_IN_LINE * BYTES_FOR_EACH_ELEMENT;
-}
-
 /*
 @brief Executes specific commands based on the input string that is given as char
-@param string buffer to store the string representation of the integer
+@param command Command string to execute
 
 */
-void execute_command(const char *command)
-{ // uses strcmp to compare the command to the string 
+void execute_command(const char *command) {
+    // Validate input command is not NULL or empty
+    if (command == NULL || command[0] == '\0') {
+        return;
+    }
+    
     if (strcmp(command, "help") == 0 || strcmp(command, "halp") == 0) {
-        kprint_newline();
-        kprint("hang T hangs the system in a loop");
-        kprint_newline();
-        kprint("clear T clears the screen");
-        kprint_newline();
-        kprint("uptime T prints the uptime");
-        kprint_newline();
-        kprint("halt T halts the system");
-        kprint_newline();
-        kprint("create <filename> T creates a new file");
-        kprint_newline();
-        kprint("write <filename> <content> T writes content to a file");
-        kprint_newline();
-        kprint("read <filename> T reads the content of a file");
-        kprint_newline();
-        kprint("delete <filename> T deletes a file");
-        kprint_newline();
-        kprint("mkdir <dirname> T creates a new directory");
-        kprint_newline();
-        kprint("go <dirname> T changes to the specified directory");
-        kprint_newline();
-        kprint("back T goes back to the previous directory");
-        kprint_newline();
-        kprint("listsys T lists the entire file system hierarchy");
-        kprint_newline();
-    } else if (strcmp(command, "hang") == 0) { // Hang implementation causes graphics issues with blue flickering due to system not being able to catch up
-        kprint_newline(); // There is no escaping a hang
+        console_newline();
+        console_println_color("Available Commands:", CONSOLE_HEADER_COLOR);
+        console_draw_separator(console_state.cursor_y, CONSOLE_FG_COLOR);
+        
+        console_print_color("  hang", CONSOLE_PROMPT_COLOR);
+        console_println(" - Hangs the system in a loop");
+        
+        console_print_color("  clear", CONSOLE_PROMPT_COLOR);
+        console_println(" - Clears the screen");
+        
+        console_print_color("  uptime", CONSOLE_PROMPT_COLOR);
+        console_println(" - Prints the system uptime");
+        
+        console_print_color("  halt", CONSOLE_PROMPT_COLOR);
+        console_println(" - Halts the system");
+        
+        console_print_color("  create <filename>", CONSOLE_PROMPT_COLOR);
+        console_println(" - Creates a new file");
+        
+        console_print_color("  write <filename> <content>", CONSOLE_PROMPT_COLOR);
+        console_println(" - Writes content to a file");
+        
+        console_print_color("  read <filename>", CONSOLE_PROMPT_COLOR);
+        console_println(" - Reads the content of a file");
+        
+        console_print_color("  delete <filename>", CONSOLE_PROMPT_COLOR);
+        console_println(" - Deletes a file");
+        
+        console_print_color("  rm <filename>", CONSOLE_PROMPT_COLOR);
+        console_println(" - Removes a file (alias for delete)");
+        
+        console_print_color("  mkdir <dirname>", CONSOLE_PROMPT_COLOR);
+        console_println(" - Creates a new directory");
+        
+        console_print_color("  go <dirname>", CONSOLE_PROMPT_COLOR);
+        console_println(" - Changes to the specified directory");
+        
+        console_print_color("  back", CONSOLE_PROMPT_COLOR);
+        console_println(" - Goes back to the previous directory");
+        
+        console_print_color("  ls", CONSOLE_PROMPT_COLOR);
+        console_println(" - Lists files and directories in current directory");
+        
+        console_print_color("  search <filename>", CONSOLE_PROMPT_COLOR);
+        console_println(" - Searches for a file and shows its location");
+        
+        console_print_color("  cp <filename> <directory>", CONSOLE_PROMPT_COLOR);
+        console_println(" - Copies a file to another directory");
+        
+        console_print_color("  listsys", CONSOLE_PROMPT_COLOR);
+        console_println(" - Lists the entire file system hierarchy");
+        
+        console_print_color("  stop", CONSOLE_PROMPT_COLOR);
+        console_println(" - Shuts down the system");
+    } else if (strcmp(command, "hang") == 0) {
+        console_print_warning("System hanging...");
         spinner_pop_func(current_loc);
         uptime_module.pop_function(current_loc + 16);
-        while (1) {kprint("Hanging..."); }
-    for (int i = 0; i < 5; i++) {
-        kprint(".");
-        for (volatile int j = 0; j < 10000000; j++); // Simple delay loop
-    }
+        while (1) {
+            console_print_color("Hanging...", CONSOLE_ERROR_COLOR);
+        }
     } else if (strcmp(command, "clear") == 0) {
-        clear_screen();
-        kprint("Screen cleared!");
+        console_clear();
+        console_draw_header("Popcorn Kernel v0.5");
+        console_print_success("Screen cleared!");
     } else if (strcmp(command, "uptime") == 0) {
-        kprint_newline();
+        console_newline();
         char buffer[64];
         int_to_str(get_tick_count(), buffer);
-        kprint("Uptime: ");
-        kprint(buffer);
-        kprint_newline();
+        console_print_color("Uptime: ", CONSOLE_INFO_COLOR);
+        console_print_color(buffer, CONSOLE_FG_COLOR);
+        console_println(" ticks");
+        
         int ticks = get_tick_count();
         int ticks_per_second = ticks / 150; // Inaccurate estimation, please be aware needs to be tuned!
         int_to_str(ticks_per_second, buffer);
-        kprint(" (");
-        kprint(buffer);
-        kprint(" seconds EST)");
-        kprint_newline(); 
+        console_print_color("Estimated seconds: ", CONSOLE_INFO_COLOR);
+        console_println_color(buffer, CONSOLE_FG_COLOR);
     } else if (strcmp(command, "halt") == 0) {
-        kprint_newline();
-        kprint("System halted. Press Enter to continue...");
+        console_print_warning("System halted. Press Enter to continue...");
         while (1) {
-            unsigned char status = read_port(KEYBOARD_STATUS_PORT); // Waits for the enter key to resume functionality
+            unsigned char status = read_port(KEYBOARD_STATUS_PORT);
             if (status & 0x01) {
                 char keycode = read_port(KEYBOARD_DATA_PORT);
                 if (keycode == ENTER_KEY_CODE) {
-                    clear_screen();
-                    kprint("System resumed!");
+                    console_clear();
+                    console_draw_header("Popcorn Kernel v0.5");
+                    console_print_success("System resumed!");
                     break;
                 }
             }
             halt_module.pop_function(current_loc);
         }
     } else if (strcmp(command, "stop") == 0) {
-            kprint_newline();
-            kprint("Shutting down...");
-            // Send shutdown command to QEMU/Bochs via port 0x604
-            write_port(0x64, 0xFE);  // Send reset command to keyboard controller
-            // If shutdown fails, halt the CPU
-            asm volatile("hlt");
+        console_print_warning("Shutting down...");
+        // Send shutdown command to QEMU/Bochs via port 0x604
+        write_port(0x64, 0xFE);  // Send reset command to keyboard controller
+        // If shutdown fails, halt the CPU
+        asm volatile("hlt");
     } else if (strncmp(command, "create ", 7) == 0) {
+        // Validate that there is a filename after "create "
+        if (command[7] == '\0' || command[7] == ' ') {
+            console_print_error("Usage: create <filename>");
+            return;
+        }
+        
         char filename[21];
         int i = 0;
-        while (command[7 + i] != '\0' && i < 20) {
+        while (command[7 + i] != '\0' && command[7 + i] != ' ' && i < 20) {
             filename[i] = command[7 + i];
             i++;
         }
         filename[i] = '\0';
-        if (create_file(filename)) {
-            kprint("File created: ");
-            kprint(filename);
-        } else {
-            kprint_newline();
-            kprint("Error: Could not create file");
+        
+        // Validate filename is not empty after trimming
+        if (i == 0) {
+            console_print_error("Filename cannot be empty");
+            return;
         }
-        kprint_newline();
+        
+        if (create_file(filename)) {
+            console_print_success("File created successfully");
+            console_print_color("Filename: ", CONSOLE_INFO_COLOR);
+            console_println_color(filename, CONSOLE_FG_COLOR);
+        } else {
+            console_print_error("Could not create file (file may already exist, name too long, or filesystem full)");
+        }
     } else if (strncmp(command, "write ", 6) == 0) {
+        // Validate that there is content after "write "
+        if (command[6] == '\0' || command[6] == ' ') {
+            console_print_error("Usage: write <filename> <content>");
+            return;
+        }
+        
         char filename[21];
         char content[101];
         int i = 0;
@@ -354,107 +338,291 @@ void execute_command(const char *command)
             i++;
         }
         filename[i] = '\0';
+        
+        // Validate filename is not empty
+        if (i == 0) {
+            console_print_error("Filename cannot be empty");
+            return;
+        }
+        
         if (command[6 + i] == ' ') {
             i++;
+            // Check if content is provided
+            if (command[6 + i] == '\0') {
+                console_print_error("Content cannot be empty");
+                return;
+            }
+            
             while (command[6 + i + j] != '\0' && j < 100) {
                 content[j] = command[6 + i + j];
                 j++;
             }
             content[j] = '\0';
+            
             if (write_file(filename, content)) {
-                kprint("File written: ");
-                kprint(filename);
+                console_print_success("File written successfully");
+                console_print_color("Filename: ", CONSOLE_INFO_COLOR);
+                console_println_color(filename, CONSOLE_FG_COLOR);
             } else {
-                kprint("Error: Could not write to file");
+                console_print_error("Could not write to file (file may not exist, content too long, or invalid filename)");
             }
         } else {
-            kprint_newline();
-            kprint("Error: Invalid command format");
+            console_print_error("Invalid command format. Use: write <filename> <content>");
         }
-        kprint_newline();
     } else if (strncmp(command, "read ", 5) == 0) {
+        // Validate that there is a filename after "read "
+        if (command[5] == '\0' || command[5] == ' ') {
+            console_print_error("Usage: read <filename>");
+            return;
+        }
+        
         char filename[21];
         int i = 0;
-        while (command[5 + i] != '\0' && i < 20) {
+        while (command[5 + i] != '\0' && command[5 + i] != ' ' && i < 20) {
             filename[i] = command[5 + i];
             i++;
         }
         filename[i] = '\0';
+        
+        // Validate filename is not empty
+        if (i == 0) {
+            console_print_error("Filename cannot be empty");
+            return;
+        }
+        
         const char* content = read_file(filename);
         if (content) {
-            kprint("File content: ");
-            kprint(content);
+            console_print_color("File content: ", CONSOLE_INFO_COLOR);
+            console_println_color(content, CONSOLE_FG_COLOR);
         } else {
-            kprint_newline();
-            kprint("Error: Could not read file");
+            console_print_error("Could not read file (file may not exist or invalid filename)");
         }
-        kprint_newline();
     } else if (strncmp(command, "delete ", 7) == 0) {
+        // Validate that there is a filename after "delete "
+        if (command[7] == '\0' || command[7] == ' ') {
+            console_print_error("Usage: delete <filename>");
+            return;
+        }
+        
         char filename[21];
         int i = 0;
-        while (command[7 + i] != '\0' && i < 20) {
+        while (command[7 + i] != '\0' && command[7 + i] != ' ' && i < 20) {
             filename[i] = command[7 + i];
             i++;
         }
         filename[i] = '\0';
-        if (delete_file(filename)) {
-            kprint("File deleted: ");
-            kprint(filename);
-        } else {
-            kprint_newline();
-            kprint("Error: Could not delete file");
+        
+        // Validate filename is not empty
+        if (i == 0) {
+            console_print_error("Filename cannot be empty");
+            return;
         }
-        kprint_newline();
+        
+        if (delete_file(filename)) {
+            console_print_success("File deleted successfully");
+            console_print_color("Filename: ", CONSOLE_INFO_COLOR);
+            console_println_color(filename, CONSOLE_FG_COLOR);
+        } else {
+            console_print_error("Could not delete file (file may not exist or invalid filename)");
+        }
     } else if (strncmp(command, "mkdir ", 6) == 0) {
+        // Validate that there is a directory name after "mkdir "
+        if (command[6] == '\0' || command[6] == ' ') {
+            console_print_error("Usage: mkdir <dirname>");
+            return;
+        }
+        
         char dirname[21];
         int i = 0;
-        while (command[6 + i] != '\0' && i < 20) {
+        while (command[6 + i] != '\0' && command[6 + i] != ' ' && i < 20) {
             dirname[i] = command[6 + i];
             i++;
         }
         dirname[i] = '\0';
-        if (create_directory(dirname)) {
-            kprint("Directory created: ");
-            kprint(dirname);
-        } else {
-            kprint_newline();
-            kprint("Error: Could not create directory");
+        
+        // Validate directory name is not empty
+        if (i == 0) {
+            console_print_error("Directory name cannot be empty");
+            return;
         }
-        kprint_newline();
+        
+        if (create_directory(dirname)) {
+            console_print_success("Directory created successfully");
+            console_print_color("Directory: ", CONSOLE_INFO_COLOR);
+            console_println_color(dirname, CONSOLE_FG_COLOR);
+        } else {
+            console_print_error("Could not create directory (directory may already exist, name too long, or filesystem full)");
+        }
     } else if (strncmp(command, "go ", 3) == 0) {
+        // Validate that there is a directory name after "go "
+        if (command[3] == '\0' || command[3] == ' ') {
+            console_print_error("Usage: go <dirname>");
+            return;
+        }
+        
         char dirname[21];
         int i = 0;
-        while (command[3 + i] != '\0' && i < 20) {
+        while (command[3 + i] != '\0' && command[3 + i] != ' ' && i < 20) {
             dirname[i] = command[3 + i];
             i++;
         }
         dirname[i] = '\0';
-        if (change_directory(dirname)) {
-            kprint("Changed to directory: ");
-            kprint(dirname);
-        } else {
-            kprint_newline();
-            kprint("Error: Could not change directory");
+        
+        // Validate directory name is not empty
+        if (i == 0) {
+            console_print_error("Directory name cannot be empty");
+            return;
         }
-        kprint_newline();
+        
+        // Prevent "go back" - user should use "back" command instead
+        if (strcmp(dirname, "back") == 0) {
+            console_print_error("Use 'back' command to go to parent directory (not 'go back')");
+            return;
+        }
+        
+        if (change_directory(dirname)) {
+            console_print_success("Changed directory successfully");
+            console_print_color("Directory: ", CONSOLE_INFO_COLOR);
+            console_println_color(dirname, CONSOLE_FG_COLOR);
+        } else {
+            console_print_error("Could not change directory (directory may not exist or invalid name)");
+        }
+    } else if (strncmp(command, "rm ", 3) == 0) {
+        // rm command - alias for delete with better error handling
+        if (command[3] == '\0' || command[3] == ' ') {
+            console_print_error("Usage: rm <filename>");
+            return;
+        }
+        
+        char filename[21];
+        int i = 0;
+        while (command[3 + i] != '\0' && command[3 + i] != ' ' && i < 20) {
+            filename[i] = command[3 + i];
+            i++;
+        }
+        filename[i] = '\0';
+        
+        if (i == 0) {
+            console_print_error("Filename cannot be empty");
+            return;
+        }
+        
+        if (delete_file(filename)) {
+            console_print_success("File removed successfully");
+            console_print_color("Filename: ", CONSOLE_INFO_COLOR);
+            console_println_color(filename, CONSOLE_FG_COLOR);
+        } else {
+            console_print_error("File not found or could not be removed");
+            console_print_color("Filename: ", CONSOLE_INFO_COLOR);
+            console_println_color(filename, CONSOLE_FG_COLOR);
+        }
     } else if (strcmp(command, "back") == 0) {
         if (change_directory("back")) {
-            kprint("Changed to parent directory");
+            console_print_success("Changed to parent directory");
         } else {
-            kprint_newline();
-            kprint("Error: Could not change directory");
+            console_print_error("Already at root directory - cannot go back further");
         }
-        kprint_newline();
+    } else if (strcmp(command, "ls") == 0) {
+        list_files_console();
+    } else if (strncmp(command, "search ", 7) == 0) {
+        // Search command - find file and return its directory
+        if (command[7] == '\0' || command[7] == ' ') {
+            console_print_error("Usage: search <filename>");
+            return;
+        }
+        
+        char filename[21];
+        int i = 0;
+        while (command[7 + i] != '\0' && command[7 + i] != ' ' && i < 20) {
+            filename[i] = command[7 + i];
+            i++;
+        }
+        filename[i] = '\0';
+        
+        if (i == 0) {
+            console_print_error("Filename cannot be empty");
+            return;
+        }
+        
+        const char* file_path = search_file(filename);
+        if (file_path) {
+            console_print_success("File found!");
+            console_print_color("Filename: ", CONSOLE_INFO_COLOR);
+            console_println_color(filename, CONSOLE_FG_COLOR);
+            console_print_color("Location: ", CONSOLE_INFO_COLOR);
+            console_println_color(file_path, CONSOLE_SUCCESS_COLOR);
+        } else {
+            console_print_error("File not found in filesystem");
+            console_print_color("Filename: ", CONSOLE_INFO_COLOR);
+            console_println_color(filename, CONSOLE_FG_COLOR);
+        }
+    } else if (strncmp(command, "cp ", 3) == 0) {
+        // Copy command - copy file to another directory
+        if (command[3] == '\0' || command[3] == ' ') {
+            console_print_error("Usage: cp <filename> <directory>");
+            return;
+        }
+        
+        char filename[21];
+        char destdir[100]; // MAX_PATH_LENGTH from filesystem
+        int i = 0;
+        int j = 0;
+        
+        // Parse filename
+        while (command[3 + i] != ' ' && i < 20 && command[3 + i] != '\0') {
+            filename[i] = command[3 + i];
+            i++;
+        }
+        filename[i] = '\0';
+        
+        if (i == 0) {
+            console_print_error("Filename cannot be empty");
+            return;
+        }
+        
+        // Skip spaces
+        while (command[3 + i] == ' ') {
+            i++;
+        }
+        
+        // Parse destination directory
+        if (command[3 + i] == '\0') {
+            console_print_error("Usage: cp <filename> <directory>");
+            return;
+        }
+        
+        while (command[3 + i + j] != '\0' && command[3 + i + j] != ' ' && j < 99) {
+            destdir[j] = command[3 + i + j];
+            j++;
+        }
+        destdir[j] = '\0';
+        
+        if (j == 0) {
+            console_print_error("Directory cannot be empty");
+            return;
+        }
+        
+        if (copy_file(filename, destdir)) {
+            console_print_success("File copied successfully");
+            console_print_color("From: ", CONSOLE_INFO_COLOR);
+            console_println_color(filename, CONSOLE_FG_COLOR);
+            console_print_color("To: ", CONSOLE_INFO_COLOR);
+            console_println_color(destdir, CONSOLE_FG_COLOR);
+        } else {
+            console_print_error("Could not copy file (file not found, destination doesn't exist, or already exists there)");
+        }
     } else if (strcmp(command, "listsys") == 0) {
-        kprint_newline();
+        console_newline();
+        console_println_color("File System Hierarchy:", CONSOLE_HEADER_COLOR);
+        console_draw_separator(console_state.cursor_y, CONSOLE_FG_COLOR);
         list_hierarchy(vidptr);
-        kprint_newline();
+        console_newline();
     } else {
-        kprint(command);
-        kprint(" was not found");
-        kprint_newline();
+        console_print_error("Command not found");
+        console_print_color("Command: ", CONSOLE_INFO_COLOR);
+        console_println_color(command, CONSOLE_FG_COLOR);
+        console_println_color("Type 'help' for available commands", CONSOLE_INFO_COLOR);
     }
-    kprint_newline();
 }
 
 /*
@@ -462,38 +630,46 @@ Where the magic happens, authored by Knivier
 This is executed in kernel.asm and is the heart of the program
 It boots the system then initializes all pops, then waits for inputs in a while loop to keep the kernel running
 */
-void kmain(void)
-{
-    const char *boot_msg = "Popcorn v0.4 Popped!";
-
-    // Clear the screen with dark blue background
-    unsigned int j = 0;
-    while (j < 80 * 25 * 2) {
-        vidptr[j] = ' ';
-        vidptr[j + 1] = 0x10; // Dark blue background
-        j += 2;
-    }
+void kmain(void) {
+    // Initialize the console system
+    console_init();
     
-    // Print the welcome message with green text on dark blue background
-    unsigned int i = 0;
-    while (boot_msg[i] != '\0') {
-        vidptr[i * 2] = boot_msg[i];
-        vidptr[i * 2 + 1] = 0x12; // Green color on dark blue background
-        i++;
-    }
-    current_loc = i * 2;
-
+    // Draw the header
+    console_draw_header("Popcorn Kernel v0.5");
+    
+    // Print welcome message
+    console_println_color("Welcome to Popcorn Kernel!", CONSOLE_SUCCESS_COLOR);
+    console_println_color("A modular kernel framework for learning OS development", CONSOLE_INFO_COLOR);
+    console_newline();
+    
+    // Initialize system components
     idt_init();
     kb_init();
+    
+    // Register pop modules
     register_pop_module(&spinner_module);
     register_pop_module(&uptime_module);
     register_pop_module(&filesystem_module);
-    filesystem_module.pop_function(current_loc); // Test initialization of filesystem pop 
+    
+    // Initialize filesystem (but don't let it move cursor)
+    unsigned int save_x = console_state.cursor_x;
+    unsigned int save_y = console_state.cursor_y;
+    filesystem_module.pop_function(current_loc);
+    console_set_cursor(save_x, save_y);
+    
+    // Draw initial prompt with path
+    console_draw_prompt_with_path(get_current_directory());
+    
+    // Print status bar
+    console_print_status_bar();
 
+    // Main input loop
     while (1) {
+        // Update status displays (always safe since they save/restore cursor)
         spinner_pop_func(current_loc);
         uptime_module.pop_function(current_loc + 16);
-        /* Wait for user input */
+        
+        // Handle keyboard input
         unsigned char status;
         char keycode;
         status = read_port(KEYBOARD_STATUS_PORT);
@@ -501,21 +677,27 @@ void kmain(void)
             keycode = read_port(KEYBOARD_DATA_PORT);
             if (keycode < 0)
                 continue;
+            
             if (keycode == ENTER_KEY_CODE) {
-                input_buffer[input_index] = '\0'; // Null-terminate the input buffer, very important!
-                kprint_newline();
-                kprint("Input received: ");
-                kprint(input_buffer); // Print the input buffer for debugging
-                kprint_newline();
+                input_buffer[input_index] = '\0';
+                console_newline();
                 execute_command(input_buffer);
                 input_index = 0;
                 memset(input_buffer, 0, sizeof(input_buffer));
+                console_newline();
+                console_draw_prompt_with_path(get_current_directory());
+            } else if (keycode == BACKSPACE_KEY_CODE) {
+                // Handle backspace: remove from buffer and screen
+                if (input_index > 0) {
+                    input_index--;
+                    input_buffer[input_index] = '\0';
+                    console_backspace();
+                }
             } else if (input_index < sizeof(input_buffer) - 1) {
-                input_buffer[input_index++] = keyboard_map[(unsigned char)keycode];
-                vidptr[current_loc++] = keyboard_map[(unsigned char)keycode];
-                vidptr[current_loc++] = 0x07;
-                if (current_loc >= SCREENSIZE) {
-                    scroll_screen();
+                char ch = keyboard_map[(unsigned char)keycode];
+                if (ch != 0) {  // Only add printable characters
+                    input_buffer[input_index++] = ch;
+                    console_putchar(ch);
                 }
             }
         }
