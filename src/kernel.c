@@ -2,6 +2,10 @@
 #include "includes/pop_module.h"
 #include "includes/spinner_pop.h"
 #include "includes/console.h"
+#include "includes/multiboot2.h"
+#include "includes/sysinfo_pop.h"
+#include "includes/memory_pop.h"
+#include "includes/cpu_pop.h"
 #include <stddef.h>
 #include <stdbool.h>
 
@@ -194,6 +198,9 @@ extern const PopModule spinner_module;
 extern const PopModule uptime_module;
 extern const PopModule halt_module;
 extern const PopModule filesystem_module;
+extern const PopModule sysinfo_module;
+extern const PopModule memory_module;
+extern const PopModule cpu_module;
 
 /*
 @brief Executes specific commands based on the input string that is given as char
@@ -258,6 +265,15 @@ void execute_command(const char *command) {
         
         console_print_color("  listsys", CONSOLE_PROMPT_COLOR);
         console_println(" - Lists the entire file system hierarchy");
+        
+        console_print_color("  sysinfo", CONSOLE_PROMPT_COLOR);
+        console_println(" - Displays detailed system information");
+        
+        console_print_color("  mem [option]", CONSOLE_PROMPT_COLOR);
+        console_println(" - Memory commands: -map, -use, -stats");
+        
+        console_print_color("  cpu [option]", CONSOLE_PROMPT_COLOR);
+        console_println(" - CPU commands: -hz, -info");
         
         console_print_color("  stop", CONSOLE_PROMPT_COLOR);
         console_println(" - Shuts down the system");
@@ -629,6 +645,34 @@ void execute_command(const char *command) {
         console_draw_separator(console_state.cursor_y, CONSOLE_FG_COLOR);
         list_hierarchy(vidptr);
         console_newline();
+    } else if (strcmp(command, "sysinfo") == 0) {
+        sysinfo_print_full();
+    } else if (strncmp(command, "mem ", 4) == 0) {
+        // Memory commands: mem -map, mem -use, mem -stats
+        if (strcmp(command + 4, "-map") == 0) {
+            memory_print_map();
+        } else if (strcmp(command + 4, "-use") == 0) {
+            memory_print_usage();
+        } else if (strcmp(command + 4, "-stats") == 0) {
+            memory_print_stats();
+        } else {
+            console_print_error("Unknown mem option. Use: -map, -use, or -stats");
+        }
+    } else if (strcmp(command, "mem") == 0) {
+        // Default: show usage
+        memory_print_usage();
+    } else if (strncmp(command, "cpu ", 4) == 0) {
+        // CPU commands: cpu -hz, cpu -info
+        if (strcmp(command + 4, "-hz") == 0) {
+            cpu_print_frequency();
+        } else if (strcmp(command + 4, "-info") == 0) {
+            cpu_print_info();
+        } else {
+            console_print_error("Unknown cpu option. Use: -hz or -info");
+        }
+    } else if (strcmp(command, "cpu") == 0) {
+        // Default: show info
+        cpu_print_info();
     } else {
         console_print_error("Command not found");
         console_print_color("Command: ", CONSOLE_INFO_COLOR);
@@ -654,6 +698,9 @@ void kmain(void) {
     console_println_color("A modular kernel framework for learning OS development", CONSOLE_INFO_COLOR);
     console_newline();
     
+    // Parse Multiboot2 information from bootloader
+    multiboot2_parse();
+    
     // Initialize system components
     idt_init();
     kb_init();
@@ -662,6 +709,9 @@ void kmain(void) {
     register_pop_module(&spinner_module);
     register_pop_module(&uptime_module);
     register_pop_module(&filesystem_module);
+    register_pop_module(&sysinfo_module);
+    register_pop_module(&memory_module);
+    register_pop_module(&cpu_module);
     
     // Initialize filesystem (but don't let it move cursor)
     unsigned int save_x = console_state.cursor_x;

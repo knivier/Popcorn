@@ -153,12 +153,16 @@ build_kernel() {
     compile_file "uptime_pop.c" "$OBJ_DIR/uptime_pop.o" "c"
     compile_file "halt_pop.c" "$OBJ_DIR/halt_pop.o" "c"
     compile_file "filesystem_pop.c" "$OBJ_DIR/filesystem_pop.o" "c"
+    compile_file "multiboot2.c" "$OBJ_DIR/multiboot2.o" "c"
+    compile_file "sysinfo_pop.c" "$OBJ_DIR/sysinfo_pop.o" "c"
+    compile_file "memory_pop.c" "$OBJ_DIR/memory_pop.o" "c"
+    compile_file "cpu_pop.c" "$OBJ_DIR/cpu_pop.o" "c"
     
     # Link files
     log "INFO" "Linking object files..."
     
     # Check if all object files exist
-    for obj in "$OBJ_DIR"/kasm.o "$OBJ_DIR"/kc.o "$OBJ_DIR"/console.o "$OBJ_DIR"/utils.o "$OBJ_DIR"/pop_module.o "$OBJ_DIR"/shimjapii_pop.o "$OBJ_DIR"/idt.o "$OBJ_DIR"/spinner_pop.o "$OBJ_DIR"/uptime_pop.o "$OBJ_DIR"/halt_pop.o "$OBJ_DIR"/filesystem_pop.o; do
+    for obj in "$OBJ_DIR"/kasm.o "$OBJ_DIR"/kc.o "$OBJ_DIR"/console.o "$OBJ_DIR"/utils.o "$OBJ_DIR"/pop_module.o "$OBJ_DIR"/shimjapii_pop.o "$OBJ_DIR"/idt.o "$OBJ_DIR"/spinner_pop.o "$OBJ_DIR"/uptime_pop.o "$OBJ_DIR"/halt_pop.o "$OBJ_DIR"/filesystem_pop.o "$OBJ_DIR"/multiboot2.o "$OBJ_DIR"/sysinfo_pop.o "$OBJ_DIR"/memory_pop.o "$OBJ_DIR"/cpu_pop.o; do
         if [ ! -f "$obj" ]; then
             log "ERROR" "Missing object file: $obj"
             exit 1
@@ -181,7 +185,11 @@ build_kernel() {
         "$OBJ_DIR/spinner_pop.o" \
         "$OBJ_DIR/uptime_pop.o" \
         "$OBJ_DIR/halt_pop.o" \
-        "$OBJ_DIR/filesystem_pop.o"
+        "$OBJ_DIR/filesystem_pop.o" \
+        "$OBJ_DIR/multiboot2.o" \
+        "$OBJ_DIR/sysinfo_pop.o" \
+        "$OBJ_DIR/memory_pop.o" \
+        "$OBJ_DIR/cpu_pop.o"
     
     check_status "Linking object files"
 }

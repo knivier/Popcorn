@@ -26,6 +26,9 @@ extern kmain
 start:
   cli                      ;block interrupts
   
+  ; Save Multiboot2 info pointer (GRUB passes it in ebx)
+  mov [multiboot2_info_ptr], ebx
+  
   ; Set up page tables for long mode
   ; Clear page table memory
   mov edi, page_table_l4
@@ -95,6 +98,10 @@ global keyboard_handler
 global read_port
 global write_port
 global load_idt
+global cpuid_get_vendor
+global cpuid_get_features
+global cpuid_extended_brand
+global rdtsc
 
 extern keyboard_handler_main
 
@@ -155,6 +162,63 @@ keyboard_handler:
   
   iretq
 
+; CPUID wrapper to get CPU vendor string
+; Parameters: rdi = pointer to 12-byte buffer for vendor string
+cpuid_get_vendor:
+  push rbx          ; rbx is callee-saved
+  xor eax, eax      ; CPUID leaf 0 (vendor string)
+  cpuid
+  
+  ; Vendor string is returned in EBX:EDX:ECX (in that order)
+  mov [rdi], ebx    ; First 4 bytes
+  mov [rdi+4], edx  ; Next 4 bytes
+  mov [rdi+8], ecx  ; Last 4 bytes
+  
+  pop rbx
+  ret
+
+; CPUID wrapper to get CPU features and info
+; Parameters: rdi = pointer to 16-byte buffer for output
+; Returns: EAX, EBX, ECX, EDX from CPUID leaf 1
+cpuid_get_features:
+  push rbx          ; rbx is callee-saved
+  mov eax, 1        ; CPUID leaf 1 (processor info and feature bits)
+  cpuid
+  
+  ; Store all four registers
+  mov [rdi], eax    ; Processor version info
+  mov [rdi+4], ebx  ; Additional info
+  mov [rdi+8], ecx  ; Feature flags (ECX)
+  mov [rdi+12], edx ; Feature flags (EDX)
+  
+  pop rbx
+  ret
+
+; CPUID wrapper for extended brand string and other leaves
+; Parameters: rdi = CPUID leaf, rsi = pointer to 16-byte buffer
+cpuid_extended_brand:
+  push rbx          ; rbx is callee-saved
+  mov eax, edi      ; Load leaf number from first parameter
+  xor ecx, ecx      ; Sub-leaf 0
+  cpuid
+  
+  ; Store all four registers
+  mov [rsi], eax
+  mov [rsi+4], ebx
+  mov [rsi+8], ecx
+  mov [rsi+12], edx
+  
+  pop rbx
+  ret
+
+; Read Time Stamp Counter (RDTSC)
+; Returns: 64-bit TSC value in RAX
+rdtsc:
+  rdtsc             ; Read TSC into EDX:EAX
+  shl rdx, 32       ; Shift high 32 bits to upper half
+  or rax, rdx       ; Combine into 64-bit value in RAX
+  ret
+
 ; GDT for 64-bit mode
 section .rodata
 align 8
@@ -176,6 +240,11 @@ page_table_l3:
   resb 4096
 page_table_l2:
   resb 4096
+
+; Multiboot2 info pointer storage
+global multiboot2_info_ptr
+multiboot2_info_ptr:
+  resq 1                   ; 64-bit pointer to Multiboot2 info
 
 ; Stack
 align 16
