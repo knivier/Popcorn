@@ -6,6 +6,7 @@
 #include "includes/sysinfo_pop.h"
 #include "includes/memory_pop.h"
 #include "includes/cpu_pop.h"
+#include "includes/dolphin_pop.h"
 #include <stddef.h>
 #include <stdbool.h>
 
@@ -248,10 +249,11 @@ const char* get_history_command(int offset) {
 /* List of all commands for autocomplete */
 static const char* available_commands[] = {
     "help", "halp", "hang", "clear", "uptime", "halt", "stop",
-    "create", "write", "read", "delete", "rm", "mkdir", "go", "back",
+    "write", "read", "delete", "rm", "mkdir", "go", "back",
     "ls", "search", "cp", "listsys", "sysinfo",
     "mem", "mem -map", "mem -use", "mem -stats",
     "cpu", "cpu -hz", "cpu -info",
+    "dol", "dol -new", "dol -open", "dol -save", "dol -close", "dol -help",
     NULL
 };
 
@@ -329,6 +331,7 @@ extern const PopModule filesystem_module;
 extern const PopModule sysinfo_module;
 extern const PopModule memory_module;
 extern const PopModule cpu_module;
+extern const PopModule dolphin_module;
 
 /*
 @brief Executes specific commands based on the input string that is given as char
@@ -357,9 +360,6 @@ void execute_command(const char *command) {
         
         console_print_color("  halt", CONSOLE_PROMPT_COLOR);
         console_println(" - Halts the system");
-        
-        console_print_color("  create <filename>", CONSOLE_PROMPT_COLOR);
-        console_println(" - Creates a new file");
         
         console_print_color("  write <filename> <content>", CONSOLE_PROMPT_COLOR);
         console_println(" - Writes content to a file");
@@ -402,6 +402,9 @@ void execute_command(const char *command) {
         
         console_print_color("  cpu [option]", CONSOLE_PROMPT_COLOR);
         console_println(" - CPU commands: -hz, -info");
+        
+        console_print_color("  dol [option]", CONSOLE_PROMPT_COLOR);
+        console_println(" - Dolphin text editor: -new, -open, -save, -help");
         
         console_print_color("  stop", CONSOLE_PROMPT_COLOR);
         console_println(" - Shuts down the system");
@@ -450,34 +453,6 @@ void execute_command(const char *command) {
         write_port(0x64, 0xFE);  // Send reset command to keyboard controller
         // If shutdown fails, halt the CPU
         asm volatile("hlt");
-    } else if (strncmp(command, "create ", 7) == 0) {
-        // Validate that there is a filename after "create "
-        if (command[7] == '\0' || command[7] == ' ') {
-            console_print_error("Usage: create <filename>");
-            return;
-        }
-        
-        char filename[21];
-        int i = 0;
-        while (command[7 + i] != '\0' && command[7 + i] != ' ' && i < 20) {
-            filename[i] = command[7 + i];
-            i++;
-        }
-        filename[i] = '\0';
-        
-        // Validate filename is not empty after trimming
-        if (i == 0) {
-            console_print_error("Filename cannot be empty");
-            return;
-        }
-        
-        if (create_file(filename)) {
-            console_print_success("File created successfully");
-            console_print_color("Filename: ", CONSOLE_INFO_COLOR);
-            console_println_color(filename, CONSOLE_FG_COLOR);
-        } else {
-            console_print_error("Could not create file (file may already exist, name too long, or filesystem full)");
-        }
     } else if (strncmp(command, "write ", 6) == 0) {
         // Validate that there is content after "write "
         if (command[6] == '\0' || command[6] == ' ') {
@@ -801,6 +776,35 @@ void execute_command(const char *command) {
     } else if (strcmp(command, "cpu") == 0) {
         // Default: show info
         cpu_print_info();
+    } else if (strncmp(command, "dol ", 4) == 0) {
+        // Dolphin text editor commands
+        if (strncmp(command + 4, "-new ", 5) == 0) {
+            dolphin_new(command + 9);
+        } else if (strncmp(command + 4, "-open ", 6) == 0) {
+            dolphin_open(command + 10);
+        } else if (strcmp(command + 4, "-save") == 0) {
+            dolphin_save();
+        } else if (strcmp(command + 4, "-close") == 0 || strcmp(command + 4, "-quit") == 0) {
+            dolphin_close();
+        } else if (strcmp(command + 4, "-quit!") == 0) {
+            // Force quit without saving
+            if (dolphin_is_active()) {
+                EditorState* state = dolphin_get_state();
+                state->active = false;
+                console_clear();
+                console_draw_header("Popcorn Kernel v0.5");
+                console_println_color("Dolphin editor closed (unsaved changes discarded)", CONSOLE_WARNING_COLOR);
+                console_newline();
+                console_draw_prompt_with_path(get_current_directory());
+            }
+        } else if (strcmp(command + 4, "-help") == 0) {
+            dolphin_help();
+        } else {
+            console_print_error("Unknown dol option. Use: -new, -open, -save, -close, -help");
+        }
+    } else if (strcmp(command, "dol") == 0) {
+        // Default: show help
+        dolphin_help();
     } else {
         console_print_error("Command not found");
         console_print_color("Command: ", CONSOLE_INFO_COLOR);
@@ -845,6 +849,7 @@ void kmain(void) {
     register_pop_module(&sysinfo_module);
     register_pop_module(&memory_module);
     register_pop_module(&cpu_module);
+    register_pop_module(&dolphin_module);
     
     unsigned int save_x = console_state.cursor_x;
     unsigned int save_y = console_state.cursor_y;
@@ -870,6 +875,12 @@ void kmain(void) {
             keycode = read_port(KEYBOARD_DATA_PORT);
             if (keycode < 0)
                 continue;
+            
+            // If Dolphin editor is active, route all input to it
+            if (dolphin_is_active()) {
+                dolphin_handle_key(keycode);
+                continue;
+            }
             
             if (keycode == ENTER_KEY_CODE) {
                 input_buffer[input_index] = '\0';

@@ -605,7 +605,8 @@ class ModernPopcornBuilder:
                     ('multiboot2.c', 'obj/multiboot2.o'),
                     ('sysinfo_pop.c', 'obj/sysinfo_pop.o'),
                     ('memory_pop.c', 'obj/memory_pop.o'),
-                    ('cpu_pop.c', 'obj/cpu_pop.o')
+                    ('cpu_pop.c', 'obj/cpu_pop.o'),
+                    ('dolphin_pop.c', 'obj/dolphin_pop.o')
                 ]
                 
                 for src, obj in c_files:
@@ -622,7 +623,7 @@ class ModernPopcornBuilder:
                            'obj/pop_module.o', 'obj/shimjapii_pop.o', 'obj/idt.o',
                            'obj/spinner_pop.o', 'obj/uptime_pop.o', 'obj/halt_pop.o',
                            'obj/filesystem_pop.o', 'obj/multiboot2.o', 'obj/sysinfo_pop.o',
-                           'obj/memory_pop.o', 'obj/cpu_pop.o']
+                           'obj/memory_pop.o', 'obj/cpu_pop.o', 'obj/dolphin_pop.o']
                 
                 success = self.run_command(['ld', '-m', 'elf_x86_64', '-T', 'link.ld',
                                           '-o', 'kernel'] + obj_files,
@@ -676,7 +677,8 @@ class ModernPopcornBuilder:
                 'gcc -m64 -c sysinfo_pop.c -o obj/sysinfo_pop.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
                 'gcc -m64 -c memory_pop.c -o obj/memory_pop.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
                 'gcc -m64 -c cpu_pop.c -o obj/cpu_pop.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
-                'ld -m elf_x86_64 -T link.ld -o kernel obj/kasm.o obj/kc.o obj/console.o obj/utils.o obj/pop_module.o obj/shimjapii_pop.o obj/idt.o obj/spinner_pop.o obj/uptime_pop.o obj/halt_pop.o obj/filesystem_pop.o obj/multiboot2.o obj/sysinfo_pop.o obj/memory_pop.o obj/cpu_pop.o'
+                'gcc -m64 -c dolphin_pop.c -o obj/dolphin_pop.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
+                'ld -m elf_x86_64 -T link.ld -o kernel obj/kasm.o obj/kc.o obj/console.o obj/utils.o obj/pop_module.o obj/shimjapii_pop.o obj/idt.o obj/spinner_pop.o obj/uptime_pop.o obj/halt_pop.o obj/filesystem_pop.o obj/multiboot2.o obj/sysinfo_pop.o obj/memory_pop.o obj/cpu_pop.o obj/dolphin_pop.o'
             ])
             
             if success:
