@@ -601,7 +601,11 @@ class ModernPopcornBuilder:
                     ('spinner_pop.c', 'obj/spinner_pop.o'),
                     ('uptime_pop.c', 'obj/uptime_pop.o'),
                     ('halt_pop.c', 'obj/halt_pop.o'),
-                    ('filesystem_pop.c', 'obj/filesystem_pop.o')
+                    ('filesystem_pop.c', 'obj/filesystem_pop.o'),
+                    ('multiboot2.c', 'obj/multiboot2.o'),
+                    ('sysinfo_pop.c', 'obj/sysinfo_pop.o'),
+                    ('memory_pop.c', 'obj/memory_pop.o'),
+                    ('cpu_pop.c', 'obj/cpu_pop.o')
                 ]
                 
                 for src, obj in c_files:
@@ -617,7 +621,8 @@ class ModernPopcornBuilder:
                 obj_files = ['obj/kasm.o', 'obj/kc.o', 'obj/console.o', 'obj/utils.o',
                            'obj/pop_module.o', 'obj/shimjapii_pop.o', 'obj/idt.o',
                            'obj/spinner_pop.o', 'obj/uptime_pop.o', 'obj/halt_pop.o',
-                           'obj/filesystem_pop.o']
+                           'obj/filesystem_pop.o', 'obj/multiboot2.o', 'obj/sysinfo_pop.o',
+                           'obj/memory_pop.o', 'obj/cpu_pop.o']
                 
                 success = self.run_command(['ld', '-m', 'elf_x86_64', '-T', 'link.ld',
                                           '-o', 'kernel'] + obj_files,
@@ -667,15 +672,36 @@ class ModernPopcornBuilder:
                 'gcc -m64 -c uptime_pop.c -o obj/uptime_pop.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
                 'gcc -m64 -c halt_pop.c -o obj/halt_pop.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
                 'gcc -m64 -c filesystem_pop.c -o obj/filesystem_pop.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
-                'ld -m elf_x86_64 -T link.ld -o kernel obj/kasm.o obj/kc.o obj/console.o obj/utils.o obj/pop_module.o obj/shimjapii_pop.o obj/idt.o obj/spinner_pop.o obj/uptime_pop.o obj/halt_pop.o obj/filesystem_pop.o'
+                'gcc -m64 -c multiboot2.c -o obj/multiboot2.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
+                'gcc -m64 -c sysinfo_pop.c -o obj/sysinfo_pop.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
+                'gcc -m64 -c memory_pop.c -o obj/memory_pop.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
+                'gcc -m64 -c cpu_pop.c -o obj/cpu_pop.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
+                'ld -m elf_x86_64 -T link.ld -o kernel obj/kasm.o obj/kc.o obj/console.o obj/utils.o obj/pop_module.o obj/shimjapii_pop.o obj/idt.o obj/spinner_pop.o obj/uptime_pop.o obj/halt_pop.o obj/filesystem_pop.o obj/multiboot2.o obj/sysinfo_pop.o obj/memory_pop.o obj/cpu_pop.o'
             ])
             
             if success:
                 self.log("✅ Kernel built successfully", "SUCCESS")
                 self.log("📀 Creating bootable ISO...")
                 
-                # Create ISO
-                if self.run_command(['bash', 'create_iso.sh']):
+                # Create ISO structure
+                iso_success = self.run_command(['bash', '-c',
+                    'rm -rf isodir && ' +
+                    'mkdir -p isodir/boot/grub && ' +
+                    'cp kernel isodir/boot/kernel && ' +
+                    'echo "set timeout=3" > isodir/boot/grub/grub.cfg && ' +
+                    'echo "set default=0" >> isodir/boot/grub/grub.cfg && ' +
+                    'echo "" >> isodir/boot/grub/grub.cfg && ' +
+                    'echo "menuentry \\"Popcorn Kernel x64\\" {" >> isodir/boot/grub/grub.cfg && ' +
+                    'echo "    echo \\"Loading Popcorn kernel...\\"" >> isodir/boot/grub/grub.cfg && ' +
+                    'echo "    multiboot2 /boot/kernel" >> isodir/boot/grub/grub.cfg && ' +
+                    'echo "    echo \\"Booting kernel...\\"" >> isodir/boot/grub/grub.cfg && ' +
+                    'echo "    boot" >> isodir/boot/grub/grub.cfg && ' +
+                    'echo "}" >> isodir/boot/grub/grub.cfg && ' +
+                    'grub2-mkrescue -o popcorn.iso isodir 2>&1 || grub-mkrescue -o popcorn.iso isodir 2>&1 && ' +
+                    'rm -rf isodir'
+                ])
+                
+                if iso_success:
                     self.log("✅ ISO created: popcorn.iso", "SUCCESS")
                     self.animate_status_indicator(self.colors['success'], "Build complete!")
                     messagebox.showinfo("Success", 
@@ -771,7 +797,24 @@ class ModernPopcornBuilder:
             
             # Step 3: Create ISO
             self.log("📋 Step 3/4: Creating ISO...")
-            if not self.run_command(['bash', 'create_iso.sh']):
+            iso_success = self.run_command(['bash', '-c',
+                'rm -rf isodir && ' +
+                'mkdir -p isodir/boot/grub && ' +
+                'cp kernel isodir/boot/kernel && ' +
+                'echo "set timeout=3" > isodir/boot/grub/grub.cfg && ' +
+                'echo "set default=0" >> isodir/boot/grub/grub.cfg && ' +
+                'echo "" >> isodir/boot/grub/grub.cfg && ' +
+                'echo "menuentry \\"Popcorn Kernel x64\\" {" >> isodir/boot/grub/grub.cfg && ' +
+                'echo "    echo \\"Loading Popcorn kernel...\\"" >> isodir/boot/grub/grub.cfg && ' +
+                'echo "    multiboot2 /boot/kernel" >> isodir/boot/grub/grub.cfg && ' +
+                'echo "    echo \\"Booting kernel...\\"" >> isodir/boot/grub/grub.cfg && ' +
+                'echo "    boot" >> isodir/boot/grub/grub.cfg && ' +
+                'echo "}" >> isodir/boot/grub/grub.cfg && ' +
+                'grub2-mkrescue -o popcorn.iso isodir 2>&1 || grub-mkrescue -o popcorn.iso isodir 2>&1 && ' +
+                'rm -rf isodir'
+            ])
+            
+            if not iso_success:
                 self.log("❌ Automation failed at ISO creation", "ERROR")
                 self.enable_buttons()
                 messagebox.showerror("Automation Failed", "❌ ISO creation failed. Check logs.")
