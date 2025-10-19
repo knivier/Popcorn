@@ -94,11 +94,14 @@ void dolphin_new(const char* filename) {
     editor.active = true;
     
     console_clear();
+    
+    // Draw header at top
+    extern void console_set_cursor(unsigned int x, unsigned int y);
+    console_set_cursor(0, 0);
     console_println_color("=== Dolphin Text Editor ===", CONSOLE_HEADER_COLOR);
     console_print_color("Editing: ", CONSOLE_INFO_COLOR);
     console_println_color(editor.filename, CONSOLE_SUCCESS_COLOR);
-    console_draw_separator(console_state.cursor_y, CONSOLE_FG_COLOR);
-    console_newline();
+    console_draw_separator(2, CONSOLE_FG_COLOR);
     
     dolphin_render();
 }
@@ -154,11 +157,14 @@ void dolphin_open(const char* filename) {
     editor.active = true;
     
     console_clear();
+    
+    // Draw header at top
+    extern void console_set_cursor(unsigned int x, unsigned int y);
+    console_set_cursor(0, 0);
     console_println_color("=== Dolphin Text Editor ===", CONSOLE_HEADER_COLOR);
     console_print_color("Editing: ", CONSOLE_INFO_COLOR);
     console_println_color(editor.filename, CONSOLE_SUCCESS_COLOR);
-    console_draw_separator(console_state.cursor_y, CONSOLE_FG_COLOR);
-    console_newline();
+    console_draw_separator(2, CONSOLE_FG_COLOR);
     
     dolphin_render();
 }
@@ -230,8 +236,19 @@ void dolphin_close(void) {
     }
     
     editor.active = false;
+    
+    // Properly restore console
     console_clear();
-    console_println_color("Dolphin editor closed", CONSOLE_INFO_COLOR);
+    console_draw_header("Popcorn Kernel v0.5");
+    console_print_success("Dolphin editor closed");
+    console_print_color("File: ", CONSOLE_INFO_COLOR);
+    console_println_color(editor.filename, CONSOLE_FG_COLOR);
+    console_newline();
+    
+    // Restore prompt
+    extern const char* get_current_directory(void);
+    extern void console_draw_prompt_with_path(const char* path);
+    console_draw_prompt_with_path(get_current_directory());
 }
 
 // Show help
@@ -288,19 +305,43 @@ void dolphin_insert_char(char ch) {
     }
 }
 
-// Delete character at cursor
+// Delete character at cursor (backspace)
 void dolphin_delete_char(void) {
-    if (!editor.active || editor.cursor_line >= editor.num_lines || editor.cursor_col == 0) return;
+    if (!editor.active || editor.cursor_line >= editor.num_lines) return;
     
-    size_t line_len = str_len(editor.lines[editor.cursor_line]);
-    
-    if (editor.cursor_col > 0 && editor.cursor_col <= line_len) {
+    if (editor.cursor_col > 0) {
+        // Delete character before cursor
+        size_t line_len = str_len(editor.lines[editor.cursor_line]);
+        
         // Shift characters left
         for (size_t i = editor.cursor_col - 1; i < line_len; i++) {
             editor.lines[editor.cursor_line][i] = editor.lines[editor.cursor_line][i + 1];
         }
         editor.cursor_col--;
         editor.modified = true;
+    } else if (editor.cursor_line > 0) {
+        // At start of line - join with previous line
+        size_t prev_len = str_len(editor.lines[editor.cursor_line - 1]);
+        size_t curr_len = str_len(editor.lines[editor.cursor_line]);
+        
+        // If combined length fits, merge lines
+        if (prev_len + curr_len < MAX_LINE_LENGTH) {
+            // Append current line to previous
+            for (size_t i = 0; i < curr_len; i++) {
+                editor.lines[editor.cursor_line - 1][prev_len + i] = editor.lines[editor.cursor_line][i];
+            }
+            editor.lines[editor.cursor_line - 1][prev_len + curr_len] = '\0';
+            
+            // Shift all lines up
+            for (unsigned int i = editor.cursor_line; i < editor.num_lines - 1; i++) {
+                str_copy(editor.lines[i], editor.lines[i + 1], MAX_LINE_LENGTH);
+            }
+            
+            editor.num_lines--;
+            editor.cursor_line--;
+            editor.cursor_col = prev_len;
+            editor.modified = true;
+        }
     }
 }
 
@@ -347,14 +388,14 @@ void dolphin_render(void) {
         }
     }
     
-    // Set cursor to content area
-    console_set_cursor(0, 4);
-    
     // Display lines
     for (unsigned int i = 0; i < EDITOR_DISPLAY_LINES && i < editor.num_lines; i++) {
         unsigned int line_num = editor.scroll_offset + i;
+        unsigned int display_y = 4 + i;
         
         if (line_num < editor.num_lines) {
+            console_set_cursor(0, display_y);
+            
             // Show line number
             char buf[8];
             extern void int_to_str(int num, char *str);
@@ -362,14 +403,22 @@ void dolphin_render(void) {
             console_print_color(buf, CONSOLE_INFO_COLOR);
             console_print(": ");
             
-            console_print_color(editor.lines[line_num], CONSOLE_FG_COLOR);
+            // Display line content
+            for (unsigned int j = 0; editor.lines[line_num][j] != '\0' && j < MAX_LINE_LENGTH; j++) {
+                console_putchar(editor.lines[line_num][j]);
+            }
             
-            // Show cursor on current line
+            // Show cursor position on current line
             if (line_num == editor.cursor_line) {
+                // Calculate cursor position (account for line number prefix)
+                unsigned int cursor_x = 3;  // "N: " prefix
+                if (line_num + 1 >= 10) cursor_x = 4;  // Two-digit line numbers
+                cursor_x += editor.cursor_col;
+                
+                console_set_cursor(cursor_x, display_y);
                 console_print_color("_", CONSOLE_SUCCESS_COLOR);
             }
         }
-        console_newline();
     }
     
     // Status line
@@ -396,6 +445,50 @@ void dolphin_render(void) {
 // Handle keyboard input in editor mode
 void dolphin_handle_key(unsigned char keycode) {
     extern unsigned char keyboard_map[128];
+    
+    // Arrow key navigation
+    if (keycode == 0x48) {  // Up arrow
+        if (editor.cursor_line > 0) {
+            editor.cursor_line--;
+            size_t line_len = str_len(editor.lines[editor.cursor_line]);
+            if (editor.cursor_col > line_len) {
+                editor.cursor_col = line_len;
+            }
+            dolphin_render();
+        }
+        return;
+    } else if (keycode == 0x50) {  // Down arrow
+        if (editor.cursor_line < editor.num_lines - 1) {
+            editor.cursor_line++;
+            size_t line_len = str_len(editor.lines[editor.cursor_line]);
+            if (editor.cursor_col > line_len) {
+                editor.cursor_col = line_len;
+            }
+            dolphin_render();
+        }
+        return;
+    } else if (keycode == 0x4B) {  // Left arrow
+        if (editor.cursor_col > 0) {
+            editor.cursor_col--;
+            dolphin_render();
+        } else if (editor.cursor_line > 0) {
+            editor.cursor_line--;
+            editor.cursor_col = str_len(editor.lines[editor.cursor_line]);
+            dolphin_render();
+        }
+        return;
+    } else if (keycode == 0x4D) {  // Right arrow
+        size_t line_len = str_len(editor.lines[editor.cursor_line]);
+        if (editor.cursor_col < line_len) {
+            editor.cursor_col++;
+            dolphin_render();
+        } else if (editor.cursor_line < editor.num_lines - 1) {
+            editor.cursor_line++;
+            editor.cursor_col = 0;
+            dolphin_render();
+        }
+        return;
+    }
     
     // Special keys
     if (keycode == 0x1C) {  // Enter
@@ -431,7 +524,6 @@ void dolphin_handle_key(unsigned char keycode) {
             unsigned char status = read_port(KEYBOARD_STATUS_PORT);
             if (status & 0x01) {
                 unsigned char cmd_key = read_port(KEYBOARD_DATA_PORT);
-                if (cmd_key < 0) continue;
                 
                 // Ignore key releases (high bit set)
                 if (cmd_key & 0x80) continue;
@@ -439,7 +531,6 @@ void dolphin_handle_key(unsigned char keycode) {
                 if (cmd_key == 0x1C) {  // Enter - execute command
                     cmd_buffer[cmd_index] = '\0';
                     
-                    // Debug: show what was typed
                     console_set_cursor(0, 22);
                     console_print("Executing: [");
                     console_print(cmd_buffer);

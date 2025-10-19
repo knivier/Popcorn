@@ -76,7 +76,7 @@ unsigned int current_loc = 0;
 char *vidptr = (char*)0xb8000;
 
 // Console state
-ConsoleState console_state = {0, 0, CONSOLE_FG_COLOR, true, false};
+ConsoleState console_state = {0, 0, CONSOLE_FG_COLOR, true, false, 0};
 
 /* 64-bit IDT entry structure (16 bytes) */
 struct IDT_entry {

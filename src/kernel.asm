@@ -243,13 +243,11 @@ page_table_l3:
 page_table_l2:
   resb 4096
 
+stack_bottom:
+  resb 16384               ; 16KB stack
+stack_top:
+
 ; Multiboot2 info pointer storage
 global multiboot2_info_ptr
 multiboot2_info_ptr:
   resq 1                   ; 64-bit pointer to Multiboot2 info
-
-; Stack
-align 16
-stack_bottom:
-  resb 16384               ; 16KB stack
-stack_top:
