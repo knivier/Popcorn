@@ -23,6 +23,13 @@
 
 #define ENTER_KEY_CODE 0x1C
 #define BACKSPACE_KEY_CODE 0x0E
+#define UP_ARROW_CODE 0x48
+#define DOWN_ARROW_CODE 0x50
+#define LEFT_ARROW_CODE 0x4B
+#define RIGHT_ARROW_CODE 0x4D
+#define PAGE_UP_CODE 0x49
+#define PAGE_DOWN_CODE 0x51
+#define TAB_KEY_CODE 0x0F
 
 extern unsigned char keyboard_map[128];
 extern void keyboard_handler(void);
@@ -36,6 +43,13 @@ extern void load_idt(struct IDT_ptr *idt_ptr);
 /* Global variables */
 char input_buffer[128] = {0}; // Increased size to accommodate longer input
 unsigned int input_index = 0;
+
+/* Command history */
+#define HISTORY_SIZE 50
+char command_history[HISTORY_SIZE][128];
+unsigned int history_count = 0;
+int history_index = -1;  // Current position in history (-1 = not browsing)
+char temp_buffer[128] = {0};  // Temporary storage for current input when browsing history
 
 /* Function forward declarations */
 void execute_command(const char *command);
@@ -163,6 +177,120 @@ void *memset(void *s, int c, size_t n) {
         *p++ = (unsigned char)c;
     }
     return s;
+}
+
+/* Simple strlen implementation */
+size_t strlen_simple(const char *str) {
+    size_t len = 0;
+    while (str[len] != '\0') {
+        len++;
+    }
+    return len;
+}
+
+/* Simple strcpy implementation */
+void strcpy_simple(char *dest, const char *src) {
+    size_t i = 0;
+    while (src[i] != '\0') {
+        dest[i] = src[i];
+        i++;
+    }
+    dest[i] = '\0';
+}
+
+/* Add command to history */
+void add_to_history(const char *command) {
+    if (command == NULL || command[0] == '\0') {
+        return;
+    }
+    
+    // Don't add duplicates of the last command
+    if (history_count > 0) {
+        bool is_duplicate = true;
+        const char *last_cmd = command_history[history_count - 1];
+        for (int i = 0; command[i] != '\0' || last_cmd[i] != '\0'; i++) {
+            if (command[i] != last_cmd[i]) {
+                is_duplicate = false;
+                break;
+            }
+        }
+        if (is_duplicate) {
+            return;
+        }
+    }
+    
+    // Add to circular buffer
+    unsigned int index = history_count % HISTORY_SIZE;
+    strcpy_simple(command_history[index], command);
+    
+    if (history_count < HISTORY_SIZE) {
+        history_count++;
+    }
+}
+
+/* Get command from history */
+const char* get_history_command(int offset) {
+    if (history_count == 0 || offset < 0 || offset >= (int)history_count) {
+        return NULL;
+    }
+    
+    unsigned int index;
+    if (history_count < HISTORY_SIZE) {
+        index = offset;
+    } else {
+        // Handle circular buffer
+        index = (history_count - history_count % HISTORY_SIZE + offset) % HISTORY_SIZE;
+    }
+    
+    return command_history[index];
+}
+
+/* List of all commands for autocomplete */
+static const char* available_commands[] = {
+    "help", "halp", "hang", "clear", "uptime", "halt", "stop",
+    "create", "write", "read", "delete", "rm", "mkdir", "go", "back",
+    "ls", "search", "cp", "listsys", "sysinfo",
+    "mem", "mem -map", "mem -use", "mem -stats",
+    "cpu", "cpu -hz", "cpu -info",
+    NULL
+};
+
+/* Autocomplete command */
+void autocomplete_command(char *buffer, unsigned int *index) {
+    if (*index == 0) return;
+    
+    const char *match = NULL;
+    int match_count = 0;
+    
+    // Find matching commands
+    for (int i = 0; available_commands[i] != NULL; i++) {
+        const char *cmd = available_commands[i];
+        bool matches = true;
+        
+        // Check if command starts with buffer content
+        for (unsigned int j = 0; j < *index; j++) {
+            if (cmd[j] != buffer[j]) {
+                matches = false;
+                break;
+            }
+        }
+        
+        if (matches) {
+            match = cmd;
+            match_count++;
+        }
+    }
+    
+    // If exactly one match, autocomplete it
+    if (match_count == 1) {
+        size_t match_len = strlen_simple(match);
+        for (size_t i = *index; i < match_len && i < 127; i++) {
+            buffer[i] = match[i];
+            console_putchar(match[i]);
+        }
+        *index = match_len;
+        buffer[*index] = '\0';
+    }
 }
 
 void keyboard_handler_main(void) {
@@ -745,10 +873,13 @@ void kmain(void) {
             
             if (keycode == ENTER_KEY_CODE) {
                 input_buffer[input_index] = '\0';
+                add_to_history(input_buffer);  // Add to history
                 console_newline();
                 execute_command(input_buffer);
                 input_index = 0;
+                history_index = -1;  // Reset history browsing
                 memset(input_buffer, 0, sizeof(input_buffer));
+                memset(temp_buffer, 0, sizeof(temp_buffer));
                 console_newline();
                 console_draw_prompt_with_path(get_current_directory());
             } else if (keycode == BACKSPACE_KEY_CODE) {
@@ -758,11 +889,73 @@ void kmain(void) {
                     input_buffer[input_index] = '\0';
                     console_backspace();
                 }
+            } else if (keycode == TAB_KEY_CODE) {
+                // Autocomplete
+                autocomplete_command(input_buffer, &input_index);
+            } else if (keycode == UP_ARROW_CODE) {
+                // Navigate history up (older commands)
+                if (history_count > 0) {
+                    // Save current input if starting to browse
+                    if (history_index == -1) {
+                        strcpy_simple(temp_buffer, input_buffer);
+                        history_index = history_count;
+                    }
+                    
+                    if (history_index > 0) {
+                        history_index--;
+                        const char *cmd = get_history_command(history_index);
+                        if (cmd) {
+                            // Clear current line
+                            while (input_index > 0) {
+                                input_index--;
+                                console_backspace();
+                            }
+                            // Display history command
+                            strcpy_simple(input_buffer, cmd);
+                            input_index = strlen_simple(input_buffer);
+                            console_print(input_buffer);
+                        }
+                    }
+                }
+            } else if (keycode == DOWN_ARROW_CODE) {
+                // Navigate history down (newer commands)
+                if (history_index != -1) {
+                    history_index++;
+                    
+                    // Clear current line
+                    while (input_index > 0) {
+                        input_index--;
+                        console_backspace();
+                    }
+                    
+                    if (history_index >= (int)history_count) {
+                        // Restore original input
+                        strcpy_simple(input_buffer, temp_buffer);
+                        history_index = -1;
+                    } else {
+                        // Display history command
+                        const char *cmd = get_history_command(history_index);
+                        if (cmd) {
+                            strcpy_simple(input_buffer, cmd);
+                        }
+                    }
+                    
+                    input_index = strlen_simple(input_buffer);
+                    console_print(input_buffer);
+                }
+            } else if (keycode == PAGE_UP_CODE) {
+                // Scroll up in history
+                console_scroll_up();
+            } else if (keycode == PAGE_DOWN_CODE) {
+                // Scroll down in history
+                console_scroll_down();
             } else if (input_index < sizeof(input_buffer) - 1) {
                 char ch = keyboard_map[(unsigned char)keycode];
                 if (ch != 0) {  // Only add printable characters
                     input_buffer[input_index++] = ch;
                     console_putchar(ch);
+                    // Reset history browsing when typing
+                    history_index = -1;
                 }
             }
         }

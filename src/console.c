@@ -8,6 +8,9 @@ static char* vga_memory = (char*)VGA_MEMORY_ADDRESS;
 static char back_buffer[VGA_MEMORY_SIZE];
 static bool buffer_dirty = false;
 
+// Scrollback buffer
+static ScrollbackBuffer scrollback = {{0}, 0, 0};
+
 // External variables from kernel.c
 extern unsigned int current_loc;
 extern char input_buffer[128];
@@ -20,12 +23,20 @@ void console_init(void) {
     console_state.current_color = CONSOLE_FG_COLOR;
     console_state.cursor_visible = true;
     console_state.double_buffer_enabled = false;
+    console_state.scroll_offset = 0;
     
     // Initialize back buffer
     for (unsigned int i = 0; i < VGA_MEMORY_SIZE; i += 2) {
         back_buffer[i] = ' ';
         back_buffer[i + 1] = CONSOLE_BG_COLOR | CONSOLE_FG_COLOR;
     }
+    
+    // Initialize scrollback buffer
+    for (unsigned int i = 0; i < SCROLLBACK_LINES * SCROLLBACK_LINE_SIZE; i++) {
+        scrollback.buffer[i] = 0;
+    }
+    scrollback.current_line = 0;
+    scrollback.total_lines = 0;
     
     console_clear();
 }
@@ -138,6 +149,9 @@ void console_newline(void) {
 
 // Scroll the screen up by one line
 void console_scroll(void) {
+    // Save top line to scrollback before scrolling
+    console_save_line(0);
+    
     // Move all lines up by one
     for (unsigned int y = 0; y < VGA_HEIGHT - 1; y++) {
         for (unsigned int x = 0; x < VGA_WIDTH; x++) {
@@ -155,6 +169,9 @@ void console_scroll(void) {
         vga_memory[pos] = ' ';
         vga_memory[pos + 1] = CONSOLE_BG_COLOR | CONSOLE_FG_COLOR;
     }
+    
+    // Reset scroll offset when new content appears
+    console_state.scroll_offset = 0;
 }
 
 // Handle backspace
@@ -366,5 +383,73 @@ void console_swap_buffers(void) {
 void console_flush(void) {
     if (console_state.double_buffer_enabled) {
         console_swap_buffers();
+    }
+}
+
+// Save current line to scrollback buffer
+void console_save_line(unsigned int y) {
+    if (y >= VGA_HEIGHT) return;
+    
+    unsigned int line_offset = (scrollback.current_line % SCROLLBACK_LINES) * SCROLLBACK_LINE_SIZE;
+    unsigned int vga_offset = y * VGA_WIDTH * 2;
+    
+    // Copy line from VGA memory to scrollback
+    for (unsigned int i = 0; i < SCROLLBACK_LINE_SIZE; i++) {
+        scrollback.buffer[line_offset + i] = vga_memory[vga_offset + i];
+    }
+    
+    scrollback.current_line++;
+    if (scrollback.total_lines < SCROLLBACK_LINES) {
+        scrollback.total_lines++;
+    }
+}
+
+// Scroll up in history (Page Up)
+void console_scroll_up(void) {
+    if (console_state.scroll_offset >= (int)scrollback.total_lines - 1) {
+        return;  // Already at top of history
+    }
+    
+    console_state.scroll_offset++;
+    console_restore_view();
+}
+
+// Scroll down in history (Page Down)
+void console_scroll_down(void) {
+    if (console_state.scroll_offset <= 0) {
+        return;  // Already at current view
+    }
+    
+    console_state.scroll_offset--;
+    console_restore_view();
+}
+
+// Restore view based on scroll offset
+void console_restore_view(void) {
+    if (console_state.scroll_offset == 0) {
+        // No scrolling, just return to normal view
+        return;
+    }
+    
+    // Calculate which lines to show
+    for (unsigned int y = 0; y < VGA_HEIGHT; y++) {
+        int history_line = (int)scrollback.current_line - console_state.scroll_offset - (VGA_HEIGHT - y);
+        
+        if (history_line >= 0 && history_line < (int)scrollback.total_lines) {
+            unsigned int line_offset = (history_line % SCROLLBACK_LINES) * SCROLLBACK_LINE_SIZE;
+            unsigned int vga_offset = y * VGA_WIDTH * 2;
+            
+            // Copy from scrollback to VGA
+            for (unsigned int i = 0; i < SCROLLBACK_LINE_SIZE; i++) {
+                vga_memory[vga_offset + i] = scrollback.buffer[line_offset + i];
+            }
+        } else {
+            // Clear line if no history
+            unsigned int vga_offset = y * VGA_WIDTH * 2;
+            for (unsigned int i = 0; i < VGA_WIDTH; i++) {
+                vga_memory[vga_offset + i * 2] = ' ';
+                vga_memory[vga_offset + i * 2 + 1] = CONSOLE_BG_COLOR | CONSOLE_FG_COLOR;
+            }
+        }
     }
 }
