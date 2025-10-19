@@ -42,8 +42,6 @@ void dolphin_help(void);
 void dolphin_insert_char(char ch);
 void dolphin_delete_char(void);
 void dolphin_new_line(void);
-void dolphin_delete_line(void);
-void dolphin_move_cursor(int dx, int dy);
 void dolphin_render(void);
 void dolphin_handle_key(unsigned char keycode);
 bool dolphin_is_active(void);

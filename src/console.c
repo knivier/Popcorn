@@ -16,6 +16,23 @@ extern unsigned int current_loc;
 extern char input_buffer[128];
 extern unsigned int input_index;
 
+// External port I/O functions
+extern void write_port(unsigned short port, unsigned char data);
+extern char read_port(unsigned short port);
+
+// Update hardware VGA cursor position
+static void update_hardware_cursor(unsigned int x, unsigned int y) {
+    unsigned short position = (y * VGA_WIDTH) + x;
+    
+    // Cursor location low byte
+    write_port(0x3D4, 0x0F);
+    write_port(0x3D5, (unsigned char)(position & 0xFF));
+    
+    // Cursor location high byte
+    write_port(0x3D4, 0x0E);
+    write_port(0x3D5, (unsigned char)((position >> 8) & 0xFF));
+}
+
 // Initialize the console system
 void console_init(void) {
     console_state.cursor_x = 0;
@@ -50,6 +67,9 @@ void console_clear(void) {
     console_state.cursor_x = 0;
     console_state.cursor_y = 0;
     current_loc = 0;
+    
+    // Update hardware cursor
+    update_hardware_cursor(0, 0);
 }
 
 // Set the current text color
@@ -65,6 +85,9 @@ void console_set_cursor(unsigned int x, unsigned int y) {
     console_state.cursor_x = x;
     console_state.cursor_y = y;
     current_loc = (y * VGA_WIDTH + x) * 2;
+    
+    // Update hardware cursor
+    update_hardware_cursor(x, y);
 }
 
 // Put a single character at current cursor position
@@ -105,6 +128,9 @@ void console_putchar(char c) {
     }
     
     current_loc = (console_state.cursor_y * VGA_WIDTH + console_state.cursor_x) * 2;
+    
+    // Update hardware cursor
+    update_hardware_cursor(console_state.cursor_x, console_state.cursor_y);
 }
 
 // Print a string with current color
@@ -145,6 +171,9 @@ void console_newline(void) {
     }
     
     current_loc = console_state.cursor_y * VGA_WIDTH * 2;
+    
+    // Update hardware cursor
+    update_hardware_cursor(console_state.cursor_x, console_state.cursor_y);
 }
 
 // Scroll the screen up by one line
@@ -191,6 +220,9 @@ void console_backspace(void) {
         vga_memory[pos + 1] = CONSOLE_BG_COLOR | CONSOLE_FG_COLOR;
         current_loc = pos;
     }
+    
+    // Update hardware cursor
+    update_hardware_cursor(console_state.cursor_x, console_state.cursor_y);
 }
 
 // Draw a box with borders
@@ -427,16 +459,23 @@ void console_scroll_down(void) {
 // Restore view based on scroll offset
 void console_restore_view(void) {
     if (console_state.scroll_offset == 0) {
-        // No scrolling, just return to normal view
         return;
     }
     
-    // Calculate which lines to show
+    // Don't scroll beyond available history
+    if (console_state.scroll_offset > (int)scrollback.total_lines) {
+        console_state.scroll_offset = (int)scrollback.total_lines;
+    }
+    
+    // Display history lines
     for (unsigned int y = 0; y < VGA_HEIGHT; y++) {
-        int history_line = (int)scrollback.current_line - console_state.scroll_offset - (VGA_HEIGHT - y);
+        // Calculate which history line to show at this screen position
+        int line_index = (int)scrollback.current_line - console_state.scroll_offset + (int)y - (int)VGA_HEIGHT;
         
-        if (history_line >= 0 && history_line < (int)scrollback.total_lines) {
-            unsigned int line_offset = (history_line % SCROLLBACK_LINES) * SCROLLBACK_LINE_SIZE;
+        if (line_index >= 0 && line_index < (int)scrollback.current_line) {
+            // This line is in history, display it
+            unsigned int buf_index = line_index % SCROLLBACK_LINES;
+            unsigned int line_offset = buf_index * SCROLLBACK_LINE_SIZE;
             unsigned int vga_offset = y * VGA_WIDTH * 2;
             
             // Copy from scrollback to VGA
@@ -444,7 +483,7 @@ void console_restore_view(void) {
                 vga_memory[vga_offset + i] = scrollback.buffer[line_offset + i];
             }
         } else {
-            // Clear line if no history
+            // Line not in history, clear it
             unsigned int vga_offset = y * VGA_WIDTH * 2;
             for (unsigned int i = 0; i < VGA_WIDTH; i++) {
                 vga_memory[vga_offset + i * 2] = ' ';

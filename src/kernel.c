@@ -57,7 +57,6 @@ void execute_command(const char *command);
 void int_to_str(int num, char *str);
 int get_tick_count(void);
 int strncmp(const char *str1, const char *str2, size_t n); // Declaration of strncmp
-bool create_file(const char* name); // Declaration of create_file
 bool write_file(const char* name, const char* content); // Declaration of write_file
 const char* read_file(const char* name); // Declaration of read_file
 bool delete_file(const char* name); // Declaration of delete_file
@@ -234,13 +233,13 @@ const char* get_history_command(int offset) {
     if (history_count == 0 || offset < 0 || offset >= (int)history_count) {
         return NULL;
     }
-    
-    unsigned int index;
-    if (history_count < HISTORY_SIZE) {
+        unsigned int index;
+    if (history_count <= HISTORY_SIZE) {
         index = offset;
     } else {
-        // Handle circular buffer
-        index = (history_count - history_count % HISTORY_SIZE + offset) % HISTORY_SIZE;
+        // Calculate actual position: start of oldest + offset
+        unsigned int oldest = history_count % HISTORY_SIZE;
+        index = (oldest + offset) % HISTORY_SIZE;
     }
     
     return command_history[index];
@@ -460,11 +459,11 @@ void execute_command(const char *command) {
             return;
         }
         
-        char filename[21];
-        char content[101];
+        char filename[21] = {0};
+        char content[101] = {0};
         int i = 0;
         int j = 0;
-        while (command[6 + i] != ' ' && i < 20 && command[6 + i] != '\0') {
+        while (command[6 + i] != ' ' && i < 20 && command[6 + i] != '\0' && 6 + i < 128) {
             filename[i] = command[6 + i];
             i++;
         }
@@ -476,15 +475,15 @@ void execute_command(const char *command) {
             return;
         }
         
-        if (command[6 + i] == ' ') {
+        if (command[6 + i] == ' ' && 6 + i < 127) {
             i++;
             // Check if content is provided
-            if (command[6 + i] == '\0') {
+            if (command[6 + i] == '\0' || 6 + i >= 128) {
                 console_print_error("Content cannot be empty");
                 return;
             }
             
-            while (command[6 + i + j] != '\0' && j < 100) {
+            while (command[6 + i + j] != '\0' && j < 100 && 6 + i + j < 128) {
                 content[j] = command[6 + i + j];
                 j++;
             }
@@ -495,7 +494,7 @@ void execute_command(const char *command) {
                 console_print_color("Filename: ", CONSOLE_INFO_COLOR);
                 console_println_color(filename, CONSOLE_FG_COLOR);
             } else {
-                console_print_error("Could not write to file (file may not exist, content too long, or invalid filename)");
+                console_print_error("Failed to write file (content too long, name invalid, or filesystem full)");
             }
         } else {
             console_print_error("Invalid command format. Use: write <filename> <content>");
@@ -507,9 +506,9 @@ void execute_command(const char *command) {
             return;
         }
         
-        char filename[21];
+        char filename[21] = {0};
         int i = 0;
-        while (command[5 + i] != '\0' && command[5 + i] != ' ' && i < 20) {
+        while (command[5 + i] != '\0' && command[5 + i] != ' ' && i < 20 && 5 + i < 128) {
             filename[i] = command[5 + i];
             i++;
         }
@@ -526,7 +525,7 @@ void execute_command(const char *command) {
             console_print_color("File content: ", CONSOLE_INFO_COLOR);
             console_println_color(content, CONSOLE_FG_COLOR);
         } else {
-            console_print_error("Could not read file (file may not exist or invalid filename)");
+            console_print_error("File not found or cannot be read");
         }
     } else if (strncmp(command, "delete ", 7) == 0) {
         // Validate that there is a filename after "delete "
@@ -535,9 +534,9 @@ void execute_command(const char *command) {
             return;
         }
         
-        char filename[21];
+        char filename[21] = {0};
         int i = 0;
-        while (command[7 + i] != '\0' && command[7 + i] != ' ' && i < 20) {
+        while (command[7 + i] != '\0' && command[7 + i] != ' ' && i < 20 && 7 + i < 128) {
             filename[i] = command[7 + i];
             i++;
         }
@@ -554,7 +553,7 @@ void execute_command(const char *command) {
             console_print_color("Filename: ", CONSOLE_INFO_COLOR);
             console_println_color(filename, CONSOLE_FG_COLOR);
         } else {
-            console_print_error("Could not delete file (file may not exist or invalid filename)");
+            console_print_error("File not found or cannot be deleted");
         }
     } else if (strncmp(command, "mkdir ", 6) == 0) {
         // Validate that there is a directory name after "mkdir "
@@ -563,9 +562,9 @@ void execute_command(const char *command) {
             return;
         }
         
-        char dirname[21];
+        char dirname[21] = {0};
         int i = 0;
-        while (command[6 + i] != '\0' && command[6 + i] != ' ' && i < 20) {
+        while (command[6 + i] != '\0' && command[6 + i] != ' ' && i < 20 && 6 + i < 128) {
             dirname[i] = command[6 + i];
             i++;
         }
@@ -582,7 +581,7 @@ void execute_command(const char *command) {
             console_print_color("Directory: ", CONSOLE_INFO_COLOR);
             console_println_color(dirname, CONSOLE_FG_COLOR);
         } else {
-            console_print_error("Could not create directory (directory may already exist, name too long, or filesystem full)");
+            console_print_error("Failed to create directory (already exists, name too long, or filesystem full)");
         }
     } else if (strncmp(command, "go ", 3) == 0) {
         // Validate that there is a directory name after "go "
@@ -591,9 +590,9 @@ void execute_command(const char *command) {
             return;
         }
         
-        char dirname[21];
+        char dirname[21] = {0};
         int i = 0;
-        while (command[3 + i] != '\0' && command[3 + i] != ' ' && i < 20) {
+        while (command[3 + i] != '\0' && command[3 + i] != ' ' && i < 20 && 3 + i < 128) {
             dirname[i] = command[3 + i];
             i++;
         }
@@ -616,7 +615,7 @@ void execute_command(const char *command) {
             console_print_color("Directory: ", CONSOLE_INFO_COLOR);
             console_println_color(dirname, CONSOLE_FG_COLOR);
         } else {
-            console_print_error("Could not change directory (directory may not exist or invalid name)");
+            console_print_error("Directory not found or cannot be accessed");
         }
     } else if (strncmp(command, "rm ", 3) == 0) {
         // rm command - alias for delete with better error handling
@@ -625,9 +624,9 @@ void execute_command(const char *command) {
             return;
         }
         
-        char filename[21];
+        char filename[21] = {0};
         int i = 0;
-        while (command[3 + i] != '\0' && command[3 + i] != ' ' && i < 20) {
+        while (command[3 + i] != '\0' && command[3 + i] != ' ' && i < 20 && 3 + i < 128) {
             filename[i] = command[3 + i];
             i++;
         }
@@ -643,7 +642,7 @@ void execute_command(const char *command) {
             console_print_color("Filename: ", CONSOLE_INFO_COLOR);
             console_println_color(filename, CONSOLE_FG_COLOR);
         } else {
-            console_print_error("File not found or could not be removed");
+            console_print_error("File not found or cannot be removed");
             console_print_color("Filename: ", CONSOLE_INFO_COLOR);
             console_println_color(filename, CONSOLE_FG_COLOR);
         }
@@ -651,7 +650,7 @@ void execute_command(const char *command) {
         if (change_directory("back")) {
             console_print_success("Changed to parent directory");
         } else {
-            console_print_error("Already at root directory - cannot go back further");
+            console_print_error("Already at root directory");
         }
     } else if (strcmp(command, "ls") == 0) {
         list_files_console();
@@ -662,9 +661,9 @@ void execute_command(const char *command) {
             return;
         }
         
-        char filename[21];
+        char filename[21] = {0};
         int i = 0;
-        while (command[7 + i] != '\0' && command[7 + i] != ' ' && i < 20) {
+        while (command[7 + i] != '\0' && command[7 + i] != ' ' && i < 20 && 7 + i < 128) {
             filename[i] = command[7 + i];
             i++;
         }
@@ -683,7 +682,7 @@ void execute_command(const char *command) {
             console_print_color("Location: ", CONSOLE_INFO_COLOR);
             console_println_color(file_path, CONSOLE_SUCCESS_COLOR);
         } else {
-            console_print_error("File not found in filesystem");
+            console_print_error("File not found");
             console_print_color("Filename: ", CONSOLE_INFO_COLOR);
             console_println_color(filename, CONSOLE_FG_COLOR);
         }
@@ -694,13 +693,13 @@ void execute_command(const char *command) {
             return;
         }
         
-        char filename[21];
-        char destdir[100]; // MAX_PATH_LENGTH from filesystem
+        char filename[21] = {0};
+        char destdir[100] = {0}; // MAX_PATH_LENGTH from filesystem
         int i = 0;
         int j = 0;
         
         // Parse filename
-        while (command[3 + i] != ' ' && i < 20 && command[3 + i] != '\0') {
+        while (command[3 + i] != ' ' && i < 20 && command[3 + i] != '\0' && 3 + i < 128) {
             filename[i] = command[3 + i];
             i++;
         }
@@ -712,17 +711,17 @@ void execute_command(const char *command) {
         }
         
         // Skip spaces
-        while (command[3 + i] == ' ') {
+        while (command[3 + i] == ' ' && 3 + i < 127) {
             i++;
         }
         
         // Parse destination directory
-        if (command[3 + i] == '\0') {
+        if (command[3 + i] == '\0' || 3 + i >= 128) {
             console_print_error("Usage: cp <filename> <directory>");
             return;
         }
         
-        while (command[3 + i + j] != '\0' && command[3 + i + j] != ' ' && j < 99) {
+        while (command[3 + i + j] != '\0' && command[3 + i + j] != ' ' && j < 99 && 3 + i + j < 128) {
             destdir[j] = command[3 + i + j];
             j++;
         }
@@ -740,7 +739,7 @@ void execute_command(const char *command) {
             console_print_color("To: ", CONSOLE_INFO_COLOR);
             console_println_color(destdir, CONSOLE_FG_COLOR);
         } else {
-            console_print_error("Could not copy file (file not found, destination doesn't exist, or already exists there)");
+            console_print_error("Failed to copy file (not found, destination invalid, or already exists)");
         }
     } else if (strcmp(command, "listsys") == 0) {
         console_newline();

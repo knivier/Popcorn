@@ -117,7 +117,9 @@ void init_filesystem() {
 }
 
 // Function to create a file
-bool create_file(const char* name) {
+// Made static so only internal filesystem functions can create files
+// External creation should go through Dolphin editor for .txt files
+static bool create_file(const char* name) {
     // Validate input
     if (name == NULL || name[0] == '\0') {
         last_filesystem_error = ERR_INVALID_INPUT;
@@ -189,6 +191,7 @@ bool write_file(const char* name, const char* content) {
         }
     }
     
+    // First, try to find and update existing file
     for (int i = 0; i < MAX_FILES; ++i) {
         if (file_system[i].in_use) {
             int j = 0;
@@ -209,8 +212,15 @@ bool write_file(const char* name, const char* content) {
             }
         }
     }
-    last_filesystem_error = ERR_NOT_FOUND;
-    return false; // File not found
+    
+    // File doesn't exist, create it then write to it
+    if (create_file(name)) {
+        // Recursively call write_file now that the file exists
+        return write_file(name, content);
+    }
+    
+    last_filesystem_error = ERR_NO_SPACE;
+    return false; // Could not create file
 }
 
 // Function to read a file

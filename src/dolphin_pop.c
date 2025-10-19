@@ -17,6 +17,16 @@ extern char read_port(unsigned short port);
 #define KEYBOARD_STATUS_PORT 0x64
 #define KEYBOARD_DATA_PORT 0x60
 
+// Keyboard scancodes
+#define KEY_ENTER 0x1C
+#define KEY_BACKSPACE 0x0E
+#define KEY_ESC 0x01
+#define KEY_UP_ARROW 0x48
+#define KEY_DOWN_ARROW 0x50
+#define KEY_LEFT_ARROW 0x4B
+#define KEY_RIGHT_ARROW 0x4D
+#define KEY_ESC_RELEASE 0x81
+
 // Editor state
 static EditorState editor = {{{0}}, 0, 0, 0, 0, EDITOR_MODE_NORMAL, false, {0}, false};
 
@@ -61,6 +71,17 @@ bool dolphin_is_active(void) {
     return editor.active;
 }
 
+// Helper: Initialize editor UI (header and separator)
+static void dolphin_init_ui(void) {
+    console_clear();
+    extern void console_set_cursor(unsigned int x, unsigned int y);
+    console_set_cursor(0, 0);
+    console_println_color("=== Dolphin Text Editor ===", CONSOLE_HEADER_COLOR);
+    console_print_color("Editing: ", CONSOLE_INFO_COLOR);
+    console_println_color(editor.filename, CONSOLE_SUCCESS_COLOR);
+    console_draw_separator(2, CONSOLE_FG_COLOR);
+}
+
 // Create new file
 void dolphin_new(const char* filename) {
     if (!filename || filename[0] == '\0') {
@@ -93,16 +114,7 @@ void dolphin_new(const char* filename) {
     editor.modified = false;
     editor.active = true;
     
-    console_clear();
-    
-    // Draw header at top
-    extern void console_set_cursor(unsigned int x, unsigned int y);
-    console_set_cursor(0, 0);
-    console_println_color("=== Dolphin Text Editor ===", CONSOLE_HEADER_COLOR);
-    console_print_color("Editing: ", CONSOLE_INFO_COLOR);
-    console_println_color(editor.filename, CONSOLE_SUCCESS_COLOR);
-    console_draw_separator(2, CONSOLE_FG_COLOR);
-    
+    dolphin_init_ui();
     dolphin_render();
 }
 
@@ -156,16 +168,7 @@ void dolphin_open(const char* filename) {
     editor.modified = false;
     editor.active = true;
     
-    console_clear();
-    
-    // Draw header at top
-    extern void console_set_cursor(unsigned int x, unsigned int y);
-    console_set_cursor(0, 0);
-    console_println_color("=== Dolphin Text Editor ===", CONSOLE_HEADER_COLOR);
-    console_print_color("Editing: ", CONSOLE_INFO_COLOR);
-    console_println_color(editor.filename, CONSOLE_SUCCESS_COLOR);
-    console_draw_separator(2, CONSOLE_FG_COLOR);
-    
+    dolphin_init_ui();
     dolphin_render();
 }
 
@@ -176,21 +179,33 @@ void dolphin_save(void) {
         return;
     }
     
+    // Check for empty file
+    if (editor.num_lines == 0 || (editor.num_lines == 1 && editor.lines[0][0] == '\0')) {
+        console_set_cursor(0, 22);
+        console_print_color("Saving empty file...", CONSOLE_INFO_COLOR);
+    }
+    
     // Build content string (limit to 1000 chars for filesystem)
     static char content[1001];  // MAX_FILE_CONTENT_LENGTH from filesystem
     unsigned int pos = 0;
+    bool truncated = false;
     
     for (unsigned int i = 0; i < editor.num_lines && pos < 999; i++) {
         for (unsigned int j = 0; editor.lines[i][j] != '\0' && pos < 998; j++) {
             content[pos++] = editor.lines[i][j];
+            if (pos >= 998) {
+                truncated = true;
+                break;
+            }
         }
+        if (truncated) break;
         if (i < editor.num_lines - 1 && pos < 999) {
             content[pos++] = '\n';
         }
     }
     content[pos] = '\0';
     
-    // First try to write to existing file, if it doesn't exist, create it
+    // write_file now handles both creating and writing atomically
     if (write_file(editor.filename, content)) {
         editor.modified = false;
         console_set_cursor(0, 22);
@@ -202,24 +217,12 @@ void dolphin_save(void) {
         int_to_str(pos, buf);
         console_print(buf);
         console_print(" bytes)");
-    } else {
-        // File doesn't exist, try to create it first
-        extern bool create_file(const char* name);
-        if (create_file(editor.filename)) {
-            // Now write to it
-            if (write_file(editor.filename, content)) {
-                editor.modified = false;
-                console_set_cursor(0, 22);
-                console_print_color("Created & saved: ", CONSOLE_SUCCESS_COLOR);
-                console_println_color(editor.filename, CONSOLE_FG_COLOR);
-            } else {
-                console_set_cursor(0, 22);
-                console_print_error("Failed to write to new file");
-            }
-        } else {
-            console_set_cursor(0, 22);
-            console_print_error("Failed to save (filesystem full or invalid name)");
+        if (truncated) {
+            console_print_color(" [TRUNCATED]", CONSOLE_WARNING_COLOR);
         }
+    } else {
+        console_set_cursor(0, 22);
+        console_print_error("Failed to save (filesystem full, name too long, or content too large)");
     }
 }
 
@@ -400,23 +403,29 @@ void dolphin_render(void) {
             char buf[8];
             extern void int_to_str(int num, char *str);
             int_to_str(line_num + 1, buf);
+            unsigned int line_num_width = str_len(buf);
             console_print_color(buf, CONSOLE_INFO_COLOR);
             console_print(": ");
             
-            // Display line content
-            for (unsigned int j = 0; editor.lines[line_num][j] != '\0' && j < MAX_LINE_LENGTH; j++) {
-                console_putchar(editor.lines[line_num][j]);
-            }
+            // Calculate cursor position prefix length
+            unsigned int prefix_len = line_num_width + 2;  // "N: " or "NN: "
             
-            // Show cursor position on current line
-            if (line_num == editor.cursor_line) {
-                // Calculate cursor position (account for line number prefix)
-                unsigned int cursor_x = 3;  // "N: " prefix
-                if (line_num + 1 >= 10) cursor_x = 4;  // Two-digit line numbers
-                cursor_x += editor.cursor_col;
-                
-                console_set_cursor(cursor_x, display_y);
-                console_print_color("_", CONSOLE_SUCCESS_COLOR);
+            // Display line content with cursor
+            size_t line_len = str_len(editor.lines[line_num]);
+            for (unsigned int j = 0; j <= line_len && j < MAX_LINE_LENGTH; j++) {
+                if (line_num == editor.cursor_line && j == editor.cursor_col) {
+                    // Draw cursor at current position
+                    if (j < line_len) {
+                        // Cursor on character - show inverted
+                        console_print_color("_", CONSOLE_SUCCESS_COLOR);
+                    } else {
+                        // Cursor at end of line
+                        console_print_color("_", CONSOLE_SUCCESS_COLOR);
+                    }
+                }
+                if (j < line_len) {
+                    console_putchar(editor.lines[line_num][j]);
+                }
             }
         }
     }
@@ -447,7 +456,7 @@ void dolphin_handle_key(unsigned char keycode) {
     extern unsigned char keyboard_map[128];
     
     // Arrow key navigation
-    if (keycode == 0x48) {  // Up arrow
+    if (keycode == KEY_UP_ARROW) {
         if (editor.cursor_line > 0) {
             editor.cursor_line--;
             size_t line_len = str_len(editor.lines[editor.cursor_line]);
@@ -457,7 +466,7 @@ void dolphin_handle_key(unsigned char keycode) {
             dolphin_render();
         }
         return;
-    } else if (keycode == 0x50) {  // Down arrow
+    } else if (keycode == KEY_DOWN_ARROW) {
         if (editor.cursor_line < editor.num_lines - 1) {
             editor.cursor_line++;
             size_t line_len = str_len(editor.lines[editor.cursor_line]);
@@ -467,7 +476,7 @@ void dolphin_handle_key(unsigned char keycode) {
             dolphin_render();
         }
         return;
-    } else if (keycode == 0x4B) {  // Left arrow
+    } else if (keycode == KEY_LEFT_ARROW) {
         if (editor.cursor_col > 0) {
             editor.cursor_col--;
             dolphin_render();
@@ -477,7 +486,7 @@ void dolphin_handle_key(unsigned char keycode) {
             dolphin_render();
         }
         return;
-    } else if (keycode == 0x4D) {  // Right arrow
+    } else if (keycode == KEY_RIGHT_ARROW) {
         size_t line_len = str_len(editor.lines[editor.cursor_line]);
         if (editor.cursor_col < line_len) {
             editor.cursor_col++;
@@ -491,13 +500,13 @@ void dolphin_handle_key(unsigned char keycode) {
     }
     
     // Special keys
-    if (keycode == 0x1C) {  // Enter
+    if (keycode == KEY_ENTER) {
         dolphin_new_line();
         dolphin_render();
-    } else if (keycode == 0x0E) {  // Backspace
+    } else if (keycode == KEY_BACKSPACE) {
         dolphin_delete_char();
         dolphin_render();
-    } else if (keycode == 0x01) {  // ESC - exit to command mode
+    } else if (keycode == KEY_ESC) {
         // Clear bottom line for command
         console_set_cursor(0, 23);
         for (int i = 0; i < 80; i++) {
@@ -516,7 +525,7 @@ void dolphin_handle_key(unsigned char keycode) {
             unsigned char status = read_port(KEYBOARD_STATUS_PORT);
             if (status & 0x01) {
                 unsigned char release_key = read_port(KEYBOARD_DATA_PORT);
-                if (release_key == 0x81) break;  // ESC released
+                if (release_key == KEY_ESC_RELEASE) break;
             }
         }
         
@@ -528,7 +537,7 @@ void dolphin_handle_key(unsigned char keycode) {
                 // Ignore key releases (high bit set)
                 if (cmd_key & 0x80) continue;
                 
-                if (cmd_key == 0x1C) {  // Enter - execute command
+                if (cmd_key == KEY_ENTER) {
                     cmd_buffer[cmd_index] = '\0';
                     
                     console_set_cursor(0, 22);
@@ -576,10 +585,10 @@ void dolphin_handle_key(unsigned char keycode) {
                         console_print_error("Unknown cmd. Use: w (save), q (quit), wq (save & quit), q! (force)");
                         return;
                     }
-                } else if (cmd_key == 0x01) {  // ESC - cancel
+                } else if (cmd_key == KEY_ESC) {
                     dolphin_render();
                     return;  // Exit command mode
-                } else if (cmd_key == 0x0E && cmd_index > 0) {  // Backspace
+                } else if (cmd_key == KEY_BACKSPACE && cmd_index > 0) {
                     cmd_index--;
                     console_backspace();
                 } else {
