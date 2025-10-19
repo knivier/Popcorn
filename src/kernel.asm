@@ -27,7 +27,9 @@ start:
   cli                      ;block interrupts
   
   ; Save Multiboot2 info pointer (GRUB passes it in ebx)
-  mov [multiboot2_info_ptr], ebx
+  ; EBX contains the physical address of the multiboot2 information structure
+  mov DWORD [multiboot2_info_ptr], ebx
+  mov DWORD [multiboot2_info_ptr + 4], 0  ; Zero-extend to 64-bit
   
   ; Set up page tables for long mode
   ; Clear page table memory

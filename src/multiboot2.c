@@ -31,6 +31,10 @@ void multiboot2_parse(void) {
 
     // Check if we have a valid multiboot info pointer
     if (multiboot2_info_ptr == 0) {
+        // Use basic memory info from a fallback method
+        sys_info.mem_lower = 640;  // Standard lower memory
+        sys_info.mem_upper = 0;
+        sys_info.valid = true;
         return;
     }
 
@@ -40,6 +44,9 @@ void multiboot2_parse(void) {
     
     // Sanity check
     if (total_size < 8 || total_size > 0x100000) {
+        sys_info.mem_lower = 640;
+        sys_info.mem_upper = 0;
+        sys_info.valid = true;
         return;
     }
 
@@ -129,10 +136,13 @@ const char* multiboot2_get_command_line(void) {
  * Get total memory in bytes
  */
 uint64_t multiboot2_get_total_memory(void) {
-    if (!sys_info.valid) {
-        // Fallback: estimate from basic mem info
+    if (!sys_info.valid || sys_info.total_memory == 0) {
         // mem_upper is in KB, starting from 1MB
-        return (1024ULL * 1024) + ((uint64_t)sys_info.mem_upper * 1024);
+        if (sys_info.mem_upper > 0) {
+            return (1024ULL * 1024) + ((uint64_t)sys_info.mem_upper * 1024);
+        }
+        // If still nothing, return a minimal amount
+        return 1024ULL * 1024;  // 1MB minimum
     }
     return sys_info.total_memory;
 }

@@ -701,6 +701,11 @@ void kmain(void) {
     // Parse Multiboot2 information from bootloader
     multiboot2_parse();
     
+    extern uint64_t multiboot2_info_ptr;
+    if (multiboot2_info_ptr == 0) {
+        console_println_color("Warning: No Multiboot2 info received", CONSOLE_WARNING_COLOR);
+    }
+    
     // Initialize system components
     idt_init();
     kb_init();
@@ -713,7 +718,6 @@ void kmain(void) {
     register_pop_module(&memory_module);
     register_pop_module(&cpu_module);
     
-    // Initialize filesystem (but don't let it move cursor)
     unsigned int save_x = console_state.cursor_x;
     unsigned int save_y = console_state.cursor_y;
     filesystem_module.pop_function(current_loc);
@@ -727,7 +731,6 @@ void kmain(void) {
 
     // Main input loop
     while (1) {
-        // Update status displays (always safe since they save/restore cursor)
         spinner_pop_func(current_loc);
         uptime_module.pop_function(current_loc + 16);
         
