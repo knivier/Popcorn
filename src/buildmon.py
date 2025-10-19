@@ -654,12 +654,7 @@ class ModernPopcornBuilder:
             self.animate_status_indicator(self.colors['secondary'], "Building + ISO...")
             self.log("🔨 Building kernel (quick mode)...")
             
-            if not Path('trymake.sh').exists():
-                self.log("❌ trymake.sh not found", "ERROR")
-                self.enable_buttons()
-                return
-            
-            # Use trymake but don't run QEMU
+            # Build kernel with all source files
             success = self.run_command(['bash', '-c', 
                 'mkdir -p obj && ' +
                 'nasm -f elf64 kernel.asm -o obj/kasm.o && ' +
