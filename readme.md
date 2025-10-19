@@ -1,8 +1,29 @@
 # Welcome to Popcorn
 
-I'm trying to create a simple yet intuitive kernel framework. It's still unstable and all versions will be marked as pre releases for some time.
+A modern, modular 64-bit kernel framework designed for learning operating system development. Features a complete console system, text editor, system information tools, and more!
 
-Enjoy!
+**Current Version: v0.5** - Now with Dolphin text editor, system info tools, and enhanced console features!
+
+## Quick Start
+
+1. **Build and Run**:
+   ```bash
+   cd src
+   python3 buildmon.py
+   # Click "Full Automation" for one-click build and run
+   ```
+
+2. **Try the Features**:
+   - `help` - See all available commands
+   - `sysinfo` - View system information
+   - `mem -map` - See memory layout
+   - `dol -new test.txt` - Create a text file
+   - `ls` - List files and directories
+
+3. **Text Editing**:
+   - `dol -open filename.txt` - Open a file
+   - Use arrow keys to navigate
+   - Press ESC then `w` to save, `q` to quit
 
 ## Architecture
 
@@ -14,13 +35,13 @@ Enjoy!
 
 ## Build Instructions
 
-### GUI Build Tool (Easiest - Fedora)
+### GUI Build Tool (Easiest)
 
-For Fedora users, we provide a beautiful GUI build tool:
+We provide a beautiful GUI build tool with modern animations:
 
 ```bash
 cd src
-python3 popcorn_builder_gui.py
+python3 buildmon.py
 ```
 
 Features:
@@ -28,7 +49,8 @@ Features:
 - **Full Automation**: One-click build and run
 - **Manual Mode**: Individual build steps with verbose output
 - **Real-time Logs**: See build progress in real-time
-- **Modern UI**: Clean, intuitive interface
+- **Modern UI**: Dark theme with smooth animations
+- **QEMU Integration**: Direct kernel testing
 
 ### Alternative: Interactive Build System
 
@@ -112,6 +134,16 @@ ROOT
         
         ├── filesystem_pop.c  (Filesystem module)
         
+        ├── multiboot2.c      (Multiboot2 info parser)
+        
+        ├── sysinfo_pop.c     (System information)
+        
+        ├── memory_pop.c      (Memory management)
+        
+        ├── cpu_pop.c         (CPU information)
+        
+        ├── dolphin_pop.c     (Text editor)
+        
         ├── shimjapii_pop.c   (Example pop)
         
         ├── idt.asm           (Interrupt descriptor)
@@ -134,6 +166,16 @@ ROOT
         
         │   ├── spinner_pop.h (Spinner header)
         
+        │   ├── multiboot2.h  (Multiboot2 structures)
+        
+        │   ├── sysinfo_pop.h (System info header)
+        
+        │   ├── memory_pop.h  (Memory management header)
+        
+        │   ├── cpu_pop.h     (CPU info header)
+        
+        │   ├── dolphin_pop.h (Text editor header)
+        
         │   └── keyboard_map.h
         
         └── obj/              (Compiled objects)
@@ -147,17 +189,49 @@ To build the project, follow the assembly and compilation instructions provided 
 
 After building the project, you can run the kernel using QEMU with the command provided above. This will start the system and display the kernel messages on the screen. "Pops" are modular components that extend kernel functionality without modifying the core kernel.c file.
 
-### Architecture Overview
+## Features
 
-Popcorn v0.5+ is a **64-bit x86-64 kernel** with modern console system and modular architecture:
+### Core System
+- **64-bit x86-64 Architecture**: Modern long mode with proper page tables
+- **Multiboot2 Support**: Full bootloader specification compliance
+- **Hardware Cursor**: Synchronized VGA hardware cursor positioning
+- **Scrollback Buffer**: Page Up/Down to view command history
+- **Command History**: Arrow keys for command navigation
+- **Autocomplete**: Tab completion for all commands
 
-- Console System: A complete VGA text mode abstraction layer that handles all screen output, cursor management, and color styling. All display operations go through the console system for consistency.
+### System Information Tools
+- **`sysinfo`**: Complete system overview (kernel, CPU, memory, bootloader)
+- **`mem -map`**: Extended memory map from Multiboot2
+- **`mem -use`**: Memory usage statistics
+- **`mem -stats`**: Detailed memory information
+- **`cpu -hz`**: CPU frequency detection using RDTSC
+- **`cpu -info`**: Detailed CPU information (vendor, features, brand string)
 
-- Pop Modules: Self-contained modules that register with the kernel and can display information or provide functionality. Each pop module saves and restores console state to avoid interfering with user input.
+### File System
+- **Complete Filesystem**: In-memory file system with directories
+- **File Operations**: Create, read, write, delete, copy, search
+- **Directory Management**: Create directories, navigate, list hierarchy
+- **Path Support**: Full path resolution and navigation
 
-- Utilities: Shared helper functions (like delay) used across multiple modules to reduce code duplication.
+### Dolphin Text Editor
+- **Full-featured Editor**: Line-based text editing with cursor navigation
+- **File Management**: Create, open, save, close text files
+- **Navigation**: Arrow keys, Enter, Backspace with proper line handling
+- **Command Mode**: ESC commands (w, q, wq, q!) like vim
+- **Visual Feedback**: Line numbers, cursor position, modification status
 
-- Keyboard Input: Handled through interrupt-driven system with proper IDT setup and keyboard controller initialization.
+### Console System
+- **Modern UI**: Color-coded output with themes
+- **Status Bar**: Real-time system information
+- **Error Handling**: Standardized error messages
+- **Double Buffering**: Smooth screen updates
+- **Scrollback**: View previous output with Page Up/Down
+
+### Build System
+- **GUI Builder**: Modern Python GUI with animations
+- **Automated Builds**: One-click compilation and ISO creation
+- **Dependency Management**: Auto-installation of required tools
+- **Cross-platform**: Works on Linux, WSL, and Windows
 
 ### Future Plan
 
