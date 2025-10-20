@@ -97,6 +97,7 @@ start64:
   jmp .hang
 
 global keyboard_handler
+global timer_handler
 global read_port
 global write_port
 global load_idt
@@ -106,6 +107,7 @@ global cpuid_extended_brand
 global rdtsc
 
 extern keyboard_handler_main
+extern timer_interrupt_handler
 
 read_port:
   ; Parameter in rdi (first arg in x64 calling convention)
@@ -145,6 +147,43 @@ keyboard_handler:
   push r15
   
   call keyboard_handler_main
+  
+  pop r15
+  pop r14
+  pop r13
+  pop r12
+  pop r11
+  pop r10
+  pop r9
+  pop r8
+  pop rbp
+  pop rdi
+  pop rsi
+  pop rdx
+  pop rcx
+  pop rbx
+  pop rax
+  
+  iretq
+
+timer_handler:
+  push rax
+  push rbx
+  push rcx
+  push rdx
+  push rsi
+  push rdi
+  push rbp
+  push r8
+  push r9
+  push r10
+  push r11
+  push r12
+  push r13
+  push r14
+  push r15
+  
+  call timer_interrupt_handler
   
   pop r15
   pop r14

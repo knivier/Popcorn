@@ -7,8 +7,12 @@
 #include "includes/memory_pop.h"
 #include "includes/cpu_pop.h"
 #include "includes/dolphin_pop.h"
+#include "includes/timer.h"
+#include "includes/scheduler.h"
+#include "includes/memory.h"
 #include <stddef.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 /* there are 25 lines each of 80 columns; each element takes 2 bytes */
 #define LINES 25
@@ -34,6 +38,7 @@
 
 extern unsigned char keyboard_map[128];
 extern void keyboard_handler(void);
+extern void timer_handler(void);
 extern char read_port(unsigned short port);
 extern void write_port(unsigned short port, unsigned char data);
 
@@ -102,7 +107,7 @@ void idt_init(void)
     struct IDT_ptr idt_ptr;
 
     /* populate IDT entry of keyboard's interrupt */
-    keyboard_address = (unsigned long)keyboard_handler;
+    keyboard_address = (unsigned long)(uintptr_t)keyboard_handler;
     IDT[0x21].offset_low = keyboard_address & 0xFFFF;
     IDT[0x21].selector = KERNEL_CODE_SEGMENT_OFFSET;
     IDT[0x21].ist = 0;                   /* no IST */
@@ -110,6 +115,16 @@ void idt_init(void)
     IDT[0x21].offset_mid = (keyboard_address >> 16) & 0xFFFF;
     IDT[0x21].offset_high = (keyboard_address >> 32) & 0xFFFFFFFF;
     IDT[0x21].reserved = 0;
+
+    /* populate IDT entry of timer's interrupt */
+    unsigned long timer_address = (unsigned long)(uintptr_t)timer_handler;
+    IDT[0x20].offset_low = timer_address & 0xFFFF;
+    IDT[0x20].selector = KERNEL_CODE_SEGMENT_OFFSET;
+    IDT[0x20].ist = 0;                   /* no IST */
+    IDT[0x20].type_attr = INTERRUPT_GATE;
+    IDT[0x20].offset_mid = (timer_address >> 16) & 0xFFFF;
+    IDT[0x20].offset_high = (timer_address >> 32) & 0xFFFFFFFF;
+    IDT[0x20].reserved = 0;
 
     /*     Ports
     *    PIC1    PIC2
@@ -144,7 +159,7 @@ void idt_init(void)
 
     /* fill the IDT descriptor */
     idt_ptr.limit = (sizeof(struct IDT_entry) * IDT_SIZE) - 1;
-    idt_ptr.base = (unsigned long)IDT;
+    idt_ptr.base = (unsigned long)(uintptr_t)IDT;
 
     load_idt(&idt_ptr);
 }
@@ -250,8 +265,9 @@ static const char* available_commands[] = {
     "help", "halp", "hang", "clear", "uptime", "halt", "stop",
     "write", "read", "delete", "rm", "mkdir", "go", "back",
     "ls", "search", "cp", "listsys", "sysinfo",
-    "mem", "mem -map", "mem -use", "mem -stats",
+    "mem", "mem -map", "mem -use", "mem -stats", "mem -info", "mem -debug",
     "cpu", "cpu -hz", "cpu -info",
+    "tasks", "timer",
     "dol", "dol -new", "dol -open", "dol -save", "dol -close", "dol -help",
     NULL
 };
@@ -397,7 +413,13 @@ void execute_command(const char *command) {
         console_println(" - Displays detailed system information");
         
         console_print_color("  mem [option]", CONSOLE_PROMPT_COLOR);
-        console_println(" - Memory commands: -map, -use, -stats");
+        console_println(" - Memory commands: -map, -use, -stats, -info, -debug");
+        
+        console_print_color("  tasks", CONSOLE_PROMPT_COLOR);
+        console_println(" - Show current task information");
+        
+        console_print_color("  timer", CONSOLE_PROMPT_COLOR);
+        console_println(" - Show timer information");
         
         console_print_color("  cpu [option]", CONSOLE_PROMPT_COLOR);
         console_println(" - CPU commands: -hz, -info");
@@ -750,19 +772,88 @@ void execute_command(const char *command) {
     } else if (strcmp(command, "sysinfo") == 0) {
         sysinfo_print_full();
     } else if (strncmp(command, "mem ", 4) == 0) {
-        // Memory commands: mem -map, mem -use, mem -stats
+        // Memory commands: mem -map, mem -use, mem -stats, mem -info, mem -debug
         if (strcmp(command + 4, "-map") == 0) {
             memory_print_map();
         } else if (strcmp(command + 4, "-use") == 0) {
             memory_print_usage();
         } else if (strcmp(command + 4, "-stats") == 0) {
             memory_print_stats();
+        } else if (strcmp(command + 4, "-info") == 0) {
+            kernel_memory_print_stats();
+        } else if (strcmp(command + 4, "-debug") == 0) {
+            memory_debug_print();
         } else {
-            console_print_error("Unknown mem option. Use: -map, -use, or -stats");
+            console_print_error("Unknown mem option. Use: -map, -use, -stats, -info, or -debug");
         }
     } else if (strcmp(command, "mem") == 0) {
         // Default: show usage
         memory_print_usage();
+    } else if (strcmp(command, "tasks") == 0) {
+        char buffer[64];
+        console_newline();
+        console_println_color("=== TASK INFORMATION ===", CONSOLE_HEADER_COLOR);
+        console_draw_separator(console_state.cursor_y, CONSOLE_FG_COLOR);
+        
+        TaskStruct* current = scheduler_get_current_task();
+        if (current) {
+            console_print_color("Current Task PID: ", CONSOLE_INFO_COLOR);
+            int_to_str(current->pid, buffer);
+            console_println_color(buffer, CONSOLE_FG_COLOR);
+            
+            console_print_color("Task State: ", CONSOLE_INFO_COLOR);
+            switch (current->state) {
+                case TASK_STATE_RUNNING:
+                    console_println_color("Running", CONSOLE_SUCCESS_COLOR);
+                    break;
+                case TASK_STATE_READY:
+                    console_println_color("Ready", CONSOLE_INFO_COLOR);
+                    break;
+                case TASK_STATE_BLOCKED:
+                    console_println_color("Blocked", CONSOLE_WARNING_COLOR);
+                    break;
+                case TASK_STATE_SLEEPING:
+                    console_println_color("Sleeping", CONSOLE_INFO_COLOR);
+                    break;
+                case TASK_STATE_ZOMBIE:
+                    console_println_color("Zombie", CONSOLE_ERROR_COLOR);
+                    break;
+                default:
+                    console_println_color("Unknown", CONSOLE_ERROR_COLOR);
+                    break;
+            }
+            
+            console_print_color("Priority: ", CONSOLE_INFO_COLOR);
+            int_to_str(current->priority, buffer);
+            console_println_color(buffer, CONSOLE_FG_COLOR);
+            
+            console_print_color("Total Runtime: ", CONSOLE_INFO_COLOR);
+            int_to_str((int)current->total_runtime, buffer);
+            console_println_color(buffer, CONSOLE_FG_COLOR);
+        } else {
+            console_println_color("No current task", CONSOLE_ERROR_COLOR);
+        }
+        
+        console_draw_separator(console_state.cursor_y, CONSOLE_FG_COLOR);
+    } else if (strcmp(command, "timer") == 0) {
+        char buffer[64];
+        console_newline();
+        console_println_color("=== TIMER INFORMATION ===", CONSOLE_HEADER_COLOR);
+        console_draw_separator(console_state.cursor_y, CONSOLE_FG_COLOR);
+        
+        console_print_color("Timer Ticks: ", CONSOLE_INFO_COLOR);
+        int_to_str((int)timer_get_ticks(), buffer);
+        console_println_color(buffer, CONSOLE_FG_COLOR);
+        
+        console_print_color("Uptime (ms): ", CONSOLE_INFO_COLOR);
+        int_to_str((int)timer_get_uptime_ms(), buffer);
+        console_println_color(buffer, CONSOLE_FG_COLOR);
+        
+        console_print_color("Timer Frequency: ", CONSOLE_INFO_COLOR);
+        int_to_str(TIMER_FREQUENCY, buffer);
+        console_println_color(buffer, CONSOLE_FG_COLOR);
+        
+        console_draw_separator(console_state.cursor_y, CONSOLE_FG_COLOR);
     } else if (strncmp(command, "cpu ", 4) == 0) {
         // CPU commands: cpu -hz, cpu -info
         if (strcmp(command + 4, "-hz") == 0) {
@@ -841,6 +932,21 @@ void kmain(void) {
     idt_init();
     kb_init();
     
+    // Initialize memory management
+    memory_init();
+    
+    // Initialize timer system
+    timer_init(TIMER_FREQUENCY);
+    
+    // Initialize scheduler
+    scheduler_init();
+    
+    // Set timer tick handler to scheduler
+    timer_set_tick_handler(scheduler_tick);
+    
+    // Enable timer interrupts
+    timer_enable();
+    
     // Register pop modules
     register_pop_module(&spinner_module);
     register_pop_module(&uptime_module);
@@ -860,6 +966,8 @@ void kmain(void) {
     
     // Print status bar
     console_print_status_bar();
+    
+    console_println_color("Kernel initialized - entering interrupt-driven mode", CONSOLE_SUCCESS_COLOR);
 
     // Main input loop
     while (1) {
@@ -969,5 +1077,8 @@ void kmain(void) {
                 }
             }
         }
+        
+        // Yield CPU to scheduler
+        scheduler_yield();
     }
 }

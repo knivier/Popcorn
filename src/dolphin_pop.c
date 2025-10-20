@@ -403,12 +403,12 @@ void dolphin_render(void) {
             char buf[8];
             extern void int_to_str(int num, char *str);
             int_to_str(line_num + 1, buf);
-            unsigned int line_num_width = str_len(buf);
+            // unsigned int line_num_width = str_len(buf);  // Unused for now
             console_print_color(buf, CONSOLE_INFO_COLOR);
             console_print(": ");
             
             // Calculate cursor position prefix length
-            unsigned int prefix_len = line_num_width + 2;  // "N: " or "NN: "
+            // unsigned int prefix_len = line_num_width + 2;  // "N: " or "NN: " - unused for now
             
             // Display line content with cursor
             size_t line_len = str_len(editor.lines[line_num]);

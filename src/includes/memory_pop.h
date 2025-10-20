@@ -29,7 +29,7 @@ void memory_print_map(void);
 void memory_print_usage(void);
 void memory_print_stats(void);
 void memory_calculate_stats(void);
-const MemoryStats* memory_get_stats(void);
+const MemoryStats* memory_pop_get_stats(void);
 
 // Module definition
 extern const PopModule memory_module;
