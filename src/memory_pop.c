@@ -340,7 +340,7 @@ const MemoryStats* memory_pop_get_stats(void) {
     return &mem_stats;
 }
 
-// Pop function (doesn't display anything in main loop)
+// Pop function
 void memory_pop_func(unsigned int start_pos) {
     (void)start_pos;
     

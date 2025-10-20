@@ -272,7 +272,7 @@ int strrncmp(const char* str1, const char* str2, size_t num) {
 // Forward declaration of external int_to_str from uptime_pop.c
 extern void int_to_str(int value, char* buffer);
 
-// Function to list all files in the current directory (console-friendly version)
+// Function to list all files in the current directory
 void list_files_console(void) {
     extern ConsoleState console_state;
     int file_count = 0;
@@ -302,7 +302,7 @@ void list_files_console(void) {
     }
 }
 
-// Function to list all files in the current directory (old VGA version)
+// Function to list all files in the current directory (VGA version)
 void list_files() {
     char* vidptr = (char*)0xb8000;
     unsigned int pos = 0;
@@ -670,7 +670,7 @@ void filesystem_pop_func(unsigned int start_pos) {
     unsigned int prev_y = console_state.cursor_y;
     unsigned char prev_color = console_state.current_color;
     
-    // Write message at bottom left of screen (row 24, col 0)
+    // Write message at bottom left of screen
     console_set_cursor(0, 24);
     console_print_color("File Systems Ready", CONSOLE_SUCCESS_COLOR);
     

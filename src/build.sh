@@ -161,12 +161,13 @@ build_kernel() {
     compile_file "timer.c" "$OBJ_DIR/timer.o" "c"
     compile_file "scheduler.c" "$OBJ_DIR/scheduler.o" "c"
     compile_file "memory.c" "$OBJ_DIR/memory.o" "c"
+    compile_file "init.c" "$OBJ_DIR/init.o" "c"
     
     # Link files
     log "INFO" "Linking object files..."
     
     # Check if all object files exist
-    for obj in "$OBJ_DIR"/kasm.o "$OBJ_DIR"/kc.o "$OBJ_DIR"/console.o "$OBJ_DIR"/utils.o "$OBJ_DIR"/pop_module.o "$OBJ_DIR"/shimjapii_pop.o "$OBJ_DIR"/idt.o "$OBJ_DIR"/spinner_pop.o "$OBJ_DIR"/uptime_pop.o "$OBJ_DIR"/halt_pop.o "$OBJ_DIR"/filesystem_pop.o "$OBJ_DIR"/multiboot2.o "$OBJ_DIR"/sysinfo_pop.o "$OBJ_DIR"/memory_pop.o "$OBJ_DIR"/cpu_pop.o "$OBJ_DIR"/dolphin_pop.o "$OBJ_DIR"/timer.o "$OBJ_DIR"/scheduler.o "$OBJ_DIR"/memory.o; do
+    for obj in "$OBJ_DIR"/kasm.o "$OBJ_DIR"/kc.o "$OBJ_DIR"/console.o "$OBJ_DIR"/utils.o "$OBJ_DIR"/pop_module.o "$OBJ_DIR"/shimjapii_pop.o "$OBJ_DIR"/idt.o "$OBJ_DIR"/spinner_pop.o "$OBJ_DIR"/uptime_pop.o "$OBJ_DIR"/halt_pop.o "$OBJ_DIR"/filesystem_pop.o "$OBJ_DIR"/multiboot2.o "$OBJ_DIR"/sysinfo_pop.o "$OBJ_DIR"/memory_pop.o "$OBJ_DIR"/cpu_pop.o "$OBJ_DIR"/dolphin_pop.o "$OBJ_DIR"/timer.o "$OBJ_DIR"/scheduler.o "$OBJ_DIR"/memory.o "$OBJ_DIR"/init.o; do
         if [ ! -f "$obj" ]; then
             log "ERROR" "Missing object file: $obj"
             exit 1
@@ -197,7 +198,8 @@ build_kernel() {
         "$OBJ_DIR/dolphin_pop.o" \
         "$OBJ_DIR/timer.o" \
         "$OBJ_DIR/scheduler.o" \
-        "$OBJ_DIR/memory.o"
+        "$OBJ_DIR/memory.o" \
+        "$OBJ_DIR/init.o"
     
     check_status "Linking object files"
 }

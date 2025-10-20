@@ -30,14 +30,14 @@ extern char read_port(unsigned short port);
 // Editor state
 static EditorState editor = {{{0}}, 0, 0, 0, 0, EDITOR_MODE_NORMAL, false, {0}, false};
 
-// Helper: string length
+// string length
 static size_t str_len(const char* str) {
     size_t len = 0;
     while (str[len] != '\0') len++;
     return len;
 }
 
-// Helper: string copy with limit
+// string copy with limit
 static void str_copy(char* dest, const char* src, size_t max_len) {
     size_t i;
     for (i = 0; i < max_len - 1 && src[i] != '\0'; i++) {
@@ -46,7 +46,7 @@ static void str_copy(char* dest, const char* src, size_t max_len) {
     dest[i] = '\0';
 }
 
-// Helper: check if string ends with suffix
+// check if string ends with suffix
 static bool ends_with(const char* str, const char* suffix) {
     size_t str_len_val = str_len(str);
     size_t suffix_len = str_len(suffix);
@@ -71,7 +71,7 @@ bool dolphin_is_active(void) {
     return editor.active;
 }
 
-// Helper: Initialize editor UI (header and separator)
+// Initialize editor UI (header and separator)
 static void dolphin_init_ui(void) {
     console_clear();
     extern void console_set_cursor(unsigned int x, unsigned int y);
@@ -403,12 +403,8 @@ void dolphin_render(void) {
             char buf[8];
             extern void int_to_str(int num, char *str);
             int_to_str(line_num + 1, buf);
-            // unsigned int line_num_width = str_len(buf);  // Unused for now
             console_print_color(buf, CONSOLE_INFO_COLOR);
             console_print(": ");
-            
-            // Calculate cursor position prefix length
-            // unsigned int prefix_len = line_num_width + 2;  // "N: " or "NN: " - unused for now
             
             // Display line content with cursor
             size_t line_len = str_len(editor.lines[line_num]);

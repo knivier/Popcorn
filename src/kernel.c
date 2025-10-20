@@ -10,6 +10,7 @@
 #include "includes/timer.h"
 #include "includes/scheduler.h"
 #include "includes/memory.h"
+#include "includes/init.h"
 #include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -903,81 +904,31 @@ void execute_command(const char *command) {
     }
 }
 
-/*
-Where the magic happens, authored by Knivier
-This is executed in kernel.asm and is the heart of the program
-It boots the system then initializes all pops, then waits for inputs in a while loop to keep the kernel running
-*/
 void kmain(void) {
-    // Initialize the console system
-    console_init();
+    // Initialize the boot screen and show initialization process
+    init_boot_screen();
     
-    // Draw the header
-    console_draw_header("Popcorn Kernel v0.5");
+    // At this point, init_boot_screen() has already:
+    // - Initialized memory management
+    // - Initialized timer system
+    // - Initialized scheduler
+    // - Loaded all pop modules
+    // - Set up interrupt handlers
+    // - Enabled timer interrupts
     
-    // Print welcome message
-    console_println_color("Welcome to Popcorn Kernel!", CONSOLE_SUCCESS_COLOR);
-    console_println_color("A modular kernel framework for learning OS development", CONSOLE_INFO_COLOR);
-    console_newline();
+    // Initialize input buffer and history
+    char input_buffer[256] = {0};
+    char temp_buffer[256] = {0};
+    unsigned int input_index = 0;
+    int history_index = -1;
     
-    // Parse Multiboot2 information from bootloader
-    multiboot2_parse();
-    
-    extern uint64_t multiboot2_info_ptr;
-    if (multiboot2_info_ptr == 0) {
-        console_println_color("Warning: No Multiboot2 info received", CONSOLE_WARNING_COLOR);
-    }
-    
-    // Initialize system components
-    idt_init();
-    kb_init();
-    
-    // Initialize memory management
-    memory_init();
-    
-    // Initialize timer system
-    timer_init(TIMER_FREQUENCY);
-    
-    // Initialize scheduler
-    scheduler_init();
-    
-    // Set timer tick handler to scheduler
-    timer_set_tick_handler(scheduler_tick);
-    
-    // Enable timer interrupts
-    timer_enable();
-    
-    // Register pop modules
-    register_pop_module(&spinner_module);
-    register_pop_module(&uptime_module);
-    register_pop_module(&filesystem_module);
-    register_pop_module(&sysinfo_module);
-    register_pop_module(&memory_module);
-    register_pop_module(&cpu_module);
-    register_pop_module(&dolphin_module);
-    
-    unsigned int save_x = console_state.cursor_x;
-    unsigned int save_y = console_state.cursor_y;
-    filesystem_module.pop_function(current_loc);
-    console_set_cursor(save_x, save_y);
-    
-    // Draw initial prompt with path
-    console_draw_prompt_with_path(get_current_directory());
-    
-    // Print status bar
-    console_print_status_bar();
-    
-    console_println_color("Kernel initialized - entering interrupt-driven mode", CONSOLE_SUCCESS_COLOR);
-
-    // Main input loop
+    // Main kernel loop - now interrupt-driven
     while (1) {
-        spinner_pop_func(current_loc);
-        uptime_module.pop_function(current_loc + 16);
-        
         // Handle keyboard input
         unsigned char status;
         char keycode;
         status = read_port(KEYBOARD_STATUS_PORT);
+        
         if (status & 0x01) {
             keycode = read_port(KEYBOARD_DATA_PORT);
             if (keycode < 0)

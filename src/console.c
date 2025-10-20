@@ -264,7 +264,7 @@ void console_draw_box(unsigned int x, unsigned int y, unsigned int width, unsign
     }
 }
 
-// Draw a header with title (using ASCII characters for compatibility)
+// Draw a header with title
 void console_draw_header(const char* title) {
     console_set_cursor(0, 1);
     console_print_color("+------------------------------------------------------------------------------+", CONSOLE_HEADER_COLOR);
@@ -374,7 +374,7 @@ void console_center_text(const char* text, unsigned int y, unsigned char color) 
     console_print_color(text, color);
 }
 
-// Draw a separator line (using ASCII characters)
+// Draw a separator line
 void console_draw_separator(unsigned int y, unsigned char color) {
     console_set_cursor(0, y);
     for (unsigned int i = 0; i < VGA_WIDTH; i++) {
