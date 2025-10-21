@@ -251,10 +251,33 @@ menuentry "Popcorn Kernel x64" {
 }
 EOF
     
-    # Create the ISO using xorriso (resolved from PATH when possible)
-    log "INFO" "Building ISO with xorriso..."
-    "$XORRISO_CMD" -as mkisofs -R -J -c boot/boot.catalog -b boot/grub/i386-pc/eltorito.img -no-emul-boot -boot-load-size 4 -boot-info-table -o popcorn.iso isodir >> "$BUILD_LOG" 2>&1
-    
+    # Create the ISO using GRUB mkrescue tools like buildmon.py, falling back to xorriso
+    if [ -n "$GRUB_MKRESCUE" ]; then
+        log "INFO" "Building ISO using $GRUB_MKRESCUE..."
+        echo "Running: $GRUB_MKRESCUE -o popcorn.iso isodir" >> "$BUILD_LOG"
+        $GRUB_MKRESCUE -o popcorn.iso isodir >> "$BUILD_LOG" 2>&1
+        MKRESCUE_STATUS=$?
+        if [ $MKRESCUE_STATUS -ne 0 ]; then
+            log "WARNING" "$GRUB_MKRESCUE failed (status $MKRESCUE_STATUS). Trying xorriso fallback..."
+            if command -v "$XORRISO_CMD" >/dev/null 2>&1 || [ -x "$XORRISO_CMD" ]; then
+                echo "Running: $XORRISO_CMD -as mkisofs -R -J -c boot/boot.catalog -b boot/grub/i386-pc/eltorito.img -no-emul-boot -boot-load-size 4 -boot-info-table -o popcorn.iso isodir" >> "$BUILD_LOG"
+                "$XORRISO_CMD" -as mkisofs -R -J -c boot/boot.catalog -b boot/grub/i386-pc/eltorito.img -no-emul-boot -boot-load-size 4 -boot-info-table -o popcorn.iso isodir >> "$BUILD_LOG" 2>&1
+            else
+                log "ERROR" "xorriso not found for fallback: $XORRISO_CMD"
+            fi
+        fi
+    else
+        log "INFO" "No grub mkrescue found; building ISO with xorriso..."
+        if command -v "$XORRISO_CMD" >/dev/null 2>&1 || [ -x "$XORRISO_CMD" ]; then
+            echo "Running: $XORRISO_CMD -as mkisofs -R -J -c boot/boot.catalog -b boot/grub/i386-pc/eltorito.img -no-emul-boot -boot-load-size 4 -boot-info-table -o popcorn.iso isodir" >> "$BUILD_LOG"
+            "$XORRISO_CMD" -as mkisofs -R -J -c boot/boot.catalog -b boot/grub/i386-pc/eltorito.img -no-emul-boot -boot-load-size 4 -boot-info-table -o popcorn.iso isodir >> "$BUILD_LOG" 2>&1
+        else
+            log "ERROR" "Neither grub-mkrescue nor xorriso found. Cannot create ISO."
+            rm -rf isodir
+            return 1
+        fi
+    fi
+
     if [ $? -ne 0 ]; then
         log "ERROR" "Failed to create ISO"
         rm -rf isodir
