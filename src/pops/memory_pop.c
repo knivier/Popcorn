@@ -1,7 +1,7 @@
-// src/memory_pop.c
-#include "includes/memory_pop.h"
-#include "includes/console.h"
-#include "includes/multiboot2.h"
+// src/pops/memory_pop.c
+#include "../includes/memory_pop.h"
+#include "../includes/console.h"
+#include "../includes/multiboot2.h"
 #include <stddef.h>
 #include <stdbool.h>
 

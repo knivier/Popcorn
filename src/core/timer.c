@@ -1,6 +1,6 @@
-// src/timer.c
-#include "includes/timer.h"
-#include "includes/console.h"
+// src/core/timer.c
+#include "../includes/timer.h"
+#include "../includes/console.h"
 #include <stddef.h>
 
 // External port I/O functions

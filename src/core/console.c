@@ -1,6 +1,6 @@
-#include "includes/console.h"
+#include "../includes/console.h"
 
-// External console state (defined in kernel.c)
+// External console state (defined in core/kernel.c)
 extern ConsoleState console_state;
 static char* vga_memory = (char*)VGA_MEMORY_ADDRESS;
 
@@ -11,7 +11,7 @@ static bool buffer_dirty = false;
 // Scrollback buffer
 static ScrollbackBuffer scrollback = {{0}, 0, 0};
 
-// External variables from kernel.c
+// External variables from core/kernel.c
 extern unsigned int current_loc;
 extern char input_buffer[128];
 extern unsigned int input_index;

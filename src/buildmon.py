@@ -48,10 +48,10 @@ class ModernPopcornBuilder:
         self.root.configure(bg=self.colors['bg'])
         
         # Check if we're in the src directory
-        if not Path("kernel.asm").exists():
+        if not Path("core/kernel.asm").exists():
             messagebox.showerror("Error", 
                 "Please run this script from the src/ directory\n" +
-                "containing kernel.asm and other source files.")
+                "containing core/ and pops/ subdirectories.")
             sys.exit(1)
         
         # Variables
@@ -583,7 +583,7 @@ class ModernPopcornBuilder:
             error_log = 'build_errors.log'
             
             # Compile assembly files
-            asm_files = [('kernel.asm', 'obj/kasm.o'), ('idt.asm', 'obj/idt.o')]
+            asm_files = [('core/kernel.asm', 'obj/kasm.o'), ('core/idt.asm', 'obj/idt.o')]
             for src, obj in asm_files:
                 if not self.run_command(['nasm', '-f', 'elf64', src, '-o', obj], 
                                        verbose=True, log_file=error_log):
@@ -593,25 +593,25 @@ class ModernPopcornBuilder:
             # Compile C files
             if success:
                 c_files = [
-                    ('kernel.c', 'obj/kc.o'),
-                    ('console.c', 'obj/console.o'),
-                    ('utils.c', 'obj/utils.o'),
-                    ('pop_module.c', 'obj/pop_module.o'),
-                    ('shimjapii_pop.c', 'obj/shimjapii_pop.o'),
-                    ('spinner_pop.c', 'obj/spinner_pop.o'),
-                    ('uptime_pop.c', 'obj/uptime_pop.o'),
-                    ('halt_pop.c', 'obj/halt_pop.o'),
-                    ('filesystem_pop.c', 'obj/filesystem_pop.o'),
-                    ('multiboot2.c', 'obj/multiboot2.o'),
-                    ('sysinfo_pop.c', 'obj/sysinfo_pop.o'),
-                    ('memory_pop.c', 'obj/memory_pop.o'),
-                    ('cpu_pop.c', 'obj/cpu_pop.o'),
-                    ('dolphin_pop.c', 'obj/dolphin_pop.o'),
-                    ('timer.c', 'obj/timer.o'),
-                    ('scheduler.c', 'obj/scheduler.o'),
-                    ('memory.c', 'obj/memory.o'),
-                    ('init.c', 'obj/init.o'),
-                    ('syscall.c', 'obj/syscall.o')
+                    ('core/kernel.c', 'obj/kc.o'),
+                    ('core/console.c', 'obj/console.o'),
+                    ('core/utils.c', 'obj/utils.o'),
+                    ('core/pop_module.c', 'obj/pop_module.o'),
+                    ('pops/shimjapii_pop.c', 'obj/shimjapii_pop.o'),
+                    ('pops/spinner_pop.c', 'obj/spinner_pop.o'),
+                    ('pops/uptime_pop.c', 'obj/uptime_pop.o'),
+                    ('pops/halt_pop.c', 'obj/halt_pop.o'),
+                    ('pops/filesystem_pop.c', 'obj/filesystem_pop.o'),
+                    ('core/multiboot2.c', 'obj/multiboot2.o'),
+                    ('pops/sysinfo_pop.c', 'obj/sysinfo_pop.o'),
+                    ('pops/memory_pop.c', 'obj/memory_pop.o'),
+                    ('pops/cpu_pop.c', 'obj/cpu_pop.o'),
+                    ('pops/dolphin_pop.c', 'obj/dolphin_pop.o'),
+                    ('core/timer.c', 'obj/timer.o'),
+                    ('core/scheduler.c', 'obj/scheduler.o'),
+                    ('core/memory.c', 'obj/memory.o'),
+                    ('core/init.c', 'obj/init.o'),
+                    ('core/syscall.c', 'obj/syscall.o')
                 ]
                 
                 for src, obj in c_files:
@@ -663,27 +663,27 @@ class ModernPopcornBuilder:
             # Build kernel with all source files
             success = self.run_command(['bash', '-c', 
                 'mkdir -p obj && ' +
-                'nasm -f elf64 kernel.asm -o obj/kasm.o && ' +
-                'nasm -f elf64 idt.asm -o obj/idt.o && ' +
-                'gcc -m64 -c kernel.c -o obj/kc.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
-                'gcc -m64 -c console.c -o obj/console.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
-                'gcc -m64 -c utils.c -o obj/utils.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
-                'gcc -m64 -c pop_module.c -o obj/pop_module.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
-                'gcc -m64 -c shimjapii_pop.c -o obj/shimjapii_pop.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
-                'gcc -m64 -c spinner_pop.c -o obj/spinner_pop.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
-                'gcc -m64 -c uptime_pop.c -o obj/uptime_pop.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
-                'gcc -m64 -c halt_pop.c -o obj/halt_pop.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
-                'gcc -m64 -c filesystem_pop.c -o obj/filesystem_pop.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
-                'gcc -m64 -c multiboot2.c -o obj/multiboot2.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
-                'gcc -m64 -c sysinfo_pop.c -o obj/sysinfo_pop.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
-                'gcc -m64 -c memory_pop.c -o obj/memory_pop.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
-                'gcc -m64 -c cpu_pop.c -o obj/cpu_pop.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
-                'gcc -m64 -c dolphin_pop.c -o obj/dolphin_pop.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
-                'gcc -m64 -c timer.c -o obj/timer.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
-                'gcc -m64 -c scheduler.c -o obj/scheduler.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
-                'gcc -m64 -c memory.c -o obj/memory.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
-                'gcc -m64 -c init.c -o obj/init.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
-                'gcc -m64 -c syscall.c -o obj/syscall.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
+                'nasm -f elf64 core/kernel.asm -o obj/kasm.o && ' +
+                'nasm -f elf64 core/idt.asm -o obj/idt.o && ' +
+                'gcc -m64 -c core/kernel.c -o obj/kc.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
+                'gcc -m64 -c core/console.c -o obj/console.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
+                'gcc -m64 -c core/utils.c -o obj/utils.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
+                'gcc -m64 -c core/pop_module.c -o obj/pop_module.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
+                'gcc -m64 -c pops/shimjapii_pop.c -o obj/shimjapii_pop.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
+                'gcc -m64 -c pops/spinner_pop.c -o obj/spinner_pop.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
+                'gcc -m64 -c pops/uptime_pop.c -o obj/uptime_pop.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
+                'gcc -m64 -c pops/halt_pop.c -o obj/halt_pop.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
+                'gcc -m64 -c pops/filesystem_pop.c -o obj/filesystem_pop.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
+                'gcc -m64 -c core/multiboot2.c -o obj/multiboot2.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
+                'gcc -m64 -c pops/sysinfo_pop.c -o obj/sysinfo_pop.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
+                'gcc -m64 -c pops/memory_pop.c -o obj/memory_pop.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
+                'gcc -m64 -c pops/cpu_pop.c -o obj/cpu_pop.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
+                'gcc -m64 -c pops/dolphin_pop.c -o obj/dolphin_pop.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
+                'gcc -m64 -c core/timer.c -o obj/timer.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
+                'gcc -m64 -c core/scheduler.c -o obj/scheduler.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
+                'gcc -m64 -c core/memory.c -o obj/memory.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
+                'gcc -m64 -c core/init.c -o obj/init.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
+                'gcc -m64 -c core/syscall.c -o obj/syscall.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
                 'ld -m elf_x86_64 -T link.ld -o kernel obj/kasm.o obj/kc.o obj/console.o obj/utils.o obj/pop_module.o obj/shimjapii_pop.o obj/idt.o obj/spinner_pop.o obj/uptime_pop.o obj/halt_pop.o obj/filesystem_pop.o obj/multiboot2.o obj/sysinfo_pop.o obj/memory_pop.o obj/cpu_pop.o obj/dolphin_pop.o obj/timer.o obj/scheduler.o obj/memory.o obj/init.o obj/syscall.o'
             ])
             
@@ -788,9 +788,10 @@ class ModernPopcornBuilder:
             self.log("📋 Step 2/4: Building kernel...")
             success = self.run_command(['bash', '-c', 
                 'mkdir -p obj && ' +
-                'nasm -f elf64 kernel.asm -o obj/kasm.o && ' +
-                'nasm -f elf64 idt.asm -o obj/idt.o && ' +
-                'gcc -m64 -c *.c -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
+                'nasm -f elf64 core/kernel.asm -o obj/kasm.o && ' +
+                'nasm -f elf64 core/idt.asm -o obj/idt.o && ' +
+                'gcc -m64 -c core/*.c -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
+                'gcc -m64 -c pops/*.c -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
                 'mv *.o obj/ 2>/dev/null; ' +
                 'ld -m elf_x86_64 -T link.ld -o kernel obj/*.o'
             ])

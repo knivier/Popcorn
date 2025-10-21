@@ -1,7 +1,7 @@
-// src/scheduler.c
-#include "includes/scheduler.h"
-#include "includes/timer.h"
-#include "includes/console.h"
+// src/core/scheduler.c
+#include "../includes/scheduler.h"
+#include "../includes/timer.h"
+#include "../includes/console.h"
 #include <stddef.h>
 
 // Global scheduler state

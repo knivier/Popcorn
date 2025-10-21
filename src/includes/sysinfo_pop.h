@@ -20,7 +20,7 @@ typedef struct {
     bool has_apic;
 } CPUInfo;
 
-// External CPUID functions (from kernel.asm)
+// External CPUID functions (from core/kernel.asm)
 extern void cpuid_get_vendor(char* vendor_string);
 extern void cpuid_get_features(uint32_t* output);
 

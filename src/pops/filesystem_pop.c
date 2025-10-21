@@ -1,6 +1,6 @@
-#include "includes/pop_module.h"
-#include "includes/console.h"
-#include "includes/error_codes.h"
+#include "../includes/pop_module.h"
+#include "../includes/console.h"
+#include "../includes/error_codes.h"
 #include <stdbool.h>
 #include <stddef.h> // Include for NULL
 

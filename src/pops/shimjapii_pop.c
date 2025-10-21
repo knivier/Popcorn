@@ -1,6 +1,6 @@
-// src/shimjapii_pop.c
-#include "includes/pop_module.h"
-#include "includes/console.h"
+// src/pops/shimjapii_pop.c
+#include "../includes/pop_module.h"
+#include "../includes/console.h"
 
 extern ConsoleState console_state;
 

@@ -1,6 +1,6 @@
-// src/cpu_pop.c
-#include "includes/cpu_pop.h"
-#include "includes/console.h"
+// src/pops/cpu_pop.c
+#include "../includes/cpu_pop.h"
+#include "../includes/console.h"
 #include <stddef.h>
 #include <stdbool.h>
 

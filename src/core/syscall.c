@@ -1,9 +1,9 @@
-// src/syscall.c
-#include "includes/syscall.h"
-#include "includes/console.h"
-#include "includes/memory.h"
-#include "includes/scheduler.h"
-#include "includes/timer.h"
+// src/core/syscall.c
+#include "../includes/syscall.h"
+#include "../includes/console.h"
+#include "../includes/memory.h"
+#include "../includes/scheduler.h"
+#include "../includes/timer.h"
 #include <stddef.h>
 
 // Global system call table

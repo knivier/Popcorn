@@ -1,17 +1,17 @@
-// src/init.c
-#include "includes/init.h"
-#include "includes/console.h"
-#include "includes/timer.h"
-#include "includes/scheduler.h"
-#include "includes/memory.h"
-#include "includes/pop_module.h"
-#include "includes/multiboot2.h"
-#include "includes/sysinfo_pop.h"
-#include "includes/memory_pop.h"
-#include "includes/cpu_pop.h"
-#include "includes/dolphin_pop.h"
-#include "includes/spinner_pop.h"
-#include "includes/syscall.h"
+// src/core/init.c
+#include "../includes/init.h"
+#include "../includes/console.h"
+#include "../includes/timer.h"
+#include "../includes/scheduler.h"
+#include "../includes/memory.h"
+#include "../includes/pop_module.h"
+#include "../includes/multiboot2.h"
+#include "../includes/sysinfo_pop.h"
+#include "../includes/memory_pop.h"
+#include "../includes/cpu_pop.h"
+#include "../includes/dolphin_pop.h"
+#include "../includes/spinner_pop.h"
+#include "../includes/syscall.h"
 #include <stddef.h>
 
 // External functions

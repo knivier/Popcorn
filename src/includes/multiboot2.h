@@ -87,7 +87,7 @@ typedef struct {
     uint32_t available_memory_regions;
 } SystemInfo;
 
-// External reference to multiboot info pointer (set in kernel.asm)
+// External reference to multiboot info pointer (set in core/kernel.asm)
 extern uint64_t multiboot2_info_ptr;
 
 // Function declarations

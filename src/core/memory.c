@@ -1,7 +1,7 @@
-// src/memory.c
-#include "includes/memory.h"
-#include "includes/console.h"
-#include "includes/multiboot2.h"
+// src/core/memory.c
+#include "../includes/memory.h"
+#include "../includes/console.h"
+#include "../includes/multiboot2.h"
 #include <stddef.h>
 #include <stdint.h>
 

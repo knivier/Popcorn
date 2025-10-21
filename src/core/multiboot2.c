@@ -1,6 +1,6 @@
-// src/multiboot2.c
-#include "includes/multiboot2.h"
-#include "includes/console.h"
+// src/core/multiboot2.c
+#include "../includes/multiboot2.h"
+#include "../includes/console.h"
 #include <stddef.h>
 
 // Static storage for parsed system info

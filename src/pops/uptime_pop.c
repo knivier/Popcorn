@@ -1,6 +1,6 @@
-#include "includes/pop_module.h"
-#include "includes/console.h"
-#include "includes/timer.h"
+#include "../includes/pop_module.h"
+#include "../includes/console.h"
+#include "../includes/timer.h"
 
 // External timer functions
 extern uint64_t timer_get_ticks(void);

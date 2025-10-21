@@ -74,7 +74,9 @@ log() {
     esac
 }
 
-# filepath: src/build.sh
+# Ensure xorriso is located via PATH (avoid hardcoded /usr/bin path)
+# If not found, fall back to /usr/bin/xorriso for systems that have it there.
+XORRISO_CMD="$(command -v xorriso 2>/dev/null || echo "/usr/bin/xorriso")"
 # ...existing code...
 check_status() {
     local status=$?
@@ -140,29 +142,29 @@ build_kernel() {
     mkdir -p "$OBJ_DIR"
 
     # Compile assembly files
-    compile_file "kernel.asm" "$OBJ_DIR/kasm.o" "asm"
-    compile_file "idt.asm" "$OBJ_DIR/idt.o" "asm"
+    compile_file "core/kernel.asm" "$OBJ_DIR/kasm.o" "asm"
+    compile_file "core/idt.asm" "$OBJ_DIR/idt.o" "asm"
     
     # Compile C files
-    compile_file "kernel.c" "$OBJ_DIR/kc.o" "c"
-    compile_file "console.c" "$OBJ_DIR/console.o" "c"
-    compile_file "utils.c" "$OBJ_DIR/utils.o" "c"
-    compile_file "pop_module.c" "$OBJ_DIR/pop_module.o" "c"
-    compile_file "shimjapii_pop.c" "$OBJ_DIR/shimjapii_pop.o" "c"
-    compile_file "spinner_pop.c" "$OBJ_DIR/spinner_pop.o" "c" 
-    compile_file "uptime_pop.c" "$OBJ_DIR/uptime_pop.o" "c"
-    compile_file "halt_pop.c" "$OBJ_DIR/halt_pop.o" "c"
-    compile_file "filesystem_pop.c" "$OBJ_DIR/filesystem_pop.o" "c"
-    compile_file "multiboot2.c" "$OBJ_DIR/multiboot2.o" "c"
-    compile_file "sysinfo_pop.c" "$OBJ_DIR/sysinfo_pop.o" "c"
-    compile_file "memory_pop.c" "$OBJ_DIR/memory_pop.o" "c"
-    compile_file "cpu_pop.c" "$OBJ_DIR/cpu_pop.o" "c"
-    compile_file "dolphin_pop.c" "$OBJ_DIR/dolphin_pop.o" "c"
-    compile_file "timer.c" "$OBJ_DIR/timer.o" "c"
-    compile_file "scheduler.c" "$OBJ_DIR/scheduler.o" "c"
-    compile_file "memory.c" "$OBJ_DIR/memory.o" "c"
-    compile_file "init.c" "$OBJ_DIR/init.o" "c"
-    compile_file "syscall.c" "$OBJ_DIR/syscall.o" "c"
+    compile_file "core/kernel.c" "$OBJ_DIR/kc.o" "c"
+    compile_file "core/console.c" "$OBJ_DIR/console.o" "c"
+    compile_file "core/utils.c" "$OBJ_DIR/utils.o" "c"
+    compile_file "core/pop_module.c" "$OBJ_DIR/pop_module.o" "c"
+    compile_file "pops/shimjapii_pop.c" "$OBJ_DIR/shimjapii_pop.o" "c"
+    compile_file "pops/spinner_pop.c" "$OBJ_DIR/spinner_pop.o" "c" 
+    compile_file "pops/uptime_pop.c" "$OBJ_DIR/uptime_pop.o" "c"
+    compile_file "pops/halt_pop.c" "$OBJ_DIR/halt_pop.o" "c"
+    compile_file "pops/filesystem_pop.c" "$OBJ_DIR/filesystem_pop.o" "c"
+    compile_file "core/multiboot2.c" "$OBJ_DIR/multiboot2.o" "c"
+    compile_file "pops/sysinfo_pop.c" "$OBJ_DIR/sysinfo_pop.o" "c"
+    compile_file "pops/memory_pop.c" "$OBJ_DIR/memory_pop.o" "c"
+    compile_file "pops/cpu_pop.c" "$OBJ_DIR/cpu_pop.o" "c"
+    compile_file "pops/dolphin_pop.c" "$OBJ_DIR/dolphin_pop.o" "c"
+    compile_file "core/timer.c" "$OBJ_DIR/timer.o" "c"
+    compile_file "core/scheduler.c" "$OBJ_DIR/scheduler.o" "c"
+    compile_file "core/memory.c" "$OBJ_DIR/memory.o" "c"
+    compile_file "core/init.c" "$OBJ_DIR/init.o" "c"
+    compile_file "core/syscall.c" "$OBJ_DIR/syscall.o" "c"
     
     # Link files
     log "INFO" "Linking object files..."
@@ -249,9 +251,9 @@ menuentry "Popcorn Kernel x64" {
 }
 EOF
     
-    # Create the ISO
-    log "INFO" "Building ISO with $GRUB_MKRESCUE..."
-    $GRUB_MKRESCUE -o popcorn.iso isodir >> "$BUILD_LOG" 2>&1
+    # Create the ISO using xorriso (resolved from PATH when possible)
+    log "INFO" "Building ISO with xorriso..."
+    "$XORRISO_CMD" -as mkisofs -R -J -c boot/boot.catalog -b boot/grub/i386-pc/eltorito.img -no-emul-boot -boot-load-size 4 -boot-info-table -o popcorn.iso isodir >> "$BUILD_LOG" 2>&1
     
     if [ $? -ne 0 ]; then
         log "ERROR" "Failed to create ISO"

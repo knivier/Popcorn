@@ -1,6 +1,6 @@
-// src/dolphin_pop.c - Dolphin Text Editor
-#include "includes/dolphin_pop.h"
-#include "includes/console.h"
+// src/pops/dolphin_pop.c - Dolphin Text Editor
+#include "../includes/dolphin_pop.h"
+#include "../includes/console.h"
 #include <stddef.h>
 #include <stdbool.h>
 

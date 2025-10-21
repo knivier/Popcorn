@@ -1,6 +1,6 @@
-// src/halt_pop.c
-#include "includes/console.h"
-#include "includes/utils.h"
+// src/pops/halt_pop.c
+#include "../includes/console.h"
+#include "../includes/utils.h"
 
 // Access VGA memory for special effects
 #define VGA_MEMORY ((char*)0xb8000)

@@ -1,7 +1,7 @@
-// src/sysinfo_pop.c
-#include "includes/sysinfo_pop.h"
-#include "includes/console.h"
-#include "includes/multiboot2.h"
+// src/pops/sysinfo_pop.c
+#include "../includes/sysinfo_pop.h"
+#include "../includes/console.h"
+#include "../includes/multiboot2.h"
 #include <stdbool.h>
 #include <stddef.h>
 
