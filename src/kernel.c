@@ -11,6 +11,7 @@
 #include "includes/scheduler.h"
 #include "includes/memory.h"
 #include "includes/init.h"
+#include "includes/syscall.h"
 #include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -126,6 +127,17 @@ void idt_init(void)
     IDT[0x20].offset_mid = (timer_address >> 16) & 0xFFFF;
     IDT[0x20].offset_high = (timer_address >> 32) & 0xFFFFFFFF;
     IDT[0x20].reserved = 0;
+
+    /* populate IDT entry of system call interrupt (0x80) */
+    extern void syscall_handler_asm(void);
+    unsigned long syscall_address = (unsigned long)(uintptr_t)syscall_handler_asm;
+    IDT[0x80].offset_low = syscall_address & 0xFFFF;
+    IDT[0x80].selector = KERNEL_CODE_SEGMENT_OFFSET;
+    IDT[0x80].ist = 0;                   /* no IST */
+    IDT[0x80].type_attr = 0xEE;          /* User-accessible interrupt gate */
+    IDT[0x80].offset_mid = (syscall_address >> 16) & 0xFFFF;
+    IDT[0x80].offset_high = (syscall_address >> 32) & 0xFFFFFFFF;
+    IDT[0x80].reserved = 0;
 
     /*     Ports
     *    PIC1    PIC2
@@ -268,7 +280,7 @@ static const char* available_commands[] = {
     "ls", "search", "cp", "listsys", "sysinfo",
     "mem", "mem -map", "mem -use", "mem -stats", "mem -info", "mem -debug",
     "cpu", "cpu -hz", "cpu -info",
-    "tasks", "timer",
+    "tasks", "timer", "syscalls",
     "dol", "dol -new", "dol -open", "dol -save", "dol -close", "dol -help",
     NULL
 };
@@ -421,6 +433,8 @@ void execute_command(const char *command) {
         
         console_print_color("  timer", CONSOLE_PROMPT_COLOR);
         console_println(" - Show timer information");
+        console_print_color("  syscalls", CONSOLE_PROMPT_COLOR);
+        console_println(" - Show system call table");
         
         console_print_color("  cpu [option]", CONSOLE_PROMPT_COLOR);
         console_println(" - CPU commands: -hz, -info");
@@ -855,6 +869,9 @@ void execute_command(const char *command) {
         console_println_color(buffer, CONSOLE_FG_COLOR);
         
         console_draw_separator(console_state.cursor_y, CONSOLE_FG_COLOR);
+    } else if (strcmp(command, "syscalls") == 0) {
+        extern void syscall_print_table(void);
+        syscall_print_table();
     } else if (strncmp(command, "cpu ", 4) == 0) {
         // CPU commands: cpu -hz, cpu -info
         if (strcmp(command + 4, "-hz") == 0) {

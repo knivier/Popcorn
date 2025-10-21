@@ -35,6 +35,7 @@ void init_draw_progress_bar(int current, int total, const char* item);
 void init_show_memory_info(void);
 void init_show_timer_info(void);
 void init_show_scheduler_info(void);
+void init_show_syscall_info(void);
 void init_show_modules(void);
 void init_wait_for_enter(void);
 void init_clear_boot_screen(void);

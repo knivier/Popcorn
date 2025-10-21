@@ -610,7 +610,8 @@ class ModernPopcornBuilder:
                     ('timer.c', 'obj/timer.o'),
                     ('scheduler.c', 'obj/scheduler.o'),
                     ('memory.c', 'obj/memory.o'),
-                    ('init.c', 'obj/init.o')
+                    ('init.c', 'obj/init.o'),
+                    ('syscall.c', 'obj/syscall.o')
                 ]
                 
                 for src, obj in c_files:
@@ -628,7 +629,7 @@ class ModernPopcornBuilder:
                            'obj/spinner_pop.o', 'obj/uptime_pop.o', 'obj/halt_pop.o',
                            'obj/filesystem_pop.o', 'obj/multiboot2.o', 'obj/sysinfo_pop.o',
                            'obj/memory_pop.o', 'obj/cpu_pop.o', 'obj/dolphin_pop.o',
-                           'obj/timer.o', 'obj/scheduler.o', 'obj/memory.o', 'obj/init.o']
+                           'obj/timer.o', 'obj/scheduler.o', 'obj/memory.o', 'obj/init.o', 'obj/syscall.o']
                 
                 success = self.run_command(['ld', '-m', 'elf_x86_64', '-T', 'link.ld',
                                           '-o', 'kernel'] + obj_files,
@@ -682,7 +683,8 @@ class ModernPopcornBuilder:
                 'gcc -m64 -c scheduler.c -o obj/scheduler.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
                 'gcc -m64 -c memory.c -o obj/memory.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
                 'gcc -m64 -c init.c -o obj/init.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
-                'ld -m elf_x86_64 -T link.ld -o kernel obj/kasm.o obj/kc.o obj/console.o obj/utils.o obj/pop_module.o obj/shimjapii_pop.o obj/idt.o obj/spinner_pop.o obj/uptime_pop.o obj/halt_pop.o obj/filesystem_pop.o obj/multiboot2.o obj/sysinfo_pop.o obj/memory_pop.o obj/cpu_pop.o obj/dolphin_pop.o obj/timer.o obj/scheduler.o obj/memory.o obj/init.o'
+                'gcc -m64 -c syscall.c -o obj/syscall.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
+                'ld -m elf_x86_64 -T link.ld -o kernel obj/kasm.o obj/kc.o obj/console.o obj/utils.o obj/pop_module.o obj/shimjapii_pop.o obj/idt.o obj/spinner_pop.o obj/uptime_pop.o obj/halt_pop.o obj/filesystem_pop.o obj/multiboot2.o obj/sysinfo_pop.o obj/memory_pop.o obj/cpu_pop.o obj/dolphin_pop.o obj/timer.o obj/scheduler.o obj/memory.o obj/init.o obj/syscall.o'
             ])
             
             if success:

@@ -98,6 +98,7 @@ start64:
 
 global keyboard_handler
 global timer_handler
+global syscall_handler_asm
 global read_port
 global write_port
 global load_idt
@@ -108,6 +109,7 @@ global rdtsc
 
 extern keyboard_handler_main
 extern timer_interrupt_handler
+extern syscall_dispatch
 
 read_port:
   ; Parameter in rdi (first arg in x64 calling convention)
@@ -185,6 +187,53 @@ timer_handler:
   
   call timer_interrupt_handler
   
+  pop r15
+  pop r14
+  pop r13
+  pop r12
+  pop r11
+  pop r10
+  pop r9
+  pop r8
+  pop rbp
+  pop rdi
+  pop rsi
+  pop rdx
+  pop rcx
+  pop rbx
+  pop rax
+  
+  iretq
+
+; System call handler (interrupt 0x80)
+syscall_handler_asm:
+  ; Save all registers
+  push rax
+  push rbx
+  push rcx
+  push rdx
+  push rsi
+  push rdi
+  push rbp
+  push r8
+  push r9
+  push r10
+  push r11
+  push r12
+  push r13
+  push r14
+  push r15
+  
+  ; Create syscall context on stack
+  ; The registers are already pushed, we need to create a context structure
+  ; For simplicity, we'll pass the current stack pointer as context
+  mov rdi, rsp
+  add rdi, 120  ; Skip the pushed registers to get to the original context
+  
+  ; Call C dispatcher
+  call syscall_dispatch
+  
+  ; Restore all registers
   pop r15
   pop r14
   pop r13

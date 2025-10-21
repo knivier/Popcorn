@@ -11,6 +11,7 @@
 #include "includes/cpu_pop.h"
 #include "includes/dolphin_pop.h"
 #include "includes/spinner_pop.h"
+#include "includes/syscall.h"
 #include <stddef.h>
 
 // External functions
@@ -25,6 +26,7 @@ extern void timer_enable(void);
 extern void scheduler_init(void);
 extern void scheduler_tick(void);
 extern void memory_init(void);
+extern void syscall_init(void);
 extern void console_draw_header(const char* title);
 extern void console_draw_prompt_with_path(const char* path);
 extern void console_print_status_bar(void);
@@ -35,7 +37,7 @@ extern uint64_t multiboot2_info_ptr;
 extern ConsoleState console_state;
 
 // Boot screen state
-static const int total_init_steps = 8;
+static const int total_init_steps = 9;
 
 // Boot screen initialization
 void init_boot_screen(void) {
@@ -51,6 +53,8 @@ void init_boot_screen(void) {
     init_show_timer_info();
     
     init_show_scheduler_info();
+    
+    init_show_syscall_info();
     
     init_show_modules();
     
@@ -244,9 +248,35 @@ void init_show_scheduler_info(void) {
     }
 }
 
+// Show system call interface initialization
+void init_show_syscall_info(void) {
+    init_draw_progress_bar(4, total_init_steps, "Initializing System Call Interface");
+    
+    // Initialize system call interface
+    syscall_init();
+    
+    console_set_cursor(0, 18);
+    console_print_color("  ✓ System Call Interface", BOOT_SUCCESS_COLOR);
+    console_println_color("", CONSOLE_FG_COLOR);
+    
+    console_set_cursor(0, 19);
+    console_print_color("    Interrupt: ", BOOT_INFO_COLOR);
+    console_println_color("0x80 (User Accessible)", BOOT_SUCCESS_COLOR);
+    
+    console_set_cursor(0, 20);
+    console_print_color("    Calls: ", BOOT_INFO_COLOR);
+    console_println_color("21 System Calls Registered", BOOT_SUCCESS_COLOR);
+    
+    // Clear any remaining text on the line
+    console_set_cursor(0, 21);
+    for (int i = 0; i < BOOT_SCREEN_WIDTH; i++) {
+        console_print_color(" ", CONSOLE_FG_COLOR);
+    }
+}
+
 // Show module loading
 void init_show_modules(void) {
-    init_draw_progress_bar(4, total_init_steps, "Loading Kernel Modules");
+    init_draw_progress_bar(5, total_init_steps, "Loading Kernel Modules");
     
     // Register all pop modules
     extern const PopModule spinner_module;
