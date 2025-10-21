@@ -34,6 +34,11 @@ void timer_interrupt_handler(void) {
     // Increment tick counter
     global_timer.ticks++;
     
+    // Debug: Show timer ticks occasionally
+    if (global_timer.ticks % 100 == 0) {
+        write_port(0x3F8, 'T');  // Debug: Timer tick
+    }
+    
     // Call registered tick handler if present
     if (global_timer.tick_handler) {
         global_timer.tick_handler();
@@ -49,6 +54,9 @@ void timer_enable(void) {
     char mask = read_port(0x21);
     write_port(0x21, mask & ~0x01);
     global_timer.is_active = true;
+    
+    // Debug: Show timer is enabled
+    write_port(0x3F8, 'E');  // Debug: Timer enabled
 }
 
 // Disable timer interrupts
@@ -72,6 +80,9 @@ uint64_t timer_get_uptime_ms(void) {
 // Set custom tick handler
 void timer_set_tick_handler(void (*handler)(void)) {
     global_timer.tick_handler = handler;
+    
+    // Debug: Show handler is set
+    write_port(0x3F8, 'H');  // Debug: Handler set
 }
 
 // Delay for specified milliseconds

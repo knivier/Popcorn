@@ -280,7 +280,8 @@ static const char* available_commands[] = {
     "ls", "search", "cp", "listsys", "sysinfo",
     "mem", "mem -map", "mem -use", "mem -stats", "mem -info", "mem -debug",
     "cpu", "cpu -hz", "cpu -info",
-    "tasks", "timer", "syscalls",
+    "tasks", "timer", "syscalls", "debugtask", "killtask",
+    "mon", "mon -debug", "mon -list", "mon -kill", "mon -ultramon",
     "dol", "dol -new", "dol -open", "dol -save", "dol -close", "dol -help",
     NULL
 };
@@ -435,6 +436,24 @@ void execute_command(const char *command) {
         console_println(" - Show timer information");
         console_print_color("  syscalls", CONSOLE_PROMPT_COLOR);
         console_println(" - Show system call table");
+
+        console_print_color("  debugtask", CONSOLE_PROMPT_COLOR);
+        console_println(" - Create a debug task for testing context switching");
+
+        console_print_color("  killtask", CONSOLE_PROMPT_COLOR);
+        console_println(" - Kill the test task to regain control");
+
+        console_println_color("Task Monitor Commands:", CONSOLE_INFO_COLOR);
+        console_print_color("  mon -debug", CONSOLE_PROMPT_COLOR);
+        console_println(" - Start a debug task");
+        console_print_color("  mon -debug [pid]", CONSOLE_PROMPT_COLOR);
+        console_println(" - Start debug task with custom PID");
+        console_print_color("  mon -list", CONSOLE_PROMPT_COLOR);
+        console_println(" - List all running tasks");
+        console_print_color("  mon -kill [pid]", CONSOLE_PROMPT_COLOR);
+        console_println(" - Kill specific task by PID");
+        console_print_color("  mon -ultramon", CONSOLE_PROMPT_COLOR);
+        console_println(" - Kill all tasks except idle");
         
         console_print_color("  cpu [option]", CONSOLE_PROMPT_COLOR);
         console_println(" - CPU commands: -hz, -info");
@@ -872,6 +891,53 @@ void execute_command(const char *command) {
     } else if (strcmp(command, "syscalls") == 0) {
         extern void syscall_print_table(void);
         syscall_print_table();
+    } else if (strcmp(command, "debugtask") == 0) {
+        // Check if test task already exists
+        extern TaskStruct* scheduler_get_current_task(void);
+        extern void scheduler_print_tasks(void);
+        
+        // Simple check - if we have more than 1 task (idle + test), don't create another
+        extern uint32_t scheduler_get_task_count(void);
+        uint32_t task_count = scheduler_get_task_count();
+        
+        if (task_count > 1) {
+            console_print_error("Test task already running. Use 'killtask' to stop it first.");
+            return;
+        }
+        
+        // Create a simple debug task for testing
+        extern void test_task_function(void);
+        extern TaskStruct* scheduler_create_task(void (*function)(void), void* data, TaskPriority priority);
+        TaskStruct* test_task = scheduler_create_task(test_task_function, NULL, PRIORITY_NORMAL);
+        if (test_task) {
+            console_print_success("Debug task created successfully");
+            char buffer[32];
+            int_to_str(test_task->pid, buffer);
+            console_print_color("Task PID: ", CONSOLE_INFO_COLOR);
+            console_println_color(buffer, CONSOLE_SUCCESS_COLOR);
+            
+            // Debug: Check if test task is in ready queue
+            extern SchedulerState scheduler;
+            if (scheduler.ready_queue[PRIORITY_NORMAL]) {
+                write_port(0x3F8, 'T');  // Debug: Test task in queue
+            } else {
+                write_port(0x3F8, 'Y');  // Debug: Test task NOT in queue!
+            }
+        } else {
+            console_print_error("Failed to create debug task");
+        }
+    } else if (strcmp(command, "killtask") == 0) {
+        // Kill the test task (PID 2) - find it first
+        extern void scheduler_destroy_task(uint32_t pid);
+        extern void scheduler_print_tasks(void);
+        
+        // Show current tasks first
+        console_println_color("Current tasks:", CONSOLE_INFO_COLOR);
+        scheduler_print_tasks();
+        
+        // Try to kill PID 2 (test task)
+        scheduler_destroy_task(2);
+        console_print_success("Test task killed");
     } else if (strncmp(command, "cpu ", 4) == 0) {
         // CPU commands: cpu -hz, cpu -info
         if (strcmp(command + 4, "-hz") == 0) {

@@ -144,6 +144,7 @@ build_kernel() {
     # Compile assembly files
     compile_file "core/kernel.asm" "$OBJ_DIR/kasm.o" "asm"
     compile_file "core/idt.asm" "$OBJ_DIR/idt.o" "asm"
+    compile_file "core/context_switch.asm" "$OBJ_DIR/context_switch.o" "asm"
     
     # Compile C files
     compile_file "core/kernel.c" "$OBJ_DIR/kc.o" "c"
@@ -190,6 +191,7 @@ build_kernel() {
         "$OBJ_DIR/pop_module.o" \
         "$OBJ_DIR/shimjapii_pop.o" \
         "$OBJ_DIR/idt.o" \
+        "$OBJ_DIR/context_switch.o" \
         "$OBJ_DIR/spinner_pop.o" \
         "$OBJ_DIR/uptime_pop.o" \
         "$OBJ_DIR/halt_pop.o" \
@@ -309,10 +311,12 @@ run_qemu() {
     log "INFO" "Press Ctrl+A then X to exit QEMU, or use the monitor console"
     
     qemu-system-x86_64 \
-        -cdrom popcorn.iso \
-        -cpu qemu64 \
-        -m "$QEMU_MEMORY" \
-        -smp "$QEMU_CORES"
+    -cdrom popcorn.iso \
+    -cpu qemu64 \
+    -m "$QEMU_MEMORY" \
+    -smp "$QEMU_CORES" \
+    -serial stdio
+
     
     log "SUCCESS" "QEMU session ended"
 }

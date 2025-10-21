@@ -43,7 +43,11 @@ static const int total_init_steps = 9;
 void init_boot_screen(void) {
     // Initialize console first
     console_init();
-    
+
+    // Debug: Write to serial port
+    extern void write_port(unsigned short port, unsigned char data);
+    write_port(0x3F8, 'C');
+
     // Draw the boot screen header
     init_draw_header();
     
@@ -240,7 +244,7 @@ void init_show_scheduler_info(void) {
     console_set_cursor(0, 20);
     console_print_color("    Scheduling: ", BOOT_INFO_COLOR);
     console_println_color("Round-Robin with Priority", BOOT_SUCCESS_COLOR);
-    
+
     // Clear any remaining text on the line
     console_set_cursor(0, 21);
     for (int i = 0; i < BOOT_SCREEN_WIDTH; i++) {
