@@ -1,8 +1,8 @@
-// src/halt_pop.c
-#include "includes/console.h"
-#include "includes/utils.h"
+// src/pops/halt_pop.c
+#include "../includes/console.h"
+#include "../includes/utils.h"
 
-// Access VGA memory for special effects (only used for halt screen animations)
+// Access VGA memory for special effects
 #define VGA_MEMORY ((char*)0xb8000)
 
 // Function to display the halt message with animation
@@ -37,7 +37,7 @@ void halt_pop_func(unsigned int start_pos) {
     console_set_cursor(start_x, start_y);
     console_print_color(msg, 0x2C); // Green background with red text
 
-    // Animation effect (simple blinking)
+    // Animation effect
     for (int blink = 0; blink < 5; ++blink) {
         for (unsigned int m = 0; m < 80 * 25 * 2; m += 2) {
             vidptr[m + 1] ^= 0x08; // Toggle blink bit

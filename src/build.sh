@@ -18,7 +18,7 @@ QEMU_CORES="1"
 
 # Check for required tools
 check_dependencies() {
-    local DEPS=("nasm" "gcc" "ld" "qemu-system-i386" "dialog")
+    local DEPS=("nasm" "gcc" "ld" "qemu-system-x86_64" "dialog")
     local MISSING=()
     
     for dep in "${DEPS[@]}"; do
@@ -74,7 +74,9 @@ log() {
     esac
 }
 
-# filepath: src/build.sh
+# Ensure xorriso is located via PATH (avoid hardcoded /usr/bin path)
+# If not found, fall back to /usr/bin/xorriso for systems that have it there.
+XORRISO_CMD="$(command -v xorriso 2>/dev/null || echo "/usr/bin/xorriso")"
 # ...existing code...
 check_status() {
     local status=$?
@@ -113,14 +115,25 @@ compile_file() {
     
     case $type in
         "asm")
-            nasm -f elf32 "$file" -o "$output"
+            nasm -f elf64 "$file" -o "$output"
             ;;
         "c")
-            gcc -m32 -c "$file" -o "$output" -Wall -Wextra -fno-stack-protector
+            gcc -m64 -c "$file" -o "$output" -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone
             ;;
     esac
     
     check_status "Compiling $file"
+}
+
+# Check for GRUB tools
+check_grub() {
+    if command -v grub2-mkrescue &> /dev/null; then
+        return 0
+    elif command -v grub-mkrescue &> /dev/null; then
+        return 0
+    else
+        return 1
+    fi
 }
 
 # Build function
@@ -129,25 +142,36 @@ build_kernel() {
     mkdir -p "$OBJ_DIR"
 
     # Compile assembly files
-    compile_file "kernel.asm" "$OBJ_DIR/kasm.o" "asm"
-    compile_file "idt.asm" "$OBJ_DIR/idt.o" "asm"
+    compile_file "core/kernel.asm" "$OBJ_DIR/kasm.o" "asm"
+    compile_file "core/idt.asm" "$OBJ_DIR/idt.o" "asm"
+    compile_file "core/context_switch.asm" "$OBJ_DIR/context_switch.o" "asm"
     
     # Compile C files
-    compile_file "kernel.c" "$OBJ_DIR/kc.o" "c"
-    compile_file "console.c" "$OBJ_DIR/console.o" "c"
-    compile_file "utils.c" "$OBJ_DIR/utils.o" "c"
-    compile_file "pop_module.c" "$OBJ_DIR/pop_module.o" "c"
-    compile_file "shimjapii_pop.c" "$OBJ_DIR/shimjapii_pop.o" "c"
-    compile_file "spinner_pop.c" "$OBJ_DIR/spinner_pop.o" "c" 
-    compile_file "uptime_pop.c" "$OBJ_DIR/uptime_pop.o" "c"
-    compile_file "halt_pop.c" "$OBJ_DIR/halt_pop.o" "c"
-    compile_file "filesystem_pop.c" "$OBJ_DIR/filesystem_pop.o" "c"
+    compile_file "core/kernel.c" "$OBJ_DIR/kc.o" "c"
+    compile_file "core/console.c" "$OBJ_DIR/console.o" "c"
+    compile_file "core/utils.c" "$OBJ_DIR/utils.o" "c"
+    compile_file "core/pop_module.c" "$OBJ_DIR/pop_module.o" "c"
+    compile_file "pops/shimjapii_pop.c" "$OBJ_DIR/shimjapii_pop.o" "c"
+    compile_file "pops/spinner_pop.c" "$OBJ_DIR/spinner_pop.o" "c" 
+    compile_file "pops/uptime_pop.c" "$OBJ_DIR/uptime_pop.o" "c"
+    compile_file "pops/halt_pop.c" "$OBJ_DIR/halt_pop.o" "c"
+    compile_file "pops/filesystem_pop.c" "$OBJ_DIR/filesystem_pop.o" "c"
+    compile_file "core/multiboot2.c" "$OBJ_DIR/multiboot2.o" "c"
+    compile_file "pops/sysinfo_pop.c" "$OBJ_DIR/sysinfo_pop.o" "c"
+    compile_file "pops/memory_pop.c" "$OBJ_DIR/memory_pop.o" "c"
+    compile_file "pops/cpu_pop.c" "$OBJ_DIR/cpu_pop.o" "c"
+    compile_file "pops/dolphin_pop.c" "$OBJ_DIR/dolphin_pop.o" "c"
+    compile_file "core/timer.c" "$OBJ_DIR/timer.o" "c"
+    compile_file "core/scheduler.c" "$OBJ_DIR/scheduler.o" "c"
+    compile_file "core/memory.c" "$OBJ_DIR/memory.o" "c"
+    compile_file "core/init.c" "$OBJ_DIR/init.o" "c"
+    compile_file "core/syscall.c" "$OBJ_DIR/syscall.o" "c"
     
     # Link files
     log "INFO" "Linking object files..."
     
     # Check if all object files exist
-    for obj in "$OBJ_DIR"/kasm.o "$OBJ_DIR"/kc.o "$OBJ_DIR"/console.o "$OBJ_DIR"/utils.o "$OBJ_DIR"/pop_module.o "$OBJ_DIR"/shimjapii_pop.o "$OBJ_DIR"/idt.o "$OBJ_DIR"/spinner_pop.o "$OBJ_DIR"/uptime_pop.o "$OBJ_DIR"/halt_pop.o "$OBJ_DIR"/filesystem_pop.o; do
+    for obj in "$OBJ_DIR"/kasm.o "$OBJ_DIR"/kc.o "$OBJ_DIR"/console.o "$OBJ_DIR"/utils.o "$OBJ_DIR"/pop_module.o "$OBJ_DIR"/shimjapii_pop.o "$OBJ_DIR"/idt.o "$OBJ_DIR"/spinner_pop.o "$OBJ_DIR"/uptime_pop.o "$OBJ_DIR"/halt_pop.o "$OBJ_DIR"/filesystem_pop.o "$OBJ_DIR"/multiboot2.o "$OBJ_DIR"/sysinfo_pop.o "$OBJ_DIR"/memory_pop.o "$OBJ_DIR"/cpu_pop.o "$OBJ_DIR"/dolphin_pop.o "$OBJ_DIR"/timer.o "$OBJ_DIR"/scheduler.o "$OBJ_DIR"/memory.o "$OBJ_DIR"/init.o "$OBJ_DIR"/syscall.o; do
         if [ ! -f "$obj" ]; then
             log "ERROR" "Missing object file: $obj"
             exit 1
@@ -159,7 +183,7 @@ build_kernel() {
         exit 1
     fi
 
-    ld -m elf_i386 -T link.ld -o kernel \
+    ld -m elf_x86_64 -T link.ld -o kernel \
         "$OBJ_DIR/kasm.o" \
         "$OBJ_DIR/kc.o" \
         "$OBJ_DIR/console.o" \
@@ -167,29 +191,134 @@ build_kernel() {
         "$OBJ_DIR/pop_module.o" \
         "$OBJ_DIR/shimjapii_pop.o" \
         "$OBJ_DIR/idt.o" \
+        "$OBJ_DIR/context_switch.o" \
         "$OBJ_DIR/spinner_pop.o" \
         "$OBJ_DIR/uptime_pop.o" \
         "$OBJ_DIR/halt_pop.o" \
-        "$OBJ_DIR/filesystem_pop.o"
+        "$OBJ_DIR/filesystem_pop.o" \
+        "$OBJ_DIR/multiboot2.o" \
+        "$OBJ_DIR/sysinfo_pop.o" \
+        "$OBJ_DIR/memory_pop.o" \
+        "$OBJ_DIR/cpu_pop.o" \
+        "$OBJ_DIR/dolphin_pop.o" \
+        "$OBJ_DIR/timer.o" \
+        "$OBJ_DIR/scheduler.o" \
+        "$OBJ_DIR/memory.o" \
+        "$OBJ_DIR/init.o" \
+        "$OBJ_DIR/syscall.o"
     
     check_status "Linking object files"
 }
 
-# Run QEMU
-run_qemu() {
+# Create bootable ISO
+create_iso() {
     if [ ! -f "kernel" ]; then
         log "ERROR" "Kernel file not found. Please build the kernel first."
         return 1
     fi
     
-    log "INFO" "Starting QEMU with ${QEMU_MEMORY}MB RAM and ${QEMU_CORES} cores..."
-    qemu-system-i386 \
-        -kernel kernel \
-        -m "$QEMU_MEMORY" \
-        -smp "$QEMU_CORES" \
-        -monitor stdio
+    log "INFO" "Creating bootable ISO..."
     
-    check_status "Running QEMU"
+    # Check for GRUB
+    GRUB_MKRESCUE=""
+    if command -v grub2-mkrescue &> /dev/null; then
+        GRUB_MKRESCUE="grub2-mkrescue"
+    elif command -v grub-mkrescue &> /dev/null; then
+        GRUB_MKRESCUE="grub-mkrescue"
+    else
+        log "ERROR" "grub-mkrescue or grub2-mkrescue not found."
+        log "INFO" "Install on Fedora/RHEL: sudo dnf install grub2-tools-extra grub2-pc-modules xorriso mtools"
+        log "INFO" "Install on Ubuntu/Debian: sudo apt-get install grub-pc-bin grub-common xorriso"
+        return 1
+    fi
+    
+    # Create ISO directory structure
+    rm -rf isodir
+    mkdir -p isodir/boot/grub
+    
+    # Copy kernel
+    cp kernel isodir/boot/kernel
+    check_status "Copying kernel"
+    
+    # Create GRUB configuration
+    cat > isodir/boot/grub/grub.cfg << 'EOF'
+set timeout=3
+set default=0
+
+menuentry "Popcorn Kernel x64" {
+    echo "Loading Popcorn kernel..."
+    multiboot2 /boot/kernel
+    echo "Booting kernel..."
+    boot
+}
+EOF
+    
+    # Create the ISO using GRUB mkrescue tools like buildmon.py, falling back to xorriso
+    if [ -n "$GRUB_MKRESCUE" ]; then
+        log "INFO" "Building ISO using $GRUB_MKRESCUE..."
+        echo "Running: $GRUB_MKRESCUE -o popcorn.iso isodir" >> "$BUILD_LOG"
+        $GRUB_MKRESCUE -o popcorn.iso isodir >> "$BUILD_LOG" 2>&1
+        MKRESCUE_STATUS=$?
+        if [ $MKRESCUE_STATUS -ne 0 ]; then
+            log "WARNING" "$GRUB_MKRESCUE failed (status $MKRESCUE_STATUS). Trying xorriso fallback..."
+            if command -v "$XORRISO_CMD" >/dev/null 2>&1 || [ -x "$XORRISO_CMD" ]; then
+                echo "Running: $XORRISO_CMD -as mkisofs -R -J -c boot/boot.catalog -b boot/grub/i386-pc/eltorito.img -no-emul-boot -boot-load-size 4 -boot-info-table -o popcorn.iso isodir" >> "$BUILD_LOG"
+                "$XORRISO_CMD" -as mkisofs -R -J -c boot/boot.catalog -b boot/grub/i386-pc/eltorito.img -no-emul-boot -boot-load-size 4 -boot-info-table -o popcorn.iso isodir >> "$BUILD_LOG" 2>&1
+            else
+                log "ERROR" "xorriso not found for fallback: $XORRISO_CMD"
+            fi
+        fi
+    else
+        log "INFO" "No grub mkrescue found; building ISO with xorriso..."
+        if command -v "$XORRISO_CMD" >/dev/null 2>&1 || [ -x "$XORRISO_CMD" ]; then
+            echo "Running: $XORRISO_CMD -as mkisofs -R -J -c boot/boot.catalog -b boot/grub/i386-pc/eltorito.img -no-emul-boot -boot-load-size 4 -boot-info-table -o popcorn.iso isodir" >> "$BUILD_LOG"
+            "$XORRISO_CMD" -as mkisofs -R -J -c boot/boot.catalog -b boot/grub/i386-pc/eltorito.img -no-emul-boot -boot-load-size 4 -boot-info-table -o popcorn.iso isodir >> "$BUILD_LOG" 2>&1
+        else
+            log "ERROR" "Neither grub-mkrescue nor xorriso found. Cannot create ISO."
+            rm -rf isodir
+            return 1
+        fi
+    fi
+
+    if [ $? -ne 0 ]; then
+        log "ERROR" "Failed to create ISO"
+        rm -rf isodir
+        return 1
+    fi
+    
+    # Clean up
+    rm -rf isodir
+    
+    if [ -f "popcorn.iso" ]; then
+        log "SUCCESS" "ISO created successfully: popcorn.iso"
+    else
+        log "ERROR" "ISO file not found after creation"
+        return 1
+    fi
+}
+
+# Run QEMU with ISO
+run_qemu() {
+    if [ ! -f "popcorn.iso" ]; then
+        log "WARNING" "ISO not found. Creating ISO first..."
+        create_iso
+        if [ $? -ne 0 ]; then
+            return 1
+        fi
+    fi
+    
+    log "INFO" "Starting QEMU (64-bit) with ${QEMU_MEMORY}MB RAM and ${QEMU_CORES} cores..."
+    log "INFO" "Press Ctrl+A then X to exit QEMU, or use the monitor console"
+    
+    qemu-system-x86_64 \
+    -cdrom popcorn.iso \
+    -cpu qemu64 \
+    -m "$QEMU_MEMORY" \
+    -smp "$QEMU_CORES" \
+    -serial stdio
+
+    
+    log "SUCCESS" "QEMU session ended"
 }
 
 # Show build logs
@@ -239,39 +368,66 @@ settings_menu() {
 # Main menu
 main_menu() {
     while true; do
-        local choice=$(dialog --title "Popcorn Build System - Ultra" \
-            --menu "Choose an operation:" 15 60 6 \
+        local choice=$(dialog --title "Popcorn Build System - x64 Edition" \
+            --menu "Choose an operation:" 17 65 8 \
             1 "Build Kernel" \
-            2 "Clean Build Files" \
-            3 "Run in QEMU" \
-            4 "Show Build Logs" \
-            5 "Settings" \
-            6 "Exit" \
+            2 "Build Kernel + Create ISO" \
+            3 "Create ISO (kernel must exist)" \
+            4 "Run in QEMU (auto-creates ISO)" \
+            5 "Clean Build Files" \
+            6 "Show Build Logs" \
+            7 "Settings" \
+            8 "Exit" \
             2>&1 >/dev/tty)
         
         case $choice in
             1)
-                dialog --infobox "Building kernel..." 3 20
+                dialog --infobox "Building kernel..." 3 25
                 clean_build
                 build_kernel
-                dialog --title "Success" --msgbox "Kernel built successfully!" 8 40
+                dialog --title "Success" --msgbox "Kernel built successfully!\n\nNext: Create ISO to boot" 9 45
                 ;;
             2)
-                dialog --infobox "Cleaning build files..." 3 25
+                dialog --infobox "Building kernel and ISO..." 3 30
                 clean_build
-                dialog --title "Success" --msgbox "Build files cleaned!" 8 40
+                build_kernel
+                if [ $? -eq 0 ]; then
+                    create_iso
+                    if [ $? -eq 0 ]; then
+                        dialog --title "Success" --msgbox "Kernel and ISO built successfully!\n\nReady to run in QEMU" 10 45
+                    else
+                        dialog --title "Error" --msgbox "Kernel built but ISO creation failed.\nCheck build logs for details." 10 45
+                    fi
+                else
+                    dialog --title "Error" --msgbox "Kernel build failed.\nCheck build logs for details." 10 45
+                fi
                 ;;
             3)
+                dialog --infobox "Creating bootable ISO..." 3 30
+                create_iso
+                if [ $? -eq 0 ]; then
+                    dialog --title "Success" --msgbox "ISO created: popcorn.iso\n\nReady to run in QEMU" 9 40
+                else
+                    dialog --title "Error" --msgbox "ISO creation failed.\nCheck build logs for details." 10 40
+                fi
+                ;;
+            4)
                 clear
                 run_qemu
                 ;;
-            4)
+            5)
+                dialog --infobox "Cleaning build files..." 3 30
+                clean_build
+                rm -f popcorn.iso
+                dialog --title "Success" --msgbox "Build files and ISO cleaned!" 8 40
+                ;;
+            6)
                 show_logs
                 ;;
-            5)
+            7)
                 settings_menu
                 ;;
-            6|"")
+            8|"")
                 clear
                 exit 0
                 ;;

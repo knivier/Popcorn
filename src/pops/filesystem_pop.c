@@ -1,6 +1,6 @@
-#include "includes/pop_module.h"
-#include "includes/console.h"
-#include "includes/error_codes.h"
+#include "../includes/pop_module.h"
+#include "../includes/console.h"
+#include "../includes/error_codes.h"
 #include <stdbool.h>
 #include <stddef.h> // Include for NULL
 
@@ -117,7 +117,9 @@ void init_filesystem() {
 }
 
 // Function to create a file
-bool create_file(const char* name) {
+// Made static so only internal filesystem functions can create files
+// External creation should go through Dolphin editor for .txt files
+static bool create_file(const char* name) {
     // Validate input
     if (name == NULL || name[0] == '\0') {
         last_filesystem_error = ERR_INVALID_INPUT;
@@ -189,6 +191,7 @@ bool write_file(const char* name, const char* content) {
         }
     }
     
+    // First, try to find and update existing file
     for (int i = 0; i < MAX_FILES; ++i) {
         if (file_system[i].in_use) {
             int j = 0;
@@ -209,8 +212,15 @@ bool write_file(const char* name, const char* content) {
             }
         }
     }
-    last_filesystem_error = ERR_NOT_FOUND;
-    return false; // File not found
+    
+    // File doesn't exist, create it then write to it
+    if (create_file(name)) {
+        // Recursively call write_file now that the file exists
+        return write_file(name, content);
+    }
+    
+    last_filesystem_error = ERR_NO_SPACE;
+    return false; // Could not create file
 }
 
 // Function to read a file
@@ -262,7 +272,7 @@ int strrncmp(const char* str1, const char* str2, size_t num) {
 // Forward declaration of external int_to_str from uptime_pop.c
 extern void int_to_str(int value, char* buffer);
 
-// Function to list all files in the current directory (console-friendly version)
+// Function to list all files in the current directory
 void list_files_console(void) {
     extern ConsoleState console_state;
     int file_count = 0;
@@ -292,7 +302,7 @@ void list_files_console(void) {
     }
 }
 
-// Function to list all files in the current directory (old VGA version)
+// Function to list all files in the current directory (VGA version)
 void list_files() {
     char* vidptr = (char*)0xb8000;
     unsigned int pos = 0;
@@ -660,7 +670,7 @@ void filesystem_pop_func(unsigned int start_pos) {
     unsigned int prev_y = console_state.cursor_y;
     unsigned char prev_color = console_state.current_color;
     
-    // Write message at bottom left of screen (row 24, col 0)
+    // Write message at bottom left of screen
     console_set_cursor(0, 24);
     console_print_color("File Systems Ready", CONSOLE_SUCCESS_COLOR);
     

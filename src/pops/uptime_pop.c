@@ -1,8 +1,10 @@
-#include "includes/pop_module.h"
-#include "includes/console.h"
+#include "../includes/pop_module.h"
+#include "../includes/console.h"
+#include "../includes/timer.h"
 
-// Global tick counter
-static unsigned long long tick_counter = 0;
+// External timer functions
+extern uint64_t timer_get_ticks(void);
+extern uint64_t timer_get_uptime_ms(void);
 
 void int_to_str(int value, char* buffer) {
     char temp[10];
@@ -27,9 +29,7 @@ extern ConsoleState console_state;
 
 void uptime_pop_func(unsigned int start_pos) {
     (void)start_pos;
-    // Increment the tick counter
-    tick_counter++;
-
+    
     char buffer[64];
     char tmp[10];
     int i = 0;
@@ -41,8 +41,11 @@ void uptime_pop_func(unsigned int start_pos) {
         ++i;
     }
 
+    // Get tick count from timer system
+    uint64_t tick_count = timer_get_ticks();
+    
     // Convert tick_counter to string and append
-    int_to_str(tick_counter, tmp);
+    int_to_str((int)tick_count, tmp);
     int j = 0;
     while (tmp[j] != '\0') {
         buffer[i++] = tmp[j++];
@@ -69,5 +72,5 @@ const PopModule uptime_module = {
 };
 
 unsigned int get_tick_count(void) {
-    return tick_counter;
+    return (unsigned int)timer_get_ticks();
 }

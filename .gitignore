@@ -8,3 +8,6 @@ FileContentIndex/
 v17/
 CoPilotIndices/
 VSWorkspaceState.json
+src/build_errors.log
+src/popcorn.iso
+build_log.txt

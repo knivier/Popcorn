@@ -1,8 +1,8 @@
-// src/spinner_pop.c
-#include "includes/pop_module.h"
-#include "includes/spinner_pop.h"
-#include "includes/console.h"
-#include "includes/utils.h"
+// src/pops/spinner_pop.c
+#include "../includes/pop_module.h"
+#include "../includes/spinner_pop.h"
+#include "../includes/console.h"
+#include "../includes/utils.h"
 
 #define SCREEN_WIDTH 80
 #define SCREEN_HEIGHT 25

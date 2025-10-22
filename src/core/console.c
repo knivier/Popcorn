@@ -1,6 +1,6 @@
-#include "includes/console.h"
+#include "../includes/console.h"
 
-// External console state (defined in kernel.c)
+// External console state (defined in core/kernel.c)
 extern ConsoleState console_state;
 static char* vga_memory = (char*)VGA_MEMORY_ADDRESS;
 
@@ -8,10 +8,30 @@ static char* vga_memory = (char*)VGA_MEMORY_ADDRESS;
 static char back_buffer[VGA_MEMORY_SIZE];
 static bool buffer_dirty = false;
 
-// External variables from kernel.c
+// Scrollback buffer
+static ScrollbackBuffer scrollback = {{0}, 0, 0};
+
+// External variables from core/kernel.c
 extern unsigned int current_loc;
 extern char input_buffer[128];
 extern unsigned int input_index;
+
+// External port I/O functions
+extern void write_port(unsigned short port, unsigned char data);
+extern char read_port(unsigned short port);
+
+// Update hardware VGA cursor position
+static void update_hardware_cursor(unsigned int x, unsigned int y) {
+    unsigned short position = (y * VGA_WIDTH) + x;
+    
+    // Cursor location low byte
+    write_port(0x3D4, 0x0F);
+    write_port(0x3D5, (unsigned char)(position & 0xFF));
+    
+    // Cursor location high byte
+    write_port(0x3D4, 0x0E);
+    write_port(0x3D5, (unsigned char)((position >> 8) & 0xFF));
+}
 
 // Initialize the console system
 void console_init(void) {
@@ -20,12 +40,20 @@ void console_init(void) {
     console_state.current_color = CONSOLE_FG_COLOR;
     console_state.cursor_visible = true;
     console_state.double_buffer_enabled = false;
+    console_state.scroll_offset = 0;
     
     // Initialize back buffer
     for (unsigned int i = 0; i < VGA_MEMORY_SIZE; i += 2) {
         back_buffer[i] = ' ';
         back_buffer[i + 1] = CONSOLE_BG_COLOR | CONSOLE_FG_COLOR;
     }
+    
+    // Initialize scrollback buffer
+    for (unsigned int i = 0; i < SCROLLBACK_LINES * SCROLLBACK_LINE_SIZE; i++) {
+        scrollback.buffer[i] = 0;
+    }
+    scrollback.current_line = 0;
+    scrollback.total_lines = 0;
     
     console_clear();
 }
@@ -39,6 +67,9 @@ void console_clear(void) {
     console_state.cursor_x = 0;
     console_state.cursor_y = 0;
     current_loc = 0;
+    
+    // Update hardware cursor
+    update_hardware_cursor(0, 0);
 }
 
 // Set the current text color
@@ -54,6 +85,9 @@ void console_set_cursor(unsigned int x, unsigned int y) {
     console_state.cursor_x = x;
     console_state.cursor_y = y;
     current_loc = (y * VGA_WIDTH + x) * 2;
+    
+    // Update hardware cursor
+    update_hardware_cursor(x, y);
 }
 
 // Put a single character at current cursor position
@@ -94,6 +128,9 @@ void console_putchar(char c) {
     }
     
     current_loc = (console_state.cursor_y * VGA_WIDTH + console_state.cursor_x) * 2;
+    
+    // Update hardware cursor
+    update_hardware_cursor(console_state.cursor_x, console_state.cursor_y);
 }
 
 // Print a string with current color
@@ -134,10 +171,16 @@ void console_newline(void) {
     }
     
     current_loc = console_state.cursor_y * VGA_WIDTH * 2;
+    
+    // Update hardware cursor
+    update_hardware_cursor(console_state.cursor_x, console_state.cursor_y);
 }
 
 // Scroll the screen up by one line
 void console_scroll(void) {
+    // Save top line to scrollback before scrolling
+    console_save_line(0);
+    
     // Move all lines up by one
     for (unsigned int y = 0; y < VGA_HEIGHT - 1; y++) {
         for (unsigned int x = 0; x < VGA_WIDTH; x++) {
@@ -155,6 +198,9 @@ void console_scroll(void) {
         vga_memory[pos] = ' ';
         vga_memory[pos + 1] = CONSOLE_BG_COLOR | CONSOLE_FG_COLOR;
     }
+    
+    // Reset scroll offset when new content appears
+    console_state.scroll_offset = 0;
 }
 
 // Handle backspace
@@ -174,6 +220,9 @@ void console_backspace(void) {
         vga_memory[pos + 1] = CONSOLE_BG_COLOR | CONSOLE_FG_COLOR;
         current_loc = pos;
     }
+    
+    // Update hardware cursor
+    update_hardware_cursor(console_state.cursor_x, console_state.cursor_y);
 }
 
 // Draw a box with borders
@@ -215,7 +264,7 @@ void console_draw_box(unsigned int x, unsigned int y, unsigned int width, unsign
     }
 }
 
-// Draw a header with title (using ASCII characters for compatibility)
+// Draw a header with title
 void console_draw_header(const char* title) {
     console_set_cursor(0, 1);
     console_print_color("+------------------------------------------------------------------------------+", CONSOLE_HEADER_COLOR);
@@ -325,7 +374,7 @@ void console_center_text(const char* text, unsigned int y, unsigned char color) 
     console_print_color(text, color);
 }
 
-// Draw a separator line (using ASCII characters)
+// Draw a separator line
 void console_draw_separator(unsigned int y, unsigned char color) {
     console_set_cursor(0, y);
     for (unsigned int i = 0; i < VGA_WIDTH; i++) {
@@ -366,5 +415,80 @@ void console_swap_buffers(void) {
 void console_flush(void) {
     if (console_state.double_buffer_enabled) {
         console_swap_buffers();
+    }
+}
+
+// Save current line to scrollback buffer
+void console_save_line(unsigned int y) {
+    if (y >= VGA_HEIGHT) return;
+    
+    unsigned int line_offset = (scrollback.current_line % SCROLLBACK_LINES) * SCROLLBACK_LINE_SIZE;
+    unsigned int vga_offset = y * VGA_WIDTH * 2;
+    
+    // Copy line from VGA memory to scrollback
+    for (unsigned int i = 0; i < SCROLLBACK_LINE_SIZE; i++) {
+        scrollback.buffer[line_offset + i] = vga_memory[vga_offset + i];
+    }
+    
+    scrollback.current_line++;
+    if (scrollback.total_lines < SCROLLBACK_LINES) {
+        scrollback.total_lines++;
+    }
+}
+
+// Scroll up in history (Page Up)
+void console_scroll_up(void) {
+    if (console_state.scroll_offset >= (int)scrollback.total_lines - 1) {
+        return;  // Already at top of history
+    }
+    
+    console_state.scroll_offset++;
+    console_restore_view();
+}
+
+// Scroll down in history (Page Down)
+void console_scroll_down(void) {
+    if (console_state.scroll_offset <= 0) {
+        return;  // Already at current view
+    }
+    
+    console_state.scroll_offset--;
+    console_restore_view();
+}
+
+// Restore view based on scroll offset
+void console_restore_view(void) {
+    if (console_state.scroll_offset == 0) {
+        return;
+    }
+    
+    // Don't scroll beyond available history
+    if (console_state.scroll_offset > (int)scrollback.total_lines) {
+        console_state.scroll_offset = (int)scrollback.total_lines;
+    }
+    
+    // Display history lines
+    for (unsigned int y = 0; y < VGA_HEIGHT; y++) {
+        // Calculate which history line to show at this screen position
+        int line_index = (int)scrollback.current_line - console_state.scroll_offset + (int)y - (int)VGA_HEIGHT;
+        
+        if (line_index >= 0 && line_index < (int)scrollback.current_line) {
+            // This line is in history, display it
+            unsigned int buf_index = line_index % SCROLLBACK_LINES;
+            unsigned int line_offset = buf_index * SCROLLBACK_LINE_SIZE;
+            unsigned int vga_offset = y * VGA_WIDTH * 2;
+            
+            // Copy from scrollback to VGA
+            for (unsigned int i = 0; i < SCROLLBACK_LINE_SIZE; i++) {
+                vga_memory[vga_offset + i] = scrollback.buffer[line_offset + i];
+            }
+        } else {
+            // Line not in history, clear it
+            unsigned int vga_offset = y * VGA_WIDTH * 2;
+            for (unsigned int i = 0; i < VGA_WIDTH; i++) {
+                vga_memory[vga_offset + i * 2] = ' ';
+                vga_memory[vga_offset + i * 2 + 1] = CONSOLE_BG_COLOR | CONSOLE_FG_COLOR;
+            }
+        }
     }
 }

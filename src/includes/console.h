@@ -55,6 +55,10 @@
 #define CONSOLE_WARNING_COLOR COLOR_YELLOW
 #define CONSOLE_HEADER_COLOR COLOR_LIGHT_MAGENTA
 
+// Scrollback buffer configuration
+#define SCROLLBACK_LINES 500
+#define SCROLLBACK_LINE_SIZE (VGA_WIDTH * 2)  // char + color per column
+
 // Console state structure
 typedef struct {
     unsigned int cursor_x;
@@ -62,7 +66,15 @@ typedef struct {
     unsigned char current_color;
     bool cursor_visible;
     bool double_buffer_enabled;
+    int scroll_offset;  // Lines scrolled back (0 = current view)
 } ConsoleState;
+
+// Scrollback buffer structure
+typedef struct {
+    char buffer[SCROLLBACK_LINES * SCROLLBACK_LINE_SIZE];
+    unsigned int current_line;
+    unsigned int total_lines;
+} ScrollbackBuffer;
 
 // Function declarations
 void console_init(void);
@@ -96,5 +108,11 @@ void console_draw_separator(unsigned int y, unsigned char color);
 void console_enable_double_buffer(bool enable);
 void console_swap_buffers(void);
 void console_flush(void);
+
+// Scrollback functions
+void console_scroll_up(void);
+void console_scroll_down(void);
+void console_save_line(unsigned int y);
+void console_restore_view(void);
 
 #endif // CONSOLE_H
