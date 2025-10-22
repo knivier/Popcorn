@@ -3,37 +3,17 @@
 #include "../includes/timer.h"
 #include "../includes/console.h"
 #include "../includes/memory.h"
-#include "../includes/init.h"
-#include "../includes/syscall.h"
 #include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
 
-#define LINES 25
-#define COLUMNS_IN_LINE 80
-#define BYTES_FOR_EACH_ELEMENT 2
-#define SCREENSIZE BYTES_FOR_EACH_ELEMENT * COLUMNS_IN_LINE * LINES
+// Global scheduler state
+SchedulerState scheduler = {0};
 
-#define KEYBOARD_DATA_PORT 0x60
-#define KEYBOARD_STATUS_PORT 0x64
-#define IDT_SIZE 256
-#define INTERRUPT_GATE 0x8e
-#define KERNEL_CODE_SEGMENT_OFFSET 0x08
-
-#define ENTER_KEY_CODE 0x1C
-#define BACKSPACE_KEY_CODE 0x0E
-#define UP_ARROW_CODE 0x48
-#define DOWN_ARROW_CODE 0x50
-#define LEFT_ARROW_CODE 0x4B
-#define RIGHT_ARROW_CODE 0x4D
-#define PAGE_UP_CODE 0x49
-#define PAGE_DOWN_CODE 0x51
-#define TAB_KEY_CODE 0x0F
-
-extern unsigned char keyboard_map[128];
-extern void keyboard_handler(void);
-extern void timer_handler(void);
-extern char read_port(unsigned short port);
+// External functions
+extern uint64_t timer_get_ticks(void);
+extern void* memset(void *s, int c, size_t n);
+extern unsigned char read_port(unsigned short port);
 extern void write_port(unsigned short port, unsigned char data);
 extern void int_to_str(int num, char *str);
 
@@ -56,11 +36,11 @@ static void serial_print(const char* str) {
     }
 }
 
-
 // Stack management functions
 void* task_allocate_stack(uint64_t size) {
     (void)size;  // Suppress unused parameter warning
     
+    // Use static stack allocation to avoid memory manager issues during early boot
     static char static_stacks[32][16384];  // 32 tasks, 16KB each
     static uint32_t stack_index = 0;
     
@@ -225,9 +205,7 @@ TaskStruct* scheduler_create_task(void (*function)(void), void* data, TaskPriori
 void scheduler_destroy_task(uint32_t pid) {
     // Find task in all queues
     TaskStruct* task = NULL;
-    TaskPriority priority;
-    
-    for (priority = PRIORITY_IDLE; priority <= PRIORITY_REALTIME; priority++) {
+    for (int priority = PRIORITY_REALTIME; priority >= PRIORITY_IDLE; priority--) {
         TaskStruct* current = scheduler.ready_queue[priority];
         while (current) {
             if (current->pid == pid) {
@@ -238,167 +216,42 @@ void scheduler_destroy_task(uint32_t pid) {
         }
         if (task) break;
     }
-    
+
     if (!task) {
         return;
     }
 
-    if (strcmp(command, "help") == 0 || strcmp(command, "halp") == 0) {
-        console_newline();
-        console_println_color("Available Commands:", CONSOLE_HEADER_COLOR);
-        console_draw_separator(console_state.cursor_y, CONSOLE_FG_COLOR);
-
-        console_print_color("  hang", CONSOLE_PROMPT_COLOR);
-        console_println(" - Hangs the system in a loop");
-
-        console_print_color("  clear", CONSOLE_PROMPT_COLOR);
-        console_println(" - Clears the screen");
-
-        console_print_color("  uptime", CONSOLE_PROMPT_COLOR);
-        console_println(" - Prints the system uptime");
-
-        console_print_color("  halt", CONSOLE_PROMPT_COLOR);
-        console_println(" - Halts the system");
-
-        console_print_color("  write <filename> <content>", CONSOLE_PROMPT_COLOR);
-        console_println(" - Writes content to a file");
-
-        console_print_color("  read <filename>", CONSOLE_PROMPT_COLOR);
-        console_println(" - Reads the content of a file");
-
-        console_print_color("  delete <filename>", CONSOLE_PROMPT_COLOR);
-        console_println(" - Deletes a file");
-
-        console_print_color("  rm <filename>", CONSOLE_PROMPT_COLOR);
-        console_println(" - Removes a file (alias for delete)");
-
-        console_print_color("  mkdir <dirname>", CONSOLE_PROMPT_COLOR);
-        console_println(" - Creates a new directory");
-
-        console_print_color("  go <dirname>", CONSOLE_PROMPT_COLOR);
-        console_println(" - Changes to the specified directory");
-
-        console_print_color("  back", CONSOLE_PROMPT_COLOR);
-        console_println(" - Goes back to the previous directory");
-
-        console_print_color("  ls", CONSOLE_PROMPT_COLOR);
-        console_println(" - Lists files and directories in current directory");
-
-        console_print_color("  search <filename>", CONSOLE_PROMPT_COLOR);
-        console_println(" - Searches for a file and shows its location");
-
-        console_print_color("  cp <filename> <directory>", CONSOLE_PROMPT_COLOR);
-        console_println(" - Copies a file to another directory");
-
-        console_print_color("  listsys", CONSOLE_PROMPT_COLOR);
-        console_println(" - Lists the entire file system hierarchy");
-
-        console_print_color("  sysinfo", CONSOLE_PROMPT_COLOR);
-        console_println(" - Displays detailed system information");
-
-        console_print_color("  mem [option]", CONSOLE_PROMPT_COLOR);
-        console_println(" - Memory commands: -map, -use, -stats, -info, -debug");
-
-        console_print_color("  tasks", CONSOLE_PROMPT_COLOR);
-        console_println(" - Show current task information");
-
-        console_print_color("  timer", CONSOLE_PROMPT_COLOR);
-        console_println(" - Show timer information");
-        console_print_color("  syscalls", CONSOLE_PROMPT_COLOR);
-        console_println(" - Show system call table");
-
-        console_print_color("  debugtask", CONSOLE_PROMPT_COLOR);
-        console_println(" - Create a debug task for testing context switching");
-
-        console_print_color("  killtask", CONSOLE_PROMPT_COLOR);
-        console_println(" - Kill the test task to regain control");
-
-        console_println_color("Task Monitor Commands:", CONSOLE_INFO_COLOR);
-        console_print_color("  mon -debug", CONSOLE_PROMPT_COLOR);
-        console_println(" - Start a debug task");
-        console_print_color("  mon -debug [pid]", CONSOLE_PROMPT_COLOR);
-        console_println(" - Start debug task with custom PID");
-        console_print_color("  mon -list", CONSOLE_PROMPT_COLOR);
-        console_println(" - List all running tasks");
-        console_print_color("  mon -kill [pid]", CONSOLE_PROMPT_COLOR);
-        console_println(" - Kill specific task by PID");
-        console_print_color("  mon -ultramon", CONSOLE_PROMPT_COLOR);
-        console_println(" - Kill all tasks except idle");
-
-        console_print_color("  cpu [option]", CONSOLE_PROMPT_COLOR);
-        console_println(" - CPU commands: -hz, -info");
-
-        console_print_color("  dol [option]", CONSOLE_PROMPT_COLOR);
-        console_println(" - Dolphin text editor: -new, -open, -save, -help");
-
-        console_print_color("  stop", CONSOLE_PROMPT_COLOR);
-        console_println(" - Shuts down the system");
-    } else if (strcmp(command, "hang") == 0) {
-        console_print_warning("System hanging...");
-        spinner_pop_func(current_loc);
-        uptime_module.pop_function(current_loc + 16);
-        while (1) {
-            console_print_color("Hanging...", CONSOLE_ERROR_COLOR);
-        }
-    } else if (strcmp(command, "clear") == 0) {
-        console_clear();
-        console_draw_header("Popcorn Kernel v0.5");
-        console_print_success("Screen cleared!");
-    } else if (strcmp(command, "uptime") == 0) {
-        console_newline();
-        char buffer[64];
-        int_to_str(get_tick_count(), buffer);
-        console_print_color("Uptime: ", CONSOLE_INFO_COLOR);
-        console_print_color(buffer, CONSOLE_FG_COLOR);
-        console_println(" ticks");
-
-        int ticks = get_tick_count();
-        int ticks_per_second = ticks / 150; 
-        int_to_str(ticks_per_second, buffer);
-        console_print_color("Estimated seconds: ", CONSOLE_INFO_COLOR);
-        console_println_color(buffer, CONSOLE_FG_COLOR);
-    } else if (strcmp(command, "halt") == 0) {
-        console_print_warning("System halted. Press Enter to continue...");
-        while (1) {
-            unsigned char status = read_port(KEYBOARD_STATUS_PORT);
-            if (status & 0x01) {
-                char keycode = read_port(KEYBOARD_DATA_PORT);
-                if (keycode == ENTER_KEY_CODE) {
-                    console_clear();
-                    console_draw_header("Popcorn Kernel v0.5");
-                    console_print_success("System resumed!");
-                    break;
-                }
+    // Remove from queue
+    if (task->prev) {
+        task->prev->next = task->next;
+    } else {
+        // Find which queue this task is in
+        for (int priority = PRIORITY_REALTIME; priority >= PRIORITY_IDLE; priority--) {
+            if (scheduler.ready_queue[priority] == task) {
+                scheduler.ready_queue[priority] = task->next;
+                break;
             }
-            halt_module.pop_function(current_loc);
         }
-    } else if (strcmp(command, "stop") == 0) {
-        console_print_warning("Shutting down...");
-        write_port(0x64, 0xFE);  
+    }
+    if (task->next) {
+        task->next->prev = task->prev;
+    }
 
-        asm volatile("hlt");
-    } else if (strncmp(command, "write ", 6) == 0) {
+    // Free stack
+    task_free_stack(task->stack_base);
 
-        if (command[6] == '\0' || command[6] == ' ') {
-            console_print_error("Usage: write <filename> <content>");
-            return;
-        }
+    // Mark as zombie
+    task->state = TASK_STATE_ZOMBIE;
+    scheduler.total_tasks--;
+}
 
-        char filename[21] = {0};
-        char content[101] = {0};
-        int i = 0;
-        int j = 0;
-        while (command[6 + i] != ' ' && i < 20 && command[6 + i] != '\0' && 6 + i < 128) {
-            filename[i] = command[6 + i];
-            i++;
-        }
-        filename[i] = '\0';
+// Main scheduling function
+void scheduler_schedule(void) {
+    if (!scheduler.scheduler_active || !scheduler.current_task) {
+        return;
+    }
 
-        if (i == 0) {
-            console_print_error("Filename cannot be empty");
-            return;
-        }
-
+    // Clean up zombie tasks first
     for (int priority = PRIORITY_REALTIME; priority >= PRIORITY_IDLE; priority--) {
         TaskStruct* task = scheduler.ready_queue[priority];
         while (task) {
@@ -428,6 +281,8 @@ void scheduler_destroy_task(uint32_t pid) {
 
     TaskStruct* next_task = NULL;
 
+    // Find next task with proper multi-level scheduling
+    // First, try to find a different task in the same priority
     if (scheduler.current_task && scheduler.current_task->priority >= PRIORITY_IDLE && 
         scheduler.current_task->priority <= PRIORITY_REALTIME) {
         
@@ -452,6 +307,7 @@ void scheduler_destroy_task(uint32_t pid) {
             }
         }
     } else {
+        // No current task, find highest priority task
         for (int priority = PRIORITY_REALTIME; priority >= PRIORITY_IDLE; priority--) {
             if (scheduler.ready_queue[priority]) {
                 next_task = scheduler.ready_queue[priority];
@@ -460,6 +316,7 @@ void scheduler_destroy_task(uint32_t pid) {
         }
     }
 
+    // If no ready task, use idle task (or current task if it's the idle task)
     if (!next_task) {
         // If current task is idle or no other tasks, just return
         if (scheduler.current_task && scheduler.current_task->pid == 0) {
@@ -468,6 +325,7 @@ void scheduler_destroy_task(uint32_t pid) {
         next_task = scheduler.current_task;  // Keep running current task
     }
     
+    // Fallback: if no current task, find the idle task
     if (!scheduler.current_task) {
         // Find idle task (PID 0)
         for (int priority = PRIORITY_REALTIME; priority >= PRIORITY_IDLE; priority--) {
@@ -483,9 +341,9 @@ void scheduler_destroy_task(uint32_t pid) {
         }
     }
 
+    // Switch to next task if different
     if (next_task != scheduler.current_task) {
         TaskStruct* old_task = scheduler.current_task;
-
 
         // Update task states
         if (old_task && old_task->state == TASK_STATE_RUNNING) {
@@ -495,8 +353,8 @@ void scheduler_destroy_task(uint32_t pid) {
         next_task->state = TASK_STATE_RUNNING;
         next_task->time_remaining = next_task->time_slice;
 
+        // Perform context switch only if we have a valid context
         if (next_task->stack_base && next_task->context.rip) {
-            
             // Additional safety checks
             if (next_task->context.rip < 0x1000) {
                 return;
@@ -514,27 +372,30 @@ void scheduler_destroy_task(uint32_t pid) {
     }
 }
 
+// Get current running task
 TaskStruct* scheduler_get_current_task(void) {
     return scheduler.current_task;
 }
 
+// Get total number of tasks
 uint32_t scheduler_get_task_count(void) {
     return scheduler.total_tasks;
 }
 
 // Print all tasks
 void scheduler_print_tasks(void) {
-    console_println_color("Task List:", CONSOLE_INFO_COLOR);
     console_println_color("PID | State    | Priority | Runtime", CONSOLE_FG_COLOR);
     console_println_color("----|----------|----------|--------", CONSOLE_FG_COLOR);
     
+    // Print idle task first
     if (scheduler.current_task && scheduler.current_task->pid == 0) {
         console_print_color("0   | Running  | Idle     | ", CONSOLE_FG_COLOR);
         char buffer[32];
-        int_to_str(scheduler.current_task->total_runtime, buffer);
+        int_to_str((int)scheduler.current_task->total_runtime, buffer);
         console_println_color(buffer, CONSOLE_FG_COLOR);
     }
     
+    // Print all other tasks
     for (int priority = PRIORITY_REALTIME; priority >= PRIORITY_IDLE; priority--) {
         TaskStruct* task = scheduler.ready_queue[priority];
         while (task) {
@@ -544,12 +405,19 @@ void scheduler_print_tasks(void) {
                 console_print_color(buffer, CONSOLE_FG_COLOR);
                 console_print_color("   | ", CONSOLE_FG_COLOR);
                 
+                // Print state
                 switch (task->state) {
                     case TASK_STATE_READY:
                         console_print_color("Ready    | ", CONSOLE_FG_COLOR);
                         break;
                     case TASK_STATE_RUNNING:
                         console_print_color("Running  | ", CONSOLE_FG_COLOR);
+                        break;
+                    case TASK_STATE_BLOCKED:
+                        console_print_color("Blocked  | ", CONSOLE_FG_COLOR);
+                        break;
+                    case TASK_STATE_SLEEPING:
+                        console_print_color("Sleeping | ", CONSOLE_FG_COLOR);
                         break;
                     case TASK_STATE_ZOMBIE:
                         console_print_color("Zombie   | ", CONSOLE_FG_COLOR);
@@ -560,7 +428,7 @@ void scheduler_print_tasks(void) {
                 }
                 
                 // Print priority
-                switch (priority) {
+                switch (task->priority) {
                     case PRIORITY_IDLE:
                         console_print_color("Idle     | ", CONSOLE_FG_COLOR);
                         break;
@@ -581,7 +449,7 @@ void scheduler_print_tasks(void) {
                         break;
                 }
                 
-                // Print 
+                // Print runtime
                 int_to_str(task->total_runtime, buffer);
                 console_println_color(buffer, CONSOLE_FG_COLOR);
             }
@@ -592,13 +460,12 @@ void scheduler_print_tasks(void) {
 
 // Set task priority
 void scheduler_set_priority(uint32_t pid, TaskPriority priority) {
-    // Find and  task priority
+    // Find and update task priority
     for (int p = PRIORITY_IDLE; p <= PRIORITY_REALTIME; p++) {
         TaskStruct* current = scheduler.ready_queue[p];
         while (current) {
             if (current->pid == pid) {
                 current->priority = priority;
-                // Note: In a real system, would need to move task between queues
                 return;
             }
             current = current->next;
@@ -608,27 +475,27 @@ void scheduler_set_priority(uint32_t pid, TaskPriority priority) {
 
 // Initialize a task structure
 void task_init(TaskStruct* task, void (*function)(void), void* data, TaskPriority priority) {
-    if (!task) return;
+    if (!task || !function) return;
     
-    task->pid = 0;
+    task->pid = 0;  // Will be set by caller
     task->ppid = 0;
     task->state = TASK_STATE_READY;
     task->priority = priority;
     task->nice = 0;
     
-    task->start_time = 0;
+    task->start_time = 0;  // Will be set by caller
     task->total_runtime = 0;
     task->last_run_time = 0;
     
-    task->stack_base = NULL;
+    task->stack_base = NULL;  // Will be set by caller
     task->stack_size = 0;
     task->stack_top = NULL;
     
-    // Initialize context to zero
-    memset(&task->context, 0, sizeof(CPUContext));
+    // Initialize context
+    memset(&task->context, 0, sizeof(task->context));
     
     task->vruntime = 0;
-    task->time_slice = 10;  // 10 ticks default
+    task->time_slice = 100;  // Default time slice
     task->time_remaining = task->time_slice;
     
     task->task_function = function;
@@ -638,23 +505,27 @@ void task_init(TaskStruct* task, void (*function)(void), void* data, TaskPriorit
     task->prev = NULL;
 }
 
+// Set up initial context for a new task
 void setup_task_context(TaskStruct* task) {
     if (!task || !task->stack_top) {
         serial_print("ERROR: Invalid task or stack_top in setup_task_context\n");
         return;
     }
 
+    // Ensure stack bounds are valid
     if ((uintptr_t)task->stack_top <= (uintptr_t)task->stack_base) {
         serial_print("ERROR: Stack top <= stack base\n");
         return;
     }
 
+    // Calculate safe stack pointer with bounds checking
     uintptr_t stack_size = (uintptr_t)task->stack_top - (uintptr_t)task->stack_base;
     if (stack_size < 256) {  // Minimum 256 bytes for safety
         serial_print("ERROR: Stack too small\n");
         return;
     }
 
+    // Pre-fill the stack with iretq frame
     // iretq expects: SS, RSP, RFLAGS, CS, RIP (in that order, bottom to top)
     uintptr_t stack_ptr = (uintptr_t)task->stack_top;
     
@@ -691,6 +562,7 @@ void setup_task_context(TaskStruct* task) {
         return;
     }
 
+    // Set up segment registers for long mode
     task->context.cs = 0x08;  
     task->context.ss = 0x10;  
     task->context.ds = 0x10;
@@ -698,8 +570,10 @@ void setup_task_context(TaskStruct* task) {
     task->context.fs = 0x10;
     task->context.gs = 0x10;
 
+    // Set up flags register (interrupts enabled, bit 1 must be 1)
     task->context.rflags = 0x202;  // IF=1, bit 1=1 (required)
 
+    // Set up function arguments
     task->context.rdi = (uint64_t)task->task_data;  // First argument
 
     // Clear other registers
@@ -718,28 +592,37 @@ void setup_task_context(TaskStruct* task) {
     task->context.r14 = 0;
     task->context.r15 = 0;
 
+    // Set up FPU state
     task->context.fpu_control = 0x37F;  // Default FPU control word
     memset(task->context.fpu_state, 0, sizeof(task->context.fpu_state));
 
     serial_print("DEBUG: Context setup complete for task\n");
 }
 
+// Context switch - now with real CPU register saving/restoring
 void task_switch(TaskStruct* from, TaskStruct* to) {
     if (!to) return;
 
+    // Disable interrupts during context switch
     __asm__ volatile("cli");
 
+    // If we have a current task, save its context
     if (from && from != to) {
         context_save(&from->context);
     }
 
+    // Switch to the new task
     scheduler.current_task = to;
 
+    // Restore the new task's context
     context_restore(&to->context);
 
+    // This should never return, as context_restore executes iretq
+    // If we get here, something went wrong
     __asm__ volatile("sti");
 }
 
+// Task exit
 void task_exit(void) {
     TaskStruct* current = scheduler_get_current_task();
     if (current) {
@@ -749,9 +632,11 @@ void task_exit(void) {
             }
 }
 
+// Idle task - runs when no other tasks are ready
 void idle_task(void) {
     serial_print("DEBUG: Idle task started\n");
 
+    // Very simple idle loop - just increment a counter
     static int counter = 0;
     while (1) {
         counter++;

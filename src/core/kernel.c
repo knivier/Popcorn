@@ -61,7 +61,7 @@ char temp_buffer[128] = {0};  // Temporary storage for current input when browsi
 /* Function forward declarations */
 void execute_command(const char *command);
 void int_to_str(int num, char *str);
-int parse_number(const char *str);
+int parse_number(const char* str, uint32_t* result);
 int get_tick_count(void);
 int strncmp(const char *str1, const char *str2, size_t n); // Declaration of strncmp
 bool write_file(const char* name, const char* content); // Declaration of write_file
@@ -105,11 +105,10 @@ struct IDT_ptr {
 
 void idt_init(void)
 {
-    unsigned long keyboard_address;
     struct IDT_ptr idt_ptr;
 
     /* populate IDT entry of keyboard's interrupt */
-    keyboard_address = (unsigned long)(uintptr_t)keyboard_handler;
+    uint64_t keyboard_address = (uint64_t)(uintptr_t)keyboard_handler;
     IDT[0x21].offset_low = keyboard_address & 0xFFFF;
     IDT[0x21].selector = KERNEL_CODE_SEGMENT_OFFSET;
     IDT[0x21].ist = 0;                   /* no IST */
@@ -119,7 +118,7 @@ void idt_init(void)
     IDT[0x21].reserved = 0;
 
     /* populate IDT entry of timer's interrupt */
-    unsigned long timer_address = (unsigned long)(uintptr_t)timer_handler;
+    uint64_t timer_address = (uint64_t)(uintptr_t)timer_handler;
     IDT[0x20].offset_low = timer_address & 0xFFFF;
     IDT[0x20].selector = KERNEL_CODE_SEGMENT_OFFSET;
     IDT[0x20].ist = 0;                   /* no IST */
@@ -130,7 +129,7 @@ void idt_init(void)
 
     /* populate IDT entry of system call interrupt (0x80) */
     extern void syscall_handler_asm(void);
-    unsigned long syscall_address = (unsigned long)(uintptr_t)syscall_handler_asm;
+    uint64_t syscall_address = (uint64_t)(uintptr_t)syscall_handler_asm;
     IDT[0x80].offset_low = syscall_address & 0xFFFF;
     IDT[0x80].selector = KERNEL_CODE_SEGMENT_OFFSET;
     IDT[0x80].ist = 0;                   /* no IST */
@@ -224,46 +223,6 @@ void strcpy_simple(char *dest, const char *src) {
         i++;
     }
     dest[i] = '\0';
-}
-
-/* Parse a number from string */
-int parse_number(const char *str) {
-    if (str == NULL || str[0] == '\0') {
-        return -1;  // Invalid input
-    }
-    
-    int result = 0;
-    int i = 0;
-    
-    // Skip leading whitespace
-    while (str[i] == ' ' || str[i] == '\t') {
-        i++;
-    }
-    
-    // Check for negative number
-    bool negative = false;
-    if (str[i] == '-') {
-        negative = true;
-        i++;
-    }
-    
-    // Parse digits
-    while (str[i] >= '0' && str[i] <= '9') {
-        result = result * 10 + (str[i] - '0');
-        i++;
-    }
-    
-    // Skip trailing whitespace
-    while (str[i] == ' ' || str[i] == '\t') {
-        i++;
-    }
-    
-    // If we didn't consume the entire string, it's invalid
-    if (str[i] != '\0') {
-        return -1;  // Invalid format
-    }
-    
-    return negative ? -result : result;
 }
 
 /* Add command to history */
@@ -967,9 +926,8 @@ void execute_command(const char *command) {
         } else if (strncmp(args, "-debug ", 7) == 0) {
             // Start debug task with custom PID
             const char* pid_str = args + 7;
-            int custom_pid = parse_number(pid_str);
-            
-            if (custom_pid < 0) {
+            uint32_t custom_pid;
+            if (!parse_number(pid_str, &custom_pid)) {
                 console_print_error("Invalid PID. Must be a positive number.");
                 return;
             }
@@ -996,9 +954,8 @@ void execute_command(const char *command) {
         } else if (strncmp(args, "-kill ", 6) == 0) {
             // Kill specific task by PID
             const char* pid_str = args + 6;
-            int pid = parse_number(pid_str);
-            
-            if (pid < 0) {
+            uint32_t pid;
+            if (!parse_number(pid_str, &pid)) {
                 console_print_error("Invalid PID. Must be a positive number.");
                 return;
             }
