@@ -2,7 +2,6 @@
 #include "../includes/pop_module.h"
 #include "../includes/spinner_pop.h"
 #include "../includes/console.h"
-#include "../includes/multiboot2.h"
 #include "../includes/sysinfo_pop.h"
 #include "../includes/memory_pop.h"
 #include "../includes/cpu_pop.h"
@@ -286,6 +285,27 @@ static const char* available_commands[] = {
     NULL
 };
 
+/* Parse number from string */
+int parse_number(const char* str, uint32_t* result) {
+    if (!str || !result) return 0;
+    
+    uint32_t num = 0;
+    const char* start = str;
+    
+    while (*str >= '0' && *str <= '9') {
+        num = num * 10 + (*str - '0');
+        str++;
+    }
+    
+    // Check if we parsed anything and if there are no trailing characters
+    if (str == start || (*str != '\0' && *str != ' ')) {
+        return 0;
+    }
+    
+    *result = num;
+    return 1;
+}
+
 /* Autocomplete command */
 void autocomplete_command(char *buffer, unsigned int *index) {
     if (*index == 0) return;
@@ -504,7 +524,6 @@ void execute_command(const char *command) {
         }
     } else if (strcmp(command, "stop") == 0) {
         console_print_warning("Shutting down...");
-        // Send shutdown command to QEMU/Bochs via port 0x604
         write_port(0x64, 0xFE);  // Send reset command to keyboard controller
         // If shutdown fails, halt the CPU
         asm volatile("hlt");
@@ -525,7 +544,6 @@ void execute_command(const char *command) {
         }
         filename[i] = '\0';
         
-        // Validate filename is not empty
         if (i == 0) {
             console_print_error("Filename cannot be empty");
             return;
@@ -533,7 +551,6 @@ void execute_command(const char *command) {
         
         if (command[6 + i] == ' ' && 6 + i < 127) {
             i++;
-            // Check if content is provided
             if (command[6 + i] == '\0' || 6 + i >= 128) {
                 console_print_error("Content cannot be empty");
                 return;
@@ -556,7 +573,6 @@ void execute_command(const char *command) {
             console_print_error("Invalid command format. Use: write <filename> <content>");
         }
     } else if (strncmp(command, "read ", 5) == 0) {
-        // Validate that there is a filename after "read "
         if (command[5] == '\0' || command[5] == ' ') {
             console_print_error("Usage: read <filename>");
             return;
@@ -569,9 +585,7 @@ void execute_command(const char *command) {
             i++;
         }
         filename[i] = '\0';
-        
-        // Validate filename is not empty
-        if (i == 0) {
+            if (i == 0) {
             console_print_error("Filename cannot be empty");
             return;
         }
@@ -584,7 +598,6 @@ void execute_command(const char *command) {
             console_print_error("File not found or cannot be read");
         }
     } else if (strncmp(command, "delete ", 7) == 0) {
-        // Validate that there is a filename after "delete "
         if (command[7] == '\0' || command[7] == ' ') {
             console_print_error("Usage: delete <filename>");
             return;
@@ -598,7 +611,6 @@ void execute_command(const char *command) {
         }
         filename[i] = '\0';
         
-        // Validate filename is not empty
         if (i == 0) {
             console_print_error("Filename cannot be empty");
             return;
@@ -925,6 +937,79 @@ void execute_command(const char *command) {
             }
         } else {
             console_print_error("Failed to create debug task");
+        }
+    } else if (strncmp(command, "mon", 3) == 0) {
+        // Parse taskmon commands
+        const char* args = command + 3;  // Skip "mon"
+        while (*args == ' ') args++;  // Skip spaces
+        
+        if (strncmp(args, "-debug", 6) == 0) {
+            args += 6;  // Skip "-debug"
+            while (*args == ' ') args++;  // Skip spaces
+            
+            if (*args == '\0') {
+                // mon -debug (no PID specified)
+                extern TaskStruct* scheduler_create_task(void (*function)(void), void* data, TaskPriority priority);
+                extern void debug_task_function(void);
+                TaskStruct* debug_task = scheduler_create_task(debug_task_function, NULL, PRIORITY_NORMAL);
+                if (debug_task) {
+                    console_print_success("Debug task started");
+                    char buffer[32];
+                    int_to_str(debug_task->pid, buffer);
+                    console_print_color("Task PID: ", CONSOLE_INFO_COLOR);
+                    console_println_color(buffer, CONSOLE_SUCCESS_COLOR);
+                } else {
+                    console_print_error("Failed to create debug task");
+                }
+            } else {
+                // mon -debug [pid] (custom PID)
+                uint32_t custom_pid = 0;
+                if (parse_number(args, &custom_pid) && custom_pid > 0) {
+                    extern TaskStruct* scheduler_create_task_with_pid(void (*function)(void), void* data, TaskPriority priority, uint32_t pid);
+                    extern void debug_task_function(void);
+                    TaskStruct* debug_task = scheduler_create_task_with_pid(debug_task_function, NULL, PRIORITY_NORMAL, custom_pid);
+                    if (debug_task) {
+                        console_print_success("Debug task started with custom PID");
+                        char buffer[32];
+                        int_to_str(debug_task->pid, buffer);
+                        console_print_color("Task PID: ", CONSOLE_INFO_COLOR);
+                        console_println_color(buffer, CONSOLE_SUCCESS_COLOR);
+                    } else {
+                        console_print_error("Failed to create debug task with custom PID");
+                    }
+                } else {
+                    console_print_error("Invalid PID specified");
+                }
+            }
+        } else if (strncmp(args, "-list", 5) == 0) {
+            // mon -list
+            extern void scheduler_print_tasks(void);
+            console_println_color("Task List:", CONSOLE_INFO_COLOR);
+            scheduler_print_tasks();
+        } else if (strncmp(args, "-kill", 5) == 0) {
+            // mon -kill [pid]
+            args += 5;  // Skip "-kill"
+            while (*args == ' ') args++;  // Skip spaces
+            
+            if (*args == '\0') {
+                console_print_error("PID required for kill command");
+            } else {
+                uint32_t pid_to_kill = 0;
+                if (parse_number(args, &pid_to_kill) && pid_to_kill > 0) {
+                    extern void scheduler_destroy_task(uint32_t pid);
+                    scheduler_destroy_task(pid_to_kill);
+                    console_print_success("Task killed");
+                } else {
+                    console_print_error("Invalid PID specified");
+                }
+            }
+        } else if (strncmp(args, "-ultramon", 9) == 0) {
+            // mon -ultramon
+            extern void scheduler_kill_all_except_idle(void);
+            scheduler_kill_all_except_idle();
+            console_print_success("All tasks killed except idle");
+        } else {
+            console_print_error("Unknown taskmon command. Use 'help' for available commands.");
         }
     } else if (strcmp(command, "killtask") == 0) {
         // Kill the test task (PID 2) - find it first

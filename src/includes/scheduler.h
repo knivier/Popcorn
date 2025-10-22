@@ -116,6 +116,10 @@ void scheduler_destroy_task(uint32_t pid);
 void scheduler_schedule(void);
 TaskStruct* scheduler_get_current_task(void);
 void scheduler_set_priority(uint32_t pid, TaskPriority priority);
+void scheduler_print_tasks(void);
+void scheduler_kill_all_except_idle(void);
+uint32_t scheduler_get_task_count(void);
+TaskStruct* scheduler_create_task_with_pid(void (*function)(void), void* data, TaskPriority priority, uint32_t custom_pid);
 
 // Task management
 void task_init(TaskStruct* task, void (*function)(void), void* data, TaskPriority priority);
@@ -134,5 +138,8 @@ void task_free_stack(void* stack);
 
 // Idle task
 void idle_task(void);
+
+// Debug task function
+void debug_task_function(void);
 
 #endif // SCHEDULER_H
