@@ -1,13 +1,7 @@
-#include "../includes/keyboard_map.h"
-#include "../includes/pop_module.h"
-#include "../includes/spinner_pop.h"
-#include "../includes/console.h"
-#include "../includes/sysinfo_pop.h"
-#include "../includes/memory_pop.h"
-#include "../includes/cpu_pop.h"
-#include "../includes/dolphin_pop.h"
-#include "../includes/timer.h"
+// src/core/scheduler.c
 #include "../includes/scheduler.h"
+#include "../includes/timer.h"
+#include "../includes/console.h"
 #include "../includes/memory.h"
 #include "../includes/init.h"
 #include "../includes/syscall.h"
@@ -41,303 +35,211 @@ extern void keyboard_handler(void);
 extern void timer_handler(void);
 extern char read_port(unsigned short port);
 extern void write_port(unsigned short port, unsigned char data);
+extern void int_to_str(int num, char *str);
 
-struct IDT_ptr;
-extern void load_idt(struct IDT_ptr *idt_ptr);
+// Stack management constants
+#define TASK_STACK_SIZE (16 * 1024)  // 16KB per task stack
+#define STACK_ALIGNMENT 16           // 16-byte alignment for x86-64
 
-char input_buffer[128] = {0}; 
-unsigned int input_index = 0;
+// Serial port for debugging (COM1)
+#define SERIAL_PORT 0x3F8
 
-#define HISTORY_SIZE 50
-char command_history[HISTORY_SIZE][128];
-unsigned int history_count = 0;
-int history_index = -1;  
-char temp_buffer[128] = {0};  
-
-void execute_command(const char *command);
-void int_to_str(int num, char *str);
-int get_tick_count(void);
-int strncmp(const char *str1, const char *str2, size_t n); 
-bool write_file(const char* name, const char* content); 
-const char* read_file(const char* name); 
-bool delete_file(const char* name); 
-void list_files(void); 
-void list_files_console(void); 
-bool create_directory(const char* name); 
-bool change_directory(const char* name); 
-void list_hierarchy(char* vidptr); 
-const char* get_current_directory(void); 
-const char* search_file(const char* name); 
-bool copy_file(const char* src_name, const char* dest_path); 
-
-unsigned int current_loc = 0;
-
-char *vidptr = (char*)0xb8000;
-
-ConsoleState console_state = {0, 0, CONSOLE_FG_COLOR, true, false, 0};
-
-struct IDT_entry {
-    unsigned short int offset_low;      
-    unsigned short int selector;        
-    unsigned char ist;                  
-    unsigned char type_attr;            
-    unsigned short int offset_mid;      
-    unsigned int offset_high;           
-    unsigned int reserved;              
-} __attribute__((packed));
-
-struct IDT_entry IDT[IDT_SIZE];
-
-struct IDT_ptr {
-    unsigned short limit;
-    unsigned long base;
-} __attribute__((packed));
-
-void idt_init(void)
-{
-    unsigned long keyboard_address;
-    struct IDT_ptr idt_ptr;
-
-    keyboard_address = (unsigned long)(uintptr_t)keyboard_handler;
-    IDT[0x21].offset_low = keyboard_address & 0xFFFF;
-    IDT[0x21].selector = KERNEL_CODE_SEGMENT_OFFSET;
-    IDT[0x21].ist = 0;                   
-    IDT[0x21].type_attr = INTERRUPT_GATE;
-    IDT[0x21].offset_mid = (keyboard_address >> 16) & 0xFFFF;
-    IDT[0x21].offset_high = (keyboard_address >> 32) & 0xFFFFFFFF;
-    IDT[0x21].reserved = 0;
-
-    unsigned long timer_address = (unsigned long)(uintptr_t)timer_handler;
-    IDT[0x20].offset_low = timer_address & 0xFFFF;
-    IDT[0x20].selector = KERNEL_CODE_SEGMENT_OFFSET;
-    IDT[0x20].ist = 0;                   
-    IDT[0x20].type_attr = INTERRUPT_GATE;
-    IDT[0x20].offset_mid = (timer_address >> 16) & 0xFFFF;
-    IDT[0x20].offset_high = (timer_address >> 32) & 0xFFFFFFFF;
-    IDT[0x20].reserved = 0;
-
-    extern void syscall_handler_asm(void);
-    unsigned long syscall_address = (unsigned long)(uintptr_t)syscall_handler_asm;
-    IDT[0x80].offset_low = syscall_address & 0xFFFF;
-    IDT[0x80].selector = KERNEL_CODE_SEGMENT_OFFSET;
-    IDT[0x80].ist = 0;                   
-    IDT[0x80].type_attr = 0xEE;          
-    IDT[0x80].offset_mid = (syscall_address >> 16) & 0xFFFF;
-    IDT[0x80].offset_high = (syscall_address >> 32) & 0xFFFFFFFF;
-    IDT[0x80].reserved = 0;
-
-    write_port(0x20 , 0x11);
-    write_port(0xA0 , 0x11);
-
-    write_port(0x21 , 0x20);
-    write_port(0xA1 , 0x28);
-
-    write_port(0x21 , 0x00);
-    write_port(0xA1 , 0x00);
-
-    write_port(0x21 , 0x01);
-    write_port(0xA1 , 0x01);
-
-    write_port(0x21 , 0xff);
-    write_port(0xA1 , 0xff);
-
-    idt_ptr.limit = (sizeof(struct IDT_entry) * IDT_SIZE) - 1;
-    idt_ptr.base = (unsigned long)(uintptr_t)IDT;
-
-    load_idt(&idt_ptr);
+static void serial_putc(char c) {
+    // Wait for serial port to be ready
+    while ((read_port(SERIAL_PORT + 5) & 0x20) == 0);
+    write_port(SERIAL_PORT, c);
 }
 
-void kb_init(void)
-{
-    write_port(0x21 , 0xFD);
-}
-
-void kprint(const char *str) {
-    console_print(str);
-}
-
-void kprint_newline(void) {
-    console_newline();
-}
-
-void clear_screen(void) {
-    console_clear();
-}
-
-void printTerm(const char *str, unsigned char color) {
-    console_print_color(str, color);
-}
-
-void *memset(void *s, int c, size_t n) {
-    unsigned char *p = s;
-    while (n--) {
-        *p++ = (unsigned char)c;
+static void serial_print(const char* str) {
+    while (*str) {
+        serial_putc(*str++);
     }
-    return s;
 }
 
-size_t strlen_simple(const char *str) {
-    size_t len = 0;
-    while (str[len] != '\0') {
-        len++;
+
+// Stack management functions
+void* task_allocate_stack(uint64_t size) {
+    (void)size;  // Suppress unused parameter warning
+    
+    static char static_stacks[32][16384];  // 32 tasks, 16KB each
+    static uint32_t stack_index = 0;
+    
+    if (stack_index >= 32) {
+        return NULL;
     }
-    return len;
+    
+    void* stack = static_stacks[stack_index++];
+    
+    // Clear the stack
+    memset(stack, 0, 16384);
+    
+    return stack;
 }
 
-void strcpy_simple(char *dest, const char *src) {
-    size_t i = 0;
-    while (src[i] != '\0') {
-        dest[i] = src[i];
-        i++;
+void task_free_stack(void* stack) {
+    // For static allocation, we don't need to free anything
+    // Just mark as unused (simplified for debugging)
+    (void)stack;  // Suppress unused parameter warning
+}
+
+// Initialize the scheduler
+void scheduler_init(void) {
+    serial_print("DEBUG: Initializing scheduler\n");
+
+    // Initialize scheduler state
+    scheduler.current_task = NULL;
+    scheduler.next_pid = 1;
+    scheduler.scheduler_active = false;
+    scheduler.total_tasks = 0;
+
+    // Initialize ready queues
+    for (int i = 0; i < 5; i++) {
+        scheduler.ready_queue[i] = NULL;
     }
-    dest[i] = '\0';
+
+    serial_print("DEBUG: Creating idle task\n");
+    // Create idle task
+    TaskStruct* idle = scheduler_create_task(idle_task, NULL, PRIORITY_IDLE);
+    if (idle) {
+        idle->pid = 0;  // Special PID for idle task
+        scheduler.current_task = idle;
+        scheduler.current_task->state = TASK_STATE_RUNNING;
+        serial_print("DEBUG: Idle task created successfully\n");
+    } else {
+        serial_print("ERROR: Failed to create idle task\n");
+    }
+
+    scheduler.scheduler_active = true;
+    serial_print("DEBUG: Scheduler initialization complete\n");
+    console_println_color("Scheduler initialized", CONSOLE_SUCCESS_COLOR);
 }
 
-void add_to_history(const char *command) {
-    if (command == NULL || command[0] == '\0') {
+// Scheduler tick handler (called from timer interrupt)
+void scheduler_tick(void) {
+    // Disable scheduler tick during early boot to avoid crashes
+    static bool first_tick = true;
+    if (first_tick) {
+        first_tick = false;
+        return;  // Skip first tick to avoid early crashes
+    }
+
+    if (!scheduler.scheduler_active || !scheduler.current_task) {
         return;
     }
 
-    if (history_count > 0) {
-        bool is_duplicate = true;
-        const char *last_cmd = command_history[history_count - 1];
-        for (int i = 0; command[i] != '\0' || last_cmd[i] != '\0'; i++) {
-            if (command[i] != last_cmd[i]) {
-                is_duplicate = false;
-                break;
-            }
-        }
-        if (is_duplicate) {
-            return;
-        }
+    // Update current task runtime
+    uint64_t current_time = timer_get_ticks();
+    scheduler.current_task->total_runtime +=
+        current_time - scheduler.current_task->last_run_time;
+    scheduler.current_task->last_run_time = current_time;
+
+    // Decrease time slice
+    if (scheduler.current_task->time_remaining > 0) {
+        scheduler.current_task->time_remaining--;
     }
 
-    unsigned int index = history_count % HISTORY_SIZE;
-    strcpy_simple(command_history[index], command);
+    // Force preemption every few ticks to ensure responsiveness
+    static int tick_counter = 0;
+    tick_counter++;
+    
+    // Preempt every 10 ticks (much more frequent) regardless of time slice
+    if (tick_counter >= 10) {
+        tick_counter = 0;
+        scheduler_schedule();
+        return;
+    }
 
-    if (history_count < HISTORY_SIZE) {
-        history_count++;
+    // Check if task should be preempted (only if we have multiple tasks)
+    if (scheduler.current_task->time_remaining == 0 && scheduler.total_tasks > 1) {
+        scheduler_schedule();
     }
 }
 
-const char* get_history_command(int offset) {
-    if (history_count == 0 || offset < 0 || offset >= (int)history_count) {
+// Yield CPU to another task
+void scheduler_yield(void) {
+    if (scheduler.scheduler_active) {
+        scheduler_schedule();
+    }
+}
+
+// Create a new task
+TaskStruct* scheduler_create_task(void (*function)(void), void* data, TaskPriority priority) {
+    if (!function) {
+        serial_print("ERROR: No function provided for task creation\n");
         return NULL;
     }
-        unsigned int index;
-    if (history_count <= HISTORY_SIZE) {
-        index = offset;
-    } else {
 
-        unsigned int oldest = history_count % HISTORY_SIZE;
-        index = (oldest + offset) % HISTORY_SIZE;
+    serial_print("DEBUG: Creating new task\n");
+
+    // Allocate task structure (simplified - in real system would use kmalloc)
+    static TaskStruct task_pool[32];
+    static uint32_t task_pool_index = 0;
+
+    if (task_pool_index >= 32) {
+        console_println_color("Task pool exhausted", CONSOLE_ERROR_COLOR);
+        serial_print("ERROR: Task pool exhausted\n");
+        return NULL;
     }
 
-    return command_history[index];
+    TaskStruct* task = &task_pool[task_pool_index++];
+
+    // Initialize task
+    task_init(task, function, data, priority);
+    task->pid = scheduler.next_pid++;
+    task->start_time = timer_get_ticks();
+    task->last_run_time = task->start_time;
+    serial_print("DEBUG: Allocating task stack\n");
+    // Allocate and set up stack
+    task->stack_size = TASK_STACK_SIZE;
+    task->stack_base = task_allocate_stack(task->stack_size);
+    if (!task->stack_base) {
+        console_println_color("Failed to allocate task stack", CONSOLE_ERROR_COLOR);
+        serial_print("ERROR: Failed to allocate task stack\n");
+        return NULL;
+    }
+
+    // Set stack top (stack grows downward, ensure 16-byte alignment)
+    uintptr_t stack_top_addr = (uintptr_t)task->stack_base + task->stack_size;
+    // Align to 16 bytes (x86-64 ABI requirement)
+    stack_top_addr = stack_top_addr & ~((uintptr_t)15);
+    task->stack_top = (void*)stack_top_addr;
+
+    serial_print("DEBUG: Setting up task context\n");
+    // Set up initial context for the task
+    setup_task_context(task);
+
+    // Add to ready queue
+    task->next = scheduler.ready_queue[priority];
+    if (scheduler.ready_queue[priority]) {
+        scheduler.ready_queue[priority]->prev = task;
+    }
+    scheduler.ready_queue[priority] = task;
+    task->prev = NULL;
+
+    scheduler.total_tasks++;
+    serial_print("DEBUG: Task created successfully, PID: ");
+    return task;
 }
 
-static const char* available_commands[] = {
-    "help", "halp", "hang", "clear", "uptime", "halt", "stop",
-    "write", "read", "delete", "rm", "mkdir", "go", "back",
-    "ls", "search", "cp", "listsys", "sysinfo",
-    "mem", "mem -map", "mem -use", "mem -stats", "mem -info", "mem -debug",
-    "cpu", "cpu -hz", "cpu -info",
-    "tasks", "timer", "syscalls", "debugtask", "killtask",
-    "mon", "mon -debug", "mon -list", "mon -kill", "mon -ultramon",
-    "dol", "dol -new", "dol -open", "dol -save", "dol -close", "dol -help",
-    NULL
-};
-
-int parse_number(const char* str, uint32_t* result) {
-    if (!str || !result) return 0;
-
-    uint32_t num = 0;
-    const char* start = str;
-
-    while (*str >= '0' && *str <= '9') {
-        num = num * 10 + (*str - '0');
-        str++;
-    }
-
-    if (str == start || (*str != '\0' && *str != ' ')) {
-        return 0;
-    }
-
-    *result = num;
-    return 1;
-}
-
-void autocomplete_command(char *buffer, unsigned int *index) {
-    if (*index == 0) return;
-
-    const char *match = NULL;
-    int match_count = 0;
-
-    for (int i = 0; available_commands[i] != NULL; i++) {
-        const char *cmd = available_commands[i];
-        bool matches = true;
-
-        for (unsigned int j = 0; j < *index; j++) {
-            if (cmd[j] != buffer[j]) {
-                matches = false;
+// Destroy a task
+void scheduler_destroy_task(uint32_t pid) {
+    // Find task in all queues
+    TaskStruct* task = NULL;
+    TaskPriority priority;
+    
+    for (priority = PRIORITY_IDLE; priority <= PRIORITY_REALTIME; priority++) {
+        TaskStruct* current = scheduler.ready_queue[priority];
+        while (current) {
+            if (current->pid == pid) {
+                task = current;
                 break;
             }
+            current = current->next;
         }
-
-        if (matches) {
-            match = cmd;
-            match_count++;
-        }
+        if (task) break;
     }
-
-    if (match_count == 1) {
-        size_t match_len = strlen_simple(match);
-        for (size_t i = *index; i < match_len && i < 127; i++) {
-            buffer[i] = match[i];
-            console_putchar(match[i]);
-        }
-        *index = match_len;
-        buffer[*index] = '\0';
-    }
-}
-
-void keyboard_handler_main(void) {
-
-    write_port(0x20, 0x20);
-
-}
-
-int strcmp(const char *str1, const char *str2) {
-    while (*str1 && (*str1 == *str2)) {
-        str1++;
-        str2++;
-    }
-    return *(unsigned char *)str1 - *(unsigned char *)str2;
-}
-
-int strncmp(const char *str1, const char *str2, size_t n) {
-    size_t i = 0;
-    while (i < n && str1[i] && str2[i] && str1[i] == str2[i]) {
-        i++;
-    }
-    if (i == n) {
-        return 0;
-    }
-    return (unsigned char)str1[i] - (unsigned char)str2[i];
-}
-
-extern const PopModule spinner_module;
-extern const PopModule uptime_module;
-extern const PopModule halt_module;
-extern const PopModule filesystem_module;
-extern const PopModule sysinfo_module;
-extern const PopModule memory_module;
-extern const PopModule cpu_module;
-extern const PopModule dolphin_module;
-
-void execute_command(const char *command) {
-
-    if (command == NULL || command[0] == '\0') {
+    
+    if (!task) {
         return;
     }
 
@@ -497,631 +399,517 @@ void execute_command(const char *command) {
             return;
         }
 
-        if (command[6 + i] == ' ' && 6 + i < 127) {
-            i++;
-            if (command[6 + i] == '\0' || 6 + i >= 128) {
-                console_print_error("Content cannot be empty");
+    for (int priority = PRIORITY_REALTIME; priority >= PRIORITY_IDLE; priority--) {
+        TaskStruct* task = scheduler.ready_queue[priority];
+        while (task) {
+            TaskStruct* next = task->next;
+            if (task->state == TASK_STATE_ZOMBIE) {
+                // Remove from queue
+                if (task->prev) {
+                    task->prev->next = task->next;
+                } else {
+                    scheduler.ready_queue[priority] = task->next;
+                }
+                if (task->next) {
+                    task->next->prev = task->prev;
+                }
+                
+                // Update task count
+                scheduler.total_tasks--;
+                
+                // If this was the current task, switch to idle
+                if (task == scheduler.current_task) {
+                    scheduler.current_task = NULL;  // Will be set to idle below
+                }
+            }
+            task = next;
+        }
+    }
+
+    TaskStruct* next_task = NULL;
+
+    if (scheduler.current_task && scheduler.current_task->priority >= PRIORITY_IDLE && 
+        scheduler.current_task->priority <= PRIORITY_REALTIME) {
+        
+        int current_priority = scheduler.current_task->priority;
+        if (scheduler.ready_queue[current_priority]) {
+            // Try to find next task in same priority
+            next_task = scheduler.current_task->next;
+            if (!next_task) {
+                // Wrap around to beginning of queue
+                next_task = scheduler.ready_queue[current_priority];
+            }
+            
+            // If we found the same task, look for tasks in other priorities
+            if (next_task == scheduler.current_task) {
+                // Look for tasks in other priority levels
+                for (int priority = PRIORITY_REALTIME; priority >= PRIORITY_IDLE; priority--) {
+                    if (priority != current_priority && scheduler.ready_queue[priority]) {
+                        next_task = scheduler.ready_queue[priority];
+                        break;
+                    }
+                }
+            }
+        }
+    } else {
+        for (int priority = PRIORITY_REALTIME; priority >= PRIORITY_IDLE; priority--) {
+            if (scheduler.ready_queue[priority]) {
+                next_task = scheduler.ready_queue[priority];
+                break;
+            }
+        }
+    }
+
+    if (!next_task) {
+        // If current task is idle or no other tasks, just return
+        if (scheduler.current_task && scheduler.current_task->pid == 0) {
+            return;
+        }
+        next_task = scheduler.current_task;  // Keep running current task
+    }
+    
+    if (!scheduler.current_task) {
+        // Find idle task (PID 0)
+        for (int priority = PRIORITY_REALTIME; priority >= PRIORITY_IDLE; priority--) {
+            TaskStruct* task = scheduler.ready_queue[priority];
+            while (task) {
+                if (task->pid == 0) {
+                    scheduler.current_task = task;
+                    break;
+                }
+                task = task->next;
+            }
+            if (scheduler.current_task) break;
+        }
+    }
+
+    if (next_task != scheduler.current_task) {
+        TaskStruct* old_task = scheduler.current_task;
+
+
+        // Update task states
+        if (old_task && old_task->state == TASK_STATE_RUNNING) {
+            old_task->state = TASK_STATE_READY;
+        }
+
+        next_task->state = TASK_STATE_RUNNING;
+        next_task->time_remaining = next_task->time_slice;
+
+        if (next_task->stack_base && next_task->context.rip) {
+            
+            // Additional safety checks
+            if (next_task->context.rip < 0x1000) {
                 return;
             }
-
-            while (command[6 + i + j] != '\0' && j < 100 && 6 + i + j < 128) {
-                content[j] = command[6 + i + j];
-                j++;
+            if (next_task->context.rsp < 0x1000) {
+                return;
             }
-            content[j] = '\0';
-
-            if (write_file(filename, content)) {
-                console_print_success("File written successfully");
-                console_print_color("Filename: ", CONSOLE_INFO_COLOR);
-                console_println_color(filename, CONSOLE_FG_COLOR);
-            } else {
-                console_print_error("Failed to write file (content too long, name invalid, or filesystem full)");
-            }
+            
+            task_switch(old_task, next_task);
         } else {
-            console_print_error("Invalid command format. Use: write <filename> <content>");
+            serial_print("ERROR: Invalid task context for switching\n");
         }
-    } else if (strncmp(command, "read ", 5) == 0) {
-        if (command[5] == '\0' || command[5] == ' ') {
-            console_print_error("Usage: read <filename>");
-            return;
-        }
-
-        char filename[21] = {0};
-        int i = 0;
-        while (command[5 + i] != '\0' && command[5 + i] != ' ' && i < 20 && 5 + i < 128) {
-            filename[i] = command[5 + i];
-            i++;
-        }
-        filename[i] = '\0';
-            if (i == 0) {
-            console_print_error("Filename cannot be empty");
-            return;
-        }
-
-        const char* content = read_file(filename);
-        if (content) {
-            console_print_color("File content: ", CONSOLE_INFO_COLOR);
-            console_println_color(content, CONSOLE_FG_COLOR);
-        } else {
-            console_print_error("File not found or cannot be read");
-        }
-    } else if (strncmp(command, "delete ", 7) == 0) {
-        if (command[7] == '\0' || command[7] == ' ') {
-            console_print_error("Usage: delete <filename>");
-            return;
-        }
-
-        char filename[21] = {0};
-        int i = 0;
-        while (command[7 + i] != '\0' && command[7 + i] != ' ' && i < 20 && 7 + i < 128) {
-            filename[i] = command[7 + i];
-            i++;
-        }
-        filename[i] = '\0';
-
-        if (i == 0) {
-            console_print_error("Filename cannot be empty");
-            return;
-        }
-
-        if (delete_file(filename)) {
-            console_print_success("File deleted successfully");
-            console_print_color("Filename: ", CONSOLE_INFO_COLOR);
-            console_println_color(filename, CONSOLE_FG_COLOR);
-        } else {
-            console_print_error("File not found or cannot be deleted");
-        }
-    } else if (strncmp(command, "mkdir ", 6) == 0) {
-
-        if (command[6] == '\0' || command[6] == ' ') {
-            console_print_error("Usage: mkdir <dirname>");
-            return;
-        }
-
-        char dirname[21] = {0};
-        int i = 0;
-        while (command[6 + i] != '\0' && command[6 + i] != ' ' && i < 20 && 6 + i < 128) {
-            dirname[i] = command[6 + i];
-            i++;
-        }
-        dirname[i] = '\0';
-
-        if (i == 0) {
-            console_print_error("Directory name cannot be empty");
-            return;
-        }
-
-        if (create_directory(dirname)) {
-            console_print_success("Directory created successfully");
-            console_print_color("Directory: ", CONSOLE_INFO_COLOR);
-            console_println_color(dirname, CONSOLE_FG_COLOR);
-        } else {
-            console_print_error("Failed to create directory (already exists, name too long, or filesystem full)");
-        }
-    } else if (strncmp(command, "go ", 3) == 0) {
-
-        if (command[3] == '\0' || command[3] == ' ') {
-            console_print_error("Usage: go <dirname>");
-            return;
-        }
-
-        char dirname[21] = {0};
-        int i = 0;
-        while (command[3 + i] != '\0' && command[3 + i] != ' ' && i < 20 && 3 + i < 128) {
-            dirname[i] = command[3 + i];
-            i++;
-        }
-        dirname[i] = '\0';
-
-        if (i == 0) {
-            console_print_error("Directory name cannot be empty");
-            return;
-        }
-
-        if (strcmp(dirname, "back") == 0) {
-            console_print_error("Use 'back' command to go to parent directory (not 'go back')");
-            return;
-        }
-
-        if (change_directory(dirname)) {
-            console_print_success("Changed directory successfully");
-            console_print_color("Directory: ", CONSOLE_INFO_COLOR);
-            console_println_color(dirname, CONSOLE_FG_COLOR);
-        } else {
-            console_print_error("Directory not found or cannot be accessed");
-        }
-    } else if (strncmp(command, "rm ", 3) == 0) {
-
-        if (command[3] == '\0' || command[3] == ' ') {
-            console_print_error("Usage: rm <filename>");
-            return;
-        }
-
-        char filename[21] = {0};
-        int i = 0;
-        while (command[3 + i] != '\0' && command[3 + i] != ' ' && i < 20 && 3 + i < 128) {
-            filename[i] = command[3 + i];
-            i++;
-        }
-        filename[i] = '\0';
-
-        if (i == 0) {
-            console_print_error("Filename cannot be empty");
-            return;
-        }
-
-        if (delete_file(filename)) {
-            console_print_success("File removed successfully");
-            console_print_color("Filename: ", CONSOLE_INFO_COLOR);
-            console_println_color(filename, CONSOLE_FG_COLOR);
-        } else {
-            console_print_error("File not found or cannot be removed");
-            console_print_color("Filename: ", CONSOLE_INFO_COLOR);
-            console_println_color(filename, CONSOLE_FG_COLOR);
-        }
-    } else if (strcmp(command, "back") == 0) {
-        if (change_directory("back")) {
-            console_print_success("Changed to parent directory");
-        } else {
-            console_print_error("Already at root directory");
-        }
-    } else if (strcmp(command, "ls") == 0) {
-        list_files_console();
-    } else if (strncmp(command, "search ", 7) == 0) {
-
-        if (command[7] == '\0' || command[7] == ' ') {
-            console_print_error("Usage: search <filename>");
-            return;
-        }
-
-        char filename[21] = {0};
-        int i = 0;
-        while (command[7 + i] != '\0' && command[7 + i] != ' ' && i < 20 && 7 + i < 128) {
-            filename[i] = command[7 + i];
-            i++;
-        }
-        filename[i] = '\0';
-
-        if (i == 0) {
-            console_print_error("Filename cannot be empty");
-            return;
-        }
-
-        const char* file_path = search_file(filename);
-        if (file_path) {
-            console_print_success("File found!");
-            console_print_color("Filename: ", CONSOLE_INFO_COLOR);
-            console_println_color(filename, CONSOLE_FG_COLOR);
-            console_print_color("Location: ", CONSOLE_INFO_COLOR);
-            console_println_color(file_path, CONSOLE_SUCCESS_COLOR);
-        } else {
-            console_print_error("File not found");
-            console_print_color("Filename: ", CONSOLE_INFO_COLOR);
-            console_println_color(filename, CONSOLE_FG_COLOR);
-        }
-    } else if (strncmp(command, "cp ", 3) == 0) {
-
-        if (command[3] == '\0' || command[3] == ' ') {
-            console_print_error("Usage: cp <filename> <directory>");
-            return;
-        }
-
-        char filename[21] = {0};
-        char destdir[100] = {0}; 
-        int i = 0;
-        int j = 0;
-
-        while (command[3 + i] != ' ' && i < 20 && command[3 + i] != '\0' && 3 + i < 128) {
-            filename[i] = command[3 + i];
-            i++;
-        }
-        filename[i] = '\0';
-
-        if (i == 0) {
-            console_print_error("Filename cannot be empty");
-            return;
-        }
-
-        while (command[3 + i] == ' ' && 3 + i < 127) {
-            i++;
-        }
-
-        if (command[3 + i] == '\0' || 3 + i >= 128) {
-            console_print_error("Usage: cp <filename> <directory>");
-            return;
-        }
-
-        while (command[3 + i + j] != '\0' && command[3 + i + j] != ' ' && j < 99 && 3 + i + j < 128) {
-            destdir[j] = command[3 + i + j];
-            j++;
-        }
-        destdir[j] = '\0';
-
-        if (j == 0) {
-            console_print_error("Directory cannot be empty");
-            return;
-        }
-
-        if (copy_file(filename, destdir)) {
-            console_print_success("File copied successfully");
-            console_print_color("From: ", CONSOLE_INFO_COLOR);
-            console_println_color(filename, CONSOLE_FG_COLOR);
-            console_print_color("To: ", CONSOLE_INFO_COLOR);
-            console_println_color(destdir, CONSOLE_FG_COLOR);
-        } else {
-            console_print_error("Failed to copy file (not found, destination invalid, or already exists)");
-        }
-    } else if (strcmp(command, "listsys") == 0) {
-        console_newline();
-        console_println_color("File System Hierarchy:", CONSOLE_HEADER_COLOR);
-        console_draw_separator(console_state.cursor_y, CONSOLE_FG_COLOR);
-        list_hierarchy(vidptr);
-        console_newline();
-    } else if (strcmp(command, "sysinfo") == 0) {
-        sysinfo_print_full();
-    } else if (strncmp(command, "mem ", 4) == 0) {
-
-        if (strcmp(command + 4, "-map") == 0) {
-            memory_print_map();
-        } else if (strcmp(command + 4, "-use") == 0) {
-            memory_print_usage();
-        } else if (strcmp(command + 4, "-stats") == 0) {
-            memory_print_stats();
-        } else if (strcmp(command + 4, "-info") == 0) {
-            kernel_memory_print_stats();
-        } else if (strcmp(command + 4, "-debug") == 0) {
-            memory_debug_print();
-        } else {
-            console_print_error("Unknown mem option. Use: -map, -use, -stats, -info, or -debug");
-        }
-    } else if (strcmp(command, "mem") == 0) {
-
-        memory_print_usage();
-    } else if (strcmp(command, "tasks") == 0) {
-        char buffer[64];
-        console_newline();
-        console_println_color("=== TASK INFORMATION ===", CONSOLE_HEADER_COLOR);
-        console_draw_separator(console_state.cursor_y, CONSOLE_FG_COLOR);
-
-        TaskStruct* current = scheduler_get_current_task();
-        if (current) {
-            console_print_color("Current Task PID: ", CONSOLE_INFO_COLOR);
-            int_to_str(current->pid, buffer);
-            console_println_color(buffer, CONSOLE_FG_COLOR);
-
-            console_print_color("Task State: ", CONSOLE_INFO_COLOR);
-            switch (current->state) {
-                case TASK_STATE_RUNNING:
-                    console_println_color("Running", CONSOLE_SUCCESS_COLOR);
-                    break;
-                case TASK_STATE_READY:
-                    console_println_color("Ready", CONSOLE_INFO_COLOR);
-                    break;
-                case TASK_STATE_BLOCKED:
-                    console_println_color("Blocked", CONSOLE_WARNING_COLOR);
-                    break;
-                case TASK_STATE_SLEEPING:
-                    console_println_color("Sleeping", CONSOLE_INFO_COLOR);
-                    break;
-                case TASK_STATE_ZOMBIE:
-                    console_println_color("Zombie", CONSOLE_ERROR_COLOR);
-                    break;
-                default:
-                    console_println_color("Unknown", CONSOLE_ERROR_COLOR);
-                    break;
-            }
-
-            console_print_color("Priority: ", CONSOLE_INFO_COLOR);
-            int_to_str(current->priority, buffer);
-            console_println_color(buffer, CONSOLE_FG_COLOR);
-
-            console_print_color("Total Runtime: ", CONSOLE_INFO_COLOR);
-            int_to_str((int)current->total_runtime, buffer);
-            console_println_color(buffer, CONSOLE_FG_COLOR);
-        } else {
-            console_println_color("No current task", CONSOLE_ERROR_COLOR);
-        }
-
-        console_draw_separator(console_state.cursor_y, CONSOLE_FG_COLOR);
-    } else if (strcmp(command, "timer") == 0) {
-        char buffer[64];
-        console_newline();
-        console_println_color("=== TIMER INFORMATION ===", CONSOLE_HEADER_COLOR);
-        console_draw_separator(console_state.cursor_y, CONSOLE_FG_COLOR);
-
-        console_print_color("Timer Ticks: ", CONSOLE_INFO_COLOR);
-        int_to_str((int)timer_get_ticks(), buffer);
-        console_println_color(buffer, CONSOLE_FG_COLOR);
-
-        console_print_color("Uptime (ms): ", CONSOLE_INFO_COLOR);
-        int_to_str((int)timer_get_uptime_ms(), buffer);
-        console_println_color(buffer, CONSOLE_FG_COLOR);
-
-        console_print_color("Timer Frequency: ", CONSOLE_INFO_COLOR);
-        int_to_str(TIMER_FREQUENCY, buffer);
-        console_println_color(buffer, CONSOLE_FG_COLOR);
-
-        console_draw_separator(console_state.cursor_y, CONSOLE_FG_COLOR);
-    } else if (strcmp(command, "syscalls") == 0) {
-        extern void syscall_print_table(void);
-        syscall_print_table();
-    } else if (strcmp(command, "debugtask") == 0) {
-
-        extern TaskStruct* scheduler_get_current_task(void);
-        extern void scheduler_print_tasks(void);
-
-        extern uint32_t scheduler_get_task_count(void);
-        uint32_t task_count = scheduler_get_task_count();
-
-        if (task_count > 1) {
-            console_print_error("Test task already running. Use 'killtask' to stop it first.");
-            return;
-        }
-
-        extern void test_task_function(void);
-        extern TaskStruct* scheduler_create_task(void (*function)(void), void* data, TaskPriority priority);
-        TaskStruct* test_task = scheduler_create_task(test_task_function, NULL, PRIORITY_NORMAL);
-        if (test_task) {
-            console_print_success("Debug task created successfully");
-            char buffer[32];
-            int_to_str(test_task->pid, buffer);
-            console_print_color("Task PID: ", CONSOLE_INFO_COLOR);
-            console_println_color(buffer, CONSOLE_SUCCESS_COLOR);
-
-            extern SchedulerState scheduler;
-            if (scheduler.ready_queue[PRIORITY_NORMAL]) {
-                write_port(0x3F8, 'T');  
-            } else {
-                write_port(0x3F8, 'Y');  
-            }
-        } else {
-            console_print_error("Failed to create debug task");
-        }
-    } else if (strncmp(command, "mon", 3) == 0) {
-
-        const char* args = command + 3;  
-        while (*args == ' ') args++;  
-
-        if (strncmp(args, "-debug", 6) == 0) {
-            args += 6;  
-            while (*args == ' ') args++;  
-
-            if (*args == '\0') {
-
-                extern TaskStruct* scheduler_create_task(void (*function)(void), void* data, TaskPriority priority);
-                extern void debug_task_function(void);
-                TaskStruct* debug_task = scheduler_create_task(debug_task_function, NULL, PRIORITY_NORMAL);
-                if (debug_task) {
-                    console_print_success("Debug task started");
-                    char buffer[32];
-                    int_to_str(debug_task->pid, buffer);
-                    console_print_color("Task PID: ", CONSOLE_INFO_COLOR);
-                    console_println_color(buffer, CONSOLE_SUCCESS_COLOR);
-                } else {
-                    console_print_error("Failed to create debug task");
-                }
-            } else {
-
-                uint32_t custom_pid = 0;
-                if (parse_number(args, &custom_pid) && custom_pid > 0) {
-                    extern TaskStruct* scheduler_create_task_with_pid(void (*function)(void), void* data, TaskPriority priority, uint32_t pid);
-                    extern void debug_task_function(void);
-                    TaskStruct* debug_task = scheduler_create_task_with_pid(debug_task_function, NULL, PRIORITY_NORMAL, custom_pid);
-                    if (debug_task) {
-                        console_print_success("Debug task started with custom PID");
-                        char buffer[32];
-                        int_to_str(debug_task->pid, buffer);
-                        console_print_color("Task PID: ", CONSOLE_INFO_COLOR);
-                        console_println_color(buffer, CONSOLE_SUCCESS_COLOR);
-                    } else {
-                        console_print_error("Failed to create debug task with custom PID");
-                    }
-                } else {
-                    console_print_error("Invalid PID specified");
-                }
-            }
-        } else if (strncmp(args, "-list", 5) == 0) {
-
-            extern void scheduler_print_tasks(void);
-            console_println_color("Task List:", CONSOLE_INFO_COLOR);
-            scheduler_print_tasks();
-        } else if (strncmp(args, "-kill", 5) == 0) {
-
-            args += 5;  
-            while (*args == ' ') args++;  
-
-            if (*args == '\0') {
-                console_print_error("PID required for kill command");
-            } else {
-                uint32_t pid_to_kill = 0;
-                if (parse_number(args, &pid_to_kill) && pid_to_kill > 0) {
-                    extern void scheduler_destroy_task(uint32_t pid);
-                    scheduler_destroy_task(pid_to_kill);
-                    console_print_success("Task killed");
-                } else {
-                    console_print_error("Invalid PID specified");
-                }
-            }
-        } else if (strncmp(args, "-ultramon", 9) == 0) {
-
-            extern void scheduler_kill_all_except_idle(void);
-            scheduler_kill_all_except_idle();
-            console_print_success("All tasks killed except idle");
-        } else {
-            console_print_error("Unknown taskmon command. Use 'help' for available commands.");
-        }
-    } else if (strcmp(command, "killtask") == 0) {
-
-        extern void scheduler_destroy_task(uint32_t pid);
-        extern void scheduler_print_tasks(void);
-
-        console_println_color("Current tasks:", CONSOLE_INFO_COLOR);
-        scheduler_print_tasks();
-
-        scheduler_destroy_task(2);
-        console_print_success("Test task killed");
-    } else if (strncmp(command, "cpu ", 4) == 0) {
-
-        if (strcmp(command + 4, "-hz") == 0) {
-            cpu_print_frequency();
-        } else if (strcmp(command + 4, "-info") == 0) {
-            cpu_print_info();
-        } else {
-            console_print_error("Unknown cpu option. Use: -hz or -info");
-        }
-    } else if (strcmp(command, "cpu") == 0) {
-
-        cpu_print_info();
-    } else if (strncmp(command, "dol ", 4) == 0) {
-
-        if (strncmp(command + 4, "-new ", 5) == 0) {
-            dolphin_new(command + 9);
-        } else if (strncmp(command + 4, "-open ", 6) == 0) {
-            dolphin_open(command + 10);
-        } else if (strcmp(command + 4, "-save") == 0) {
-            dolphin_save();
-        } else if (strcmp(command + 4, "-close") == 0 || strcmp(command + 4, "-quit") == 0) {
-            dolphin_close();
-        } else if (strcmp(command + 4, "-quit!") == 0) {
-
-            if (dolphin_is_active()) {
-                EditorState* state = dolphin_get_state();
-                state->active = false;
-                console_clear();
-                console_draw_header("Popcorn Kernel v0.5");
-                console_println_color("Dolphin editor closed (unsaved changes discarded)", CONSOLE_WARNING_COLOR);
-                console_newline();
-                console_draw_prompt_with_path(get_current_directory());
-            }
-        } else if (strcmp(command + 4, "-help") == 0) {
-            dolphin_help();
-        } else {
-            console_print_error("Unknown dol option. Use: -new, -open, -save, -close, -help");
-        }
-    } else if (strcmp(command, "dol") == 0) {
-
-        dolphin_help();
     } else {
-        console_print_error("Command not found");
-        console_print_color("Command: ", CONSOLE_INFO_COLOR);
-        console_println_color(command, CONSOLE_FG_COLOR);
-        console_println_color("Type 'help' for available commands", CONSOLE_INFO_COLOR);
+        // Same task, no switch needed
     }
 }
 
-void kmain(void) {
+TaskStruct* scheduler_get_current_task(void) {
+    return scheduler.current_task;
+}
 
-    init_boot_screen();
+uint32_t scheduler_get_task_count(void) {
+    return scheduler.total_tasks;
+}
 
-    char input_buffer[256] = {0};
-    char temp_buffer[256] = {0};
-    unsigned int input_index = 0;
-    int history_index = -1;
+// Print all tasks
+void scheduler_print_tasks(void) {
+    console_println_color("Task List:", CONSOLE_INFO_COLOR);
+    console_println_color("PID | State    | Priority | Runtime", CONSOLE_FG_COLOR);
+    console_println_color("----|----------|----------|--------", CONSOLE_FG_COLOR);
+    
+    if (scheduler.current_task && scheduler.current_task->pid == 0) {
+        console_print_color("0   | Running  | Idle     | ", CONSOLE_FG_COLOR);
+        char buffer[32];
+        int_to_str(scheduler.current_task->total_runtime, buffer);
+        console_println_color(buffer, CONSOLE_FG_COLOR);
+    }
+    
+    for (int priority = PRIORITY_REALTIME; priority >= PRIORITY_IDLE; priority--) {
+        TaskStruct* task = scheduler.ready_queue[priority];
+        while (task) {
+            if (task->pid != 0) {  // Skip idle task (already printed)
+                char buffer[32];
+                int_to_str(task->pid, buffer);
+                console_print_color(buffer, CONSOLE_FG_COLOR);
+                console_print_color("   | ", CONSOLE_FG_COLOR);
+                
+                switch (task->state) {
+                    case TASK_STATE_READY:
+                        console_print_color("Ready    | ", CONSOLE_FG_COLOR);
+                        break;
+                    case TASK_STATE_RUNNING:
+                        console_print_color("Running  | ", CONSOLE_FG_COLOR);
+                        break;
+                    case TASK_STATE_ZOMBIE:
+                        console_print_color("Zombie   | ", CONSOLE_FG_COLOR);
+                        break;
+                    default:
+                        console_print_color("Unknown  | ", CONSOLE_FG_COLOR);
+                        break;
+                }
+                
+                // Print priority
+                switch (priority) {
+                    case PRIORITY_IDLE:
+                        console_print_color("Idle     | ", CONSOLE_FG_COLOR);
+                        break;
+                    case PRIORITY_LOW:
+                        console_print_color("Low      | ", CONSOLE_FG_COLOR);
+                        break;
+                    case PRIORITY_NORMAL:
+                        console_print_color("Normal   | ", CONSOLE_FG_COLOR);
+                        break;
+                    case PRIORITY_HIGH:
+                        console_print_color("High     | ", CONSOLE_FG_COLOR);
+                        break;
+                    case PRIORITY_REALTIME:
+                        console_print_color("Realtime | ", CONSOLE_FG_COLOR);
+                        break;
+                    default:
+                        console_print_color("Unknown  | ", CONSOLE_FG_COLOR);
+                        break;
+                }
+                
+                // Print 
+                int_to_str(task->total_runtime, buffer);
+                console_println_color(buffer, CONSOLE_FG_COLOR);
+            }
+            task = task->next;
+        }
+    }
+}
+
+// Set task priority
+void scheduler_set_priority(uint32_t pid, TaskPriority priority) {
+    // Find and  task priority
+    for (int p = PRIORITY_IDLE; p <= PRIORITY_REALTIME; p++) {
+        TaskStruct* current = scheduler.ready_queue[p];
+        while (current) {
+            if (current->pid == pid) {
+                current->priority = priority;
+                // Note: In a real system, would need to move task between queues
+                return;
+            }
+            current = current->next;
+        }
+    }
+}
+
+// Initialize a task structure
+void task_init(TaskStruct* task, void (*function)(void), void* data, TaskPriority priority) {
+    if (!task) return;
+    
+    task->pid = 0;
+    task->ppid = 0;
+    task->state = TASK_STATE_READY;
+    task->priority = priority;
+    task->nice = 0;
+    
+    task->start_time = 0;
+    task->total_runtime = 0;
+    task->last_run_time = 0;
+    
+    task->stack_base = NULL;
+    task->stack_size = 0;
+    task->stack_top = NULL;
+    
+    // Initialize context to zero
+    memset(&task->context, 0, sizeof(CPUContext));
+    
+    task->vruntime = 0;
+    task->time_slice = 10;  // 10 ticks default
+    task->time_remaining = task->time_slice;
+    
+    task->task_function = function;
+    task->task_data = data;
+    
+    task->next = NULL;
+    task->prev = NULL;
+}
+
+void setup_task_context(TaskStruct* task) {
+    if (!task || !task->stack_top) {
+        serial_print("ERROR: Invalid task or stack_top in setup_task_context\n");
+        return;
+    }
+
+    if ((uintptr_t)task->stack_top <= (uintptr_t)task->stack_base) {
+        serial_print("ERROR: Stack top <= stack base\n");
+        return;
+    }
+
+    uintptr_t stack_size = (uintptr_t)task->stack_top - (uintptr_t)task->stack_base;
+    if (stack_size < 256) {  // Minimum 256 bytes for safety
+        serial_print("ERROR: Stack too small\n");
+        return;
+    }
+
+    // iretq expects: SS, RSP, RFLAGS, CS, RIP (in that order, bottom to top)
+    uintptr_t stack_ptr = (uintptr_t)task->stack_top;
+    
+    // Reserve space for iretq frame (5 * 8 bytes = 40 bytes)
+    stack_ptr -= 40;
+    
+    // Ensure 16-byte alignment for x86-64 ABI
+    stack_ptr = stack_ptr & ~((uintptr_t)15);
+
+    // Bounds check - ensure we don't go below stack base
+    if (stack_ptr < (uintptr_t)task->stack_base + 64) {
+        serial_print("ERROR: Stack pointer too low\n");
+        stack_ptr = (uintptr_t)task->stack_base + 64;
+        stack_ptr = stack_ptr & ~((uintptr_t)15);  // Re-align
+    }
+
+    // Pre-fill the iretq frame on the stack
+    uint64_t* stack_frame = (uint64_t*)stack_ptr;
+    stack_frame[0] = (uint64_t)task->task_function;  // RIP
+    stack_frame[1] = 0x08;  // CS (kernel code segment)
+    stack_frame[2] = 0x202;  // RFLAGS (IF=1, bit 1 always 1)
+    stack_frame[3] = stack_ptr;  // RSP (points to this frame)
+    stack_frame[4] = 0x10;  // SS (kernel data segment)
+
+    task->context.rsp = stack_ptr;
+    
+    // Validate RSP
+    if (task->context.rsp == 0) {
+        serial_print("ERROR: NULL RSP in task context\n");
+        return;
+    }
+    if (task->context.rsp < 0x1000) {
+        serial_print("ERROR: RSP too low (< 0x1000)\n");
+        return;
+    }
+
+    task->context.cs = 0x08;  
+    task->context.ss = 0x10;  
+    task->context.ds = 0x10;
+    task->context.es = 0x10;
+    task->context.fs = 0x10;
+    task->context.gs = 0x10;
+
+    task->context.rflags = 0x202;  // IF=1, bit 1=1 (required)
+
+    task->context.rdi = (uint64_t)task->task_data;  // First argument
+
+    // Clear other registers
+    task->context.rax = 0;
+    task->context.rbx = 0;
+    task->context.rcx = 0;
+    task->context.rdx = 0;
+    task->context.rsi = 0;
+    task->context.rbp = 0;
+    task->context.r8 = 0;
+    task->context.r9 = 0;
+    task->context.r10 = 0;
+    task->context.r11 = 0;
+    task->context.r12 = 0;
+    task->context.r13 = 0;
+    task->context.r14 = 0;
+    task->context.r15 = 0;
+
+    task->context.fpu_control = 0x37F;  // Default FPU control word
+    memset(task->context.fpu_state, 0, sizeof(task->context.fpu_state));
+
+    serial_print("DEBUG: Context setup complete for task\n");
+}
+
+void task_switch(TaskStruct* from, TaskStruct* to) {
+    if (!to) return;
+
+    __asm__ volatile("cli");
+
+    if (from && from != to) {
+        context_save(&from->context);
+    }
+
+    scheduler.current_task = to;
+
+    context_restore(&to->context);
+
+    __asm__ volatile("sti");
+}
+
+void task_exit(void) {
+    TaskStruct* current = scheduler_get_current_task();
+    if (current) {
+        serial_print("DEBUG: Task exiting\n");
+        
+        current->state = TASK_STATE_ZOMBIE;
+            }
+}
+
+void idle_task(void) {
+    serial_print("DEBUG: Idle task started\n");
+
+    static int counter = 0;
+    while (1) {
+        counter++;
+            if (counter % 10000000 == 0) {
+            serial_print("DEBUG: Idle task running\n");
+        }
+    }
+}
+
+// Test task function to demonstrate context switching
+void test_task_function(void) {
+    serial_print("DEBUG: Test task started\n");
+
+    static int counter = 0;
 
     while (1) {
+        counter++;
 
-        unsigned char status;
-        char keycode;
-        status = read_port(KEYBOARD_STATUS_PORT);
-
-        if (status & 0x01) {
-            keycode = read_port(KEYBOARD_DATA_PORT);
-            if (keycode < 0)
-                continue;
-
-            if (dolphin_is_active()) {
-                dolphin_handle_key(keycode);
-                continue;
-            }
-
-            if (keycode == ENTER_KEY_CODE) {
-                input_buffer[input_index] = '\0';
-                add_to_history(input_buffer);  
-                console_newline();
-                execute_command(input_buffer);
-                input_index = 0;
-                history_index = -1;  
-                memset(input_buffer, 0, sizeof(input_buffer));
-                memset(temp_buffer, 0, sizeof(temp_buffer));
-                console_newline();
-                console_draw_prompt_with_path(get_current_directory());
-            } else if (keycode == BACKSPACE_KEY_CODE) {
-
-                if (input_index > 0) {
-                    input_index--;
-                    input_buffer[input_index] = '\0';
-                    console_backspace();
-                }
-            } else if (keycode == TAB_KEY_CODE) {
-
-                autocomplete_command(input_buffer, &input_index);
-            } else if (keycode == UP_ARROW_CODE) {
-
-                if (history_count > 0) {
-
-                    if (history_index == -1) {
-                        strcpy_simple(temp_buffer, input_buffer);
-                        history_index = history_count;
-                    }
-
-                    if (history_index > 0) {
-                        history_index--;
-                        const char *cmd = get_history_command(history_index);
-                        if (cmd) {
-
-                            while (input_index > 0) {
-                                input_index--;
-                                console_backspace();
-                            }
-
-                            strcpy_simple(input_buffer, cmd);
-                            input_index = strlen_simple(input_buffer);
-                            console_print(input_buffer);
-                        }
-                    }
-                }
-            } else if (keycode == DOWN_ARROW_CODE) {
-
-                if (history_index != -1) {
-                    history_index++;
-
-                    while (input_index > 0) {
-                        input_index--;
-                        console_backspace();
-                    }
-
-                    if (history_index >= (int)history_count) {
-
-                        strcpy_simple(input_buffer, temp_buffer);
-                        history_index = -1;
-                    } else {
-
-                        const char *cmd = get_history_command(history_index);
-                        if (cmd) {
-                            strcpy_simple(input_buffer, cmd);
-                        }
-                    }
-
-                    input_index = strlen_simple(input_buffer);
-                    console_print(input_buffer);
-                }
-            } else if (keycode == PAGE_UP_CODE) {
-
-                console_scroll_up();
-            } else if (keycode == PAGE_DOWN_CODE) {
-
-                console_scroll_down();
-            } else if (input_index < sizeof(input_buffer) - 1) {
-                char ch = keyboard_map[(unsigned char)keycode];
-                if (ch != 0) {  
-                    input_buffer[input_index++] = ch;
-                    console_putchar(ch);
-
-                    history_index = -1;
-                }
-            }
+        if (counter % 1000 == 0) {
+            serial_print("DEBUG: Test task running: ");
+            char digit = '0' + (counter / 1000) % 10;
+            serial_putc(digit);
+            serial_putc('\n');
+        }
+        if (counter % 10 == 0) {
+            scheduler_yield();
         }
 
-        scheduler_yield();
+        for (volatile int i = 0; i < 10; i++);
+        
+    }
+}
+
+// Debug task function for mon -debug command
+void debug_task_function(void) {
+    serial_print("DEBUG: Debug task started\n");
+
+    static int counter = 0;
+
+    while (1) {
+        counter++;
+
+        if (counter % 1000 == 0) {
+            serial_print("DEBUG: Debug task running: ");
+            char digit = '0' + (counter / 1000) % 10;
+            serial_putc(digit);
+            serial_putc('\n');
+        }
+        if (counter % 10 == 0) {
+            scheduler_yield();
+        }
+
+        for (volatile int i = 0; i < 10; i++);
+    }
+}
+
+// Create a task with a specific PID
+TaskStruct* scheduler_create_task_with_pid(void (*function)(void), void* data, TaskPriority priority, uint32_t custom_pid) {
+    if (!function) {
+        serial_print("ERROR: No function provided for task creation\n");
+        return NULL;
+    }
+
+    serial_print("DEBUG: Creating new task with custom PID\n");
+
+    // Allocate task structure (simplified - in real system would use kmalloc)
+    static TaskStruct task_pool[32];
+    static uint32_t task_pool_index = 0;
+
+    if (task_pool_index >= 32) {
+        console_println_color("Task pool exhausted", CONSOLE_ERROR_COLOR);
+        serial_print("ERROR: Task pool exhausted\n");
+        return NULL;
+    }
+
+    TaskStruct* task = &task_pool[task_pool_index++];
+
+    // Initialize task
+    task_init(task, function, data, priority);
+    task->pid = custom_pid;  // Use custom PID
+    task->start_time = timer_get_ticks();
+    task->last_run_time = task->start_time;
+    serial_print("DEBUG: Allocating task stack\n");
+    // Allocate and set up stack
+    task->stack_size = TASK_STACK_SIZE;
+    task->stack_base = task_allocate_stack(task->stack_size);
+    if (!task->stack_base) {
+        console_println_color("Failed to allocate task stack", CONSOLE_ERROR_COLOR);
+        serial_print("ERROR: Failed to allocate task stack\n");
+        return NULL;
+    }
+
+    // Set stack top (stack grows downward, ensure 16-byte alignment)
+    uintptr_t stack_top_addr = (uintptr_t)task->stack_base + task->stack_size;
+    // Align to 16 bytes (x86-64 ABI requirement)
+    stack_top_addr = stack_top_addr & ~((uintptr_t)15);
+    task->stack_top = (void*)stack_top_addr;
+
+    serial_print("DEBUG: Setting up task context\n");
+    // Set up initial context for the task
+    setup_task_context(task);
+
+    // Add to ready queue
+    task->next = scheduler.ready_queue[priority];
+    if (scheduler.ready_queue[priority]) {
+        scheduler.ready_queue[priority]->prev = task;
+    }
+    scheduler.ready_queue[priority] = task;
+    task->prev = NULL;
+
+    scheduler.total_tasks++;
+    serial_print("DEBUG: Task created successfully, PID: ");
+    return task;
+}
+
+// Kill all tasks except the idle task (PID 0)
+void scheduler_kill_all_except_idle(void) {
+    for (int priority = PRIORITY_REALTIME; priority >= PRIORITY_IDLE; priority--) {
+        TaskStruct* task = scheduler.ready_queue[priority];
+        while (task) {
+            TaskStruct* next = task->next;
+            if (task->pid != 0) {  // Don't kill idle task
+                // Remove from queue
+                if (task->prev) {
+                    task->prev->next = task->next;
+                } else {
+                    scheduler.ready_queue[priority] = task->next;
+                }
+                if (task->next) {
+                    task->next->prev = task->prev;
+                }
+                
+                // Update task count
+                scheduler.total_tasks--;
+                
+                // If this was the current task, switch to idle
+                if (task == scheduler.current_task) {
+                    scheduler.current_task = NULL;  // Will be set to idle below
+                }
+            }
+            task = next;
+        }
+    }
+    
+    // Ensure idle task is running
+    if (!scheduler.current_task) {
+        // Find idle task (PID 0)
+        for (int priority = PRIORITY_REALTIME; priority >= PRIORITY_IDLE; priority--) {
+            TaskStruct* task = scheduler.ready_queue[priority];
+            while (task) {
+                if (task->pid == 0) {
+                    scheduler.current_task = task;
+                    task->state = TASK_STATE_RUNNING;
+                    break;
+                }
+                task = task->next;
+            }
+            if (scheduler.current_task) break;
+        }
     }
 }

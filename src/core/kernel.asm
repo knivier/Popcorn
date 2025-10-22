@@ -87,11 +87,6 @@ start64:
   ; Set up stack
   mov rsp, stack_top
 
-  ; Debug: Write a byte to port 0x3F8 (serial) to indicate we're at kmain entry
-  mov dx, 0x3F8
-  mov al, 'K'
-  out dx, al
-
   ; Call kernel main
   call kmain
   

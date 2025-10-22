@@ -73,7 +73,6 @@ context_save:
     mov [rax + 112], rax
 
     ; Save control registers
-    ; For preemptive context switching, we need to save the actual RIP
     ; The return address is at [rsp] after all our pushes
     mov rbx, [rsp]  ; Get return address from stack
     mov [rax + 120], rbx  ; Save RIP

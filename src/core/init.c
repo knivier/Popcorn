@@ -39,9 +39,6 @@ void init_boot_screen(void) {
 
     console_init();
 
-    extern void write_port(unsigned short port, unsigned char data);
-    write_port(0x3F8, 'C');
-
     init_draw_header();
 
     init_show_memory_info();
