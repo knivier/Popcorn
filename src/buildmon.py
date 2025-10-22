@@ -558,7 +558,7 @@ class ModernPopcornBuilder:
         self.log("🧹 Cleaning build files...")
         self.animate_status_indicator(self.colors['warning'], "Cleaning...")
         
-        for path in ['obj', 'kernel', 'popcorn.iso', 'isodir']:
+        for path in ['obj', 'kernel', 'popcorn.iso', 'isodir', 'build_errors.log']:
             if Path(path).exists():
                 subprocess.run(['rm', '-rf', path])
                 self.log(f"🗑️ Removed: {path}")
@@ -583,7 +583,11 @@ class ModernPopcornBuilder:
             error_log = 'build_errors.log'
             
             # Compile assembly files
-            asm_files = [('core/kernel.asm', 'obj/kasm.o'), ('core/idt.asm', 'obj/idt.o')]
+            asm_files = [
+                ('core/kernel.asm', 'obj/kasm.o'), 
+                ('core/idt.asm', 'obj/idt.o'),
+                ('core/context_switch.asm', 'obj/context_switch.o')
+            ]
             for src, obj in asm_files:
                 if not self.run_command(['nasm', '-f', 'elf64', src, '-o', obj], 
                                        verbose=True, log_file=error_log):
@@ -626,10 +630,11 @@ class ModernPopcornBuilder:
             if success:
                 obj_files = ['obj/kasm.o', 'obj/kc.o', 'obj/console.o', 'obj/utils.o',
                            'obj/pop_module.o', 'obj/shimjapii_pop.o', 'obj/idt.o',
-                           'obj/spinner_pop.o', 'obj/uptime_pop.o', 'obj/halt_pop.o',
-                           'obj/filesystem_pop.o', 'obj/multiboot2.o', 'obj/sysinfo_pop.o',
-                           'obj/memory_pop.o', 'obj/cpu_pop.o', 'obj/dolphin_pop.o',
-                           'obj/timer.o', 'obj/scheduler.o', 'obj/memory.o', 'obj/init.o', 'obj/syscall.o']
+                           'obj/context_switch.o', 'obj/spinner_pop.o', 'obj/uptime_pop.o', 
+                           'obj/halt_pop.o', 'obj/filesystem_pop.o', 'obj/multiboot2.o', 
+                           'obj/sysinfo_pop.o', 'obj/memory_pop.o', 'obj/cpu_pop.o', 
+                           'obj/dolphin_pop.o', 'obj/timer.o', 'obj/scheduler.o', 
+                           'obj/memory.o', 'obj/init.o', 'obj/syscall.o']
                 
                 success = self.run_command(['ld', '-m', 'elf_x86_64', '-T', 'link.ld',
                                           '-o', 'kernel'] + obj_files,
@@ -665,6 +670,7 @@ class ModernPopcornBuilder:
                 'mkdir -p obj && ' +
                 'nasm -f elf64 core/kernel.asm -o obj/kasm.o && ' +
                 'nasm -f elf64 core/idt.asm -o obj/idt.o && ' +
+                'nasm -f elf64 core/context_switch.asm -o obj/context_switch.o && ' +
                 'gcc -m64 -c core/kernel.c -o obj/kc.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
                 'gcc -m64 -c core/console.c -o obj/console.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
                 'gcc -m64 -c core/utils.c -o obj/utils.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
@@ -684,7 +690,7 @@ class ModernPopcornBuilder:
                 'gcc -m64 -c core/memory.c -o obj/memory.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
                 'gcc -m64 -c core/init.c -o obj/init.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
                 'gcc -m64 -c core/syscall.c -o obj/syscall.o -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
-                'ld -m elf_x86_64 -T link.ld -o kernel obj/kasm.o obj/kc.o obj/console.o obj/utils.o obj/pop_module.o obj/shimjapii_pop.o obj/idt.o obj/spinner_pop.o obj/uptime_pop.o obj/halt_pop.o obj/filesystem_pop.o obj/multiboot2.o obj/sysinfo_pop.o obj/memory_pop.o obj/cpu_pop.o obj/dolphin_pop.o obj/timer.o obj/scheduler.o obj/memory.o obj/init.o obj/syscall.o'
+                'ld -m elf_x86_64 -T link.ld -o kernel obj/kasm.o obj/kc.o obj/console.o obj/utils.o obj/pop_module.o obj/shimjapii_pop.o obj/idt.o obj/context_switch.o obj/spinner_pop.o obj/uptime_pop.o obj/halt_pop.o obj/filesystem_pop.o obj/multiboot2.o obj/sysinfo_pop.o obj/memory_pop.o obj/cpu_pop.o obj/dolphin_pop.o obj/timer.o obj/scheduler.o obj/memory.o obj/init.o obj/syscall.o'
             ])
             
             if success:
@@ -745,7 +751,9 @@ class ModernPopcornBuilder:
                     'qemu-system-x86_64',
                     '-cdrom', 'popcorn.iso',
                     '-cpu', 'qemu64',
-                    '-m', '256'
+                    '-m', '256',
+                    '-smp', '1',
+                    '-serial', 'stdio'
                 ])
                 
                 self.qemu_process.wait()
@@ -790,6 +798,7 @@ class ModernPopcornBuilder:
                 'mkdir -p obj && ' +
                 'nasm -f elf64 core/kernel.asm -o obj/kasm.o && ' +
                 'nasm -f elf64 core/idt.asm -o obj/idt.o && ' +
+                'nasm -f elf64 core/context_switch.asm -o obj/context_switch.o && ' +
                 'gcc -m64 -c core/*.c -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
                 'gcc -m64 -c pops/*.c -Wall -Wextra -fno-stack-protector -mcmodel=large -mno-red-zone && ' +
                 'mv *.o obj/ 2>/dev/null; ' +
