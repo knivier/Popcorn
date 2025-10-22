@@ -75,6 +75,44 @@ typedef struct {
 #define SYSCALL_FLAG_BLOCKING   0x02
 #define SYSCALL_FLAG_SIGNAL     0x04
 
+// File type flags for stat
+#define S_IFMT   0170000  // File type mask
+#define S_IFREG  0100000  // Regular file
+#define S_IFDIR  0040000  // Directory
+#define S_IFCHR  0020000  // Character device
+#define S_IFBLK  0060000  // Block device
+#define S_IFIFO  0010000  // FIFO
+#define S_IFLNK  0120000  // Symbolic link
+#define S_IFSOCK 0140000  // Socket
+
+// Permission flags for stat
+#define S_IRUSR  00400    // Owner read
+#define S_IWUSR  00200    // Owner write
+#define S_IXUSR  00100    // Owner execute
+#define S_IRGRP  00040    // Group read
+#define S_IWGRP  00020    // Group write
+#define S_IXGRP  00010    // Group execute
+#define S_IROTH  00004    // Other read
+#define S_IWOTH  00002    // Other write
+#define S_IXOTH  00001    // Other execute
+
+// File status structure
+typedef struct {
+    uint64_t st_dev;      // Device ID
+    uint64_t st_ino;      // Inode number
+    uint32_t st_mode;     // File type and permissions
+    uint32_t st_nlink;    // Number of hard links
+    uint32_t st_uid;      // User ID of owner
+    uint32_t st_gid;      // Group ID of owner
+    uint64_t st_rdev;     // Device ID (if special file)
+    uint64_t st_size;     // File size in bytes
+    uint64_t st_blksize;  // Block size for filesystem I/O
+    uint64_t st_blocks;   // Number of 512B blocks allocated
+    uint64_t st_atime;    // Time of last access
+    uint64_t st_mtime;    // Time of last modification
+    uint64_t st_ctime;    // Time of last status change
+} stat_t;
+
 // Function declarations
 void syscall_init(void);
 void syscall_register(uint32_t syscall_num, syscall_handler_t handler, const char* name, uint32_t flags);
