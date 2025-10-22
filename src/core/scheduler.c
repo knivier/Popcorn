@@ -39,23 +39,18 @@ static void serial_print(const char* str) {
 // Stack management functions
 void* task_allocate_stack(uint64_t size) {
     (void)size;  // Suppress unused parameter warning
-    write_port(0x3F8, 'W');  // Debug: Start stack allocation
     
-    // Use static stack allocation to avoid memory manager issues during early boot
     static char static_stacks[32][16384];  // 32 tasks, 16KB each
     static uint32_t stack_index = 0;
     
     if (stack_index >= 32) {
-        write_port(0x3F8, 'X');  // Debug: Stack pool exhausted
         return NULL;
     }
     
     void* stack = static_stacks[stack_index++];
-    write_port(0x3F8, 'Y');  // Debug: Stack allocated
     
     // Clear the stack
     memset(stack, 0, 16384);
-    write_port(0x3F8, 'Z');  // Debug: Stack cleared
     
     return stack;
 }
@@ -68,7 +63,6 @@ void task_free_stack(void* stack) {
 
 // Initialize the scheduler
 void scheduler_init(void) {
-    write_port(0x3F8, 'A');  // Debug: Start scheduler init
     serial_print("DEBUG: Initializing scheduler\n");
 
     // Initialize scheduler state
@@ -77,14 +71,10 @@ void scheduler_init(void) {
     scheduler.scheduler_active = false;
     scheduler.total_tasks = 0;
 
-    write_port(0x3F8, 'B');  // Debug: State initialized
-
     // Initialize ready queues
     for (int i = 0; i < 5; i++) {
         scheduler.ready_queue[i] = NULL;
     }
-
-    write_port(0x3F8, 'C');  // Debug: Queues initialized
 
     serial_print("DEBUG: Creating idle task\n");
     // Create idle task
@@ -93,22 +83,12 @@ void scheduler_init(void) {
         idle->pid = 0;  // Special PID for idle task
         scheduler.current_task = idle;
         scheduler.current_task->state = TASK_STATE_RUNNING;
-        write_port(0x3F8, 'D');  // Debug: Idle task created
         serial_print("DEBUG: Idle task created successfully\n");
-        
-        // Debug: Check if idle task is in ready queue
-        if (scheduler.ready_queue[PRIORITY_IDLE]) {
-            write_port(0x3F8, 'I');  // Debug: Idle task in queue
-        } else {
-            write_port(0x3F8, 'X');  // Debug: Idle task NOT in queue!
-        }
     } else {
-        write_port(0x3F8, 'E');  // Debug: Idle task failed
         serial_print("ERROR: Failed to create idle task\n");
     }
 
     scheduler.scheduler_active = true;
-    write_port(0x3F8, 'F');  // Debug: Scheduler active
     serial_print("DEBUG: Scheduler initialization complete\n");
     console_println_color("Scheduler initialized", CONSOLE_SUCCESS_COLOR);
 }
@@ -119,7 +99,6 @@ void scheduler_tick(void) {
     static bool first_tick = true;
     if (first_tick) {
         first_tick = false;
-        write_port(0x3F8, 'V');  // Debug: First tick
         return;  // Skip first tick to avoid early crashes
     }
 
@@ -145,14 +124,12 @@ void scheduler_tick(void) {
     // Preempt every 10 ticks (much more frequent) regardless of time slice
     if (tick_counter >= 10) {
         tick_counter = 0;
-        write_port(0x3F8, '!');  // Debug: Force preemption
         scheduler_schedule();
         return;
     }
 
     // Check if task should be preempted (only if we have multiple tasks)
     if (scheduler.current_task->time_remaining == 0 && scheduler.total_tasks > 1) {
-        write_port(0x3F8, '@');  // Debug: Time slice expired
         scheduler_schedule();
     }
 }
@@ -160,14 +137,12 @@ void scheduler_tick(void) {
 // Yield CPU to another task
 void scheduler_yield(void) {
     if (scheduler.scheduler_active) {
-        write_port(0x3F8, 'Y');  // Debug: Yield called
         scheduler_schedule();
     }
 }
 
 // Create a new task
 TaskStruct* scheduler_create_task(void (*function)(void), void* data, TaskPriority priority) {
-    write_port(0x3F8, 'G');  // Debug: Start task creation
     if (!function) {
         serial_print("ERROR: No function provided for task creation\n");
         return NULL;
@@ -185,7 +160,6 @@ TaskStruct* scheduler_create_task(void (*function)(void), void* data, TaskPriori
         return NULL;
     }
 
-    write_port(0x3F8, 'H');  // Debug: Task pool OK
     TaskStruct* task = &task_pool[task_pool_index++];
 
     // Initialize task
@@ -193,8 +167,6 @@ TaskStruct* scheduler_create_task(void (*function)(void), void* data, TaskPriori
     task->pid = scheduler.next_pid++;
     task->start_time = timer_get_ticks();
     task->last_run_time = task->start_time;
-
-    write_port(0x3F8, 'I');  // Debug: Task initialized
     serial_print("DEBUG: Allocating task stack\n");
     // Allocate and set up stack
     task->stack_size = TASK_STACK_SIZE;
@@ -205,20 +177,15 @@ TaskStruct* scheduler_create_task(void (*function)(void), void* data, TaskPriori
         return NULL;
     }
 
-    write_port(0x3F8, 'J');  // Debug: Stack allocated
-
     // Set stack top (stack grows downward, ensure 16-byte alignment)
     uintptr_t stack_top_addr = (uintptr_t)task->stack_base + task->stack_size;
     // Align to 16 bytes (x86-64 ABI requirement)
     stack_top_addr = stack_top_addr & ~((uintptr_t)15);
     task->stack_top = (void*)stack_top_addr;
 
-    write_port(0x3F8, 'K');  // Debug: Stack top set
     serial_print("DEBUG: Setting up task context\n");
     // Set up initial context for the task
     setup_task_context(task);
-
-    write_port(0x3F8, 'L');  // Debug: Context setup complete
 
     // Add to ready queue
     task->next = scheduler.ready_queue[priority];
@@ -229,11 +196,6 @@ TaskStruct* scheduler_create_task(void (*function)(void), void* data, TaskPriori
     task->prev = NULL;
 
     scheduler.total_tasks++;
-    write_port(0x3F8, 'M');  // Debug: Task added to queue
-    
-    // Debug: Show which priority queue this task was added to
-    char priority_char = '0' + priority;
-    write_port(0x3F8, priority_char);
     serial_print("DEBUG: Task created successfully, PID: ");
     return task;
 }
@@ -289,14 +251,11 @@ void scheduler_schedule(void) {
         return;
     }
 
-    // Clean up zombie tasks first
     for (int priority = PRIORITY_REALTIME; priority >= PRIORITY_IDLE; priority--) {
         TaskStruct* task = scheduler.ready_queue[priority];
         while (task) {
             TaskStruct* next = task->next;
             if (task->state == TASK_STATE_ZOMBIE) {
-                write_port(0x3F8, '5');  // Debug: Cleaning up zombie
-                
                 // Remove from queue
                 if (task->prev) {
                     task->prev->next = task->next;
@@ -321,67 +280,46 @@ void scheduler_schedule(void) {
 
     TaskStruct* next_task = NULL;
 
-    // Find next task with proper multi-level scheduling
-    // First, try to find a different task in the same priority
     if (scheduler.current_task && scheduler.current_task->priority >= PRIORITY_IDLE && 
         scheduler.current_task->priority <= PRIORITY_REALTIME) {
         
         int current_priority = scheduler.current_task->priority;
         if (scheduler.ready_queue[current_priority]) {
-            write_port(0x3F8, 'Q');  // Debug: Found current priority queue
-            char priority_char = '0' + current_priority;
-            write_port(0x3F8, priority_char);
-            
             // Try to find next task in same priority
             next_task = scheduler.current_task->next;
             if (!next_task) {
                 // Wrap around to beginning of queue
                 next_task = scheduler.ready_queue[current_priority];
             }
-            write_port(0x3F8, 'R');  // Debug: Round-robin selected
             
             // If we found the same task, look for tasks in other priorities
             if (next_task == scheduler.current_task) {
-                write_port(0x3F8, 'S');  // Debug: Same task selected!
-                
                 // Look for tasks in other priority levels
                 for (int priority = PRIORITY_REALTIME; priority >= PRIORITY_IDLE; priority--) {
                     if (priority != current_priority && scheduler.ready_queue[priority]) {
                         next_task = scheduler.ready_queue[priority];
-                        write_port(0x3F8, 'O');  // Debug: Other priority selected
-                        char other_priority_char = '0' + priority;
-                        write_port(0x3F8, other_priority_char);
                         break;
                     }
                 }
             }
         }
     } else {
-        // No current task, find highest priority task
         for (int priority = PRIORITY_REALTIME; priority >= PRIORITY_IDLE; priority--) {
             if (scheduler.ready_queue[priority]) {
                 next_task = scheduler.ready_queue[priority];
-                write_port(0x3F8, 'F');  // Debug: First task selected
-                char priority_char = '0' + priority;
-                write_port(0x3F8, priority_char);
                 break;
             }
         }
     }
 
-    // If no ready task, use idle task (or current task if it's the idle task)
     if (!next_task) {
-        write_port(0x3F8, 'Z');  // Debug: No next task found
         // If current task is idle or no other tasks, just return
         if (scheduler.current_task && scheduler.current_task->pid == 0) {
-            write_port(0x3F8, 'I');  // Debug: Idle task, returning
             return;
         }
         next_task = scheduler.current_task;  // Keep running current task
-        write_port(0x3F8, 'K');  // Debug: Keeping current task
     }
     
-    // Fallback: if no current task, find the idle task
     if (!scheduler.current_task) {
         // Find idle task (PID 0)
         for (int priority = PRIORITY_REALTIME; priority >= PRIORITY_IDLE; priority--) {
@@ -397,11 +335,9 @@ void scheduler_schedule(void) {
         }
     }
 
-    // Switch to next task if different
     if (next_task != scheduler.current_task) {
         TaskStruct* old_task = scheduler.current_task;
 
-        write_port(0x3F8, 'S');  // Debug: About to switch tasks
 
         // Update task states
         if (old_task && old_task->state == TASK_STATE_RUNNING) {
@@ -411,35 +347,29 @@ void scheduler_schedule(void) {
         next_task->state = TASK_STATE_RUNNING;
         next_task->time_remaining = next_task->time_slice;
 
-        // Perform context switch only if we have a valid context
         if (next_task->stack_base && next_task->context.rip) {
-            write_port(0x3F8, 'C');  // Debug: Context switch starting
             
             // Additional safety checks
             if (next_task->context.rip < 0x1000) {
-                write_port(0x3F8, 'B');  // Debug: Invalid RIP (too low)
                 return;
             }
             if (next_task->context.rsp < 0x1000) {
-                write_port(0x3F8, 'A');  // Debug: Invalid RSP (too low)
                 return;
             }
             
             task_switch(old_task, next_task);
         } else {
-            write_port(0x3F8, 'X');  // Debug: Invalid context, no switch
+            serial_print("ERROR: Invalid task context for switching\n");
         }
     } else {
-        write_port(0x3F8, 'N');  // Debug: No task switch needed
+        // Same task, no switch needed
     }
 }
 
-// Get current running task
 TaskStruct* scheduler_get_current_task(void) {
     return scheduler.current_task;
 }
 
-// Get total number of tasks
 uint32_t scheduler_get_task_count(void) {
     return scheduler.total_tasks;
 }
@@ -450,7 +380,6 @@ void scheduler_print_tasks(void) {
     console_println_color("PID | State    | Priority | Runtime", CONSOLE_FG_COLOR);
     console_println_color("----|----------|----------|--------", CONSOLE_FG_COLOR);
     
-    // Print idle task first
     if (scheduler.current_task && scheduler.current_task->pid == 0) {
         console_print_color("0   | Running  | Idle     | ", CONSOLE_FG_COLOR);
         char buffer[32];
@@ -458,7 +387,6 @@ void scheduler_print_tasks(void) {
         console_println_color(buffer, CONSOLE_FG_COLOR);
     }
     
-    // Print all other tasks
     for (int priority = PRIORITY_REALTIME; priority >= PRIORITY_IDLE; priority--) {
         TaskStruct* task = scheduler.ready_queue[priority];
         while (task) {
@@ -468,7 +396,6 @@ void scheduler_print_tasks(void) {
                 console_print_color(buffer, CONSOLE_FG_COLOR);
                 console_print_color("   | ", CONSOLE_FG_COLOR);
                 
-                // Print state
                 switch (task->state) {
                     case TASK_STATE_READY:
                         console_print_color("Ready    | ", CONSOLE_FG_COLOR);
@@ -506,7 +433,7 @@ void scheduler_print_tasks(void) {
                         break;
                 }
                 
-                // Print runtime
+                // Print 
                 int_to_str(task->total_runtime, buffer);
                 console_println_color(buffer, CONSOLE_FG_COLOR);
             }
@@ -517,7 +444,7 @@ void scheduler_print_tasks(void) {
 
 // Set task priority
 void scheduler_set_priority(uint32_t pid, TaskPriority priority) {
-    // Find and update task priority
+    // Find and  task priority
     for (int p = PRIORITY_IDLE; p <= PRIORITY_REALTIME; p++) {
         TaskStruct* current = scheduler.ready_queue[p];
         while (current) {
@@ -563,32 +490,23 @@ void task_init(TaskStruct* task, void (*function)(void), void* data, TaskPriorit
     task->prev = NULL;
 }
 
-// Set up initial context for a new task
 void setup_task_context(TaskStruct* task) {
-    write_port(0x3F8, 'N');  // Debug: Start context setup
     if (!task || !task->stack_top) {
         serial_print("ERROR: Invalid task or stack_top in setup_task_context\n");
         return;
     }
 
-    // Ensure stack bounds are valid
     if ((uintptr_t)task->stack_top <= (uintptr_t)task->stack_base) {
         serial_print("ERROR: Stack top <= stack base\n");
         return;
     }
 
-    write_port(0x3F8, 'O');  // Debug: Stack bounds OK
-
-    // Calculate safe stack pointer with bounds checking
     uintptr_t stack_size = (uintptr_t)task->stack_top - (uintptr_t)task->stack_base;
     if (stack_size < 256) {  // Minimum 256 bytes for safety
         serial_print("ERROR: Stack too small\n");
         return;
     }
 
-    write_port(0x3F8, 'P');  // Debug: Stack size OK
-
-    // Pre-fill the stack with iretq frame
     // iretq expects: SS, RSP, RFLAGS, CS, RIP (in that order, bottom to top)
     uintptr_t stack_ptr = (uintptr_t)task->stack_top;
     
@@ -614,37 +532,26 @@ void setup_task_context(TaskStruct* task) {
     stack_frame[4] = 0x10;  // SS (kernel data segment)
 
     task->context.rsp = stack_ptr;
-    write_port(0x3F8, 'Q');  // Debug: Stack pointer set
     
-    // Debug: Validate RSP
+    // Validate RSP
     if (task->context.rsp == 0) {
-        write_port(0x3F8, 'W');  // Debug: NULL RSP!
         serial_print("ERROR: NULL RSP in task context\n");
         return;
     }
     if (task->context.rsp < 0x1000) {
-        write_port(0x3F8, 'V');  // Debug: RSP too low!
         serial_print("ERROR: RSP too low (< 0x1000)\n");
         return;
     }
 
-    // RIP is now stored in the stack frame, not in context
-    write_port(0x3F8, 'R');  // Debug: Stack frame prepared
-
-    // Set up segment registers for long mode
-    task->context.cs = 0x08;  // Kernel code segment
-    task->context.ss = 0x10;  // Kernel data segment
+    task->context.cs = 0x08;  
+    task->context.ss = 0x10;  
     task->context.ds = 0x10;
     task->context.es = 0x10;
     task->context.fs = 0x10;
     task->context.gs = 0x10;
 
-    // Set up flags register (interrupts enabled, bit 1 must be 1)
     task->context.rflags = 0x202;  // IF=1, bit 1=1 (required)
 
-    write_port(0x3F8, 'S');  // Debug: Registers set
-
-    // Set up function arguments
     task->context.rdi = (uint64_t)task->task_data;  // First argument
 
     // Clear other registers
@@ -663,80 +570,51 @@ void setup_task_context(TaskStruct* task) {
     task->context.r14 = 0;
     task->context.r15 = 0;
 
-    // Set up FPU state
     task->context.fpu_control = 0x37F;  // Default FPU control word
     memset(task->context.fpu_state, 0, sizeof(task->context.fpu_state));
 
-    write_port(0x3F8, 'T');  // Debug: FPU state set
-    write_port(0x3F8, 'U');  // Debug: Context setup complete
     serial_print("DEBUG: Context setup complete for task\n");
 }
 
-// Context switch - now with real CPU register saving/restoring
 void task_switch(TaskStruct* from, TaskStruct* to) {
     if (!to) return;
 
-    write_port(0x3F8, 'W');  // Debug: Context switch start
-
-    // Disable interrupts during context switch
     __asm__ volatile("cli");
 
-    // If we have a current task, save its context
     if (from && from != to) {
-        write_port(0x3F8, 'V');  // Debug: Saving context
         context_save(&from->context);
     }
 
-    // Switch to the new task
     scheduler.current_task = to;
-    write_port(0x3F8, 'U');  // Debug: About to restore context
 
-    // Restore the new task's context
     context_restore(&to->context);
 
-    // This should never return, as context_restore executes iretq
-    // If we get here, something went wrong
-    write_port(0x3F8, 'E');  // Debug: ERROR - context_restore returned!
     __asm__ volatile("sti");
 }
 
-// Task exit
 void task_exit(void) {
     TaskStruct* current = scheduler_get_current_task();
     if (current) {
-        write_port(0x3F8, '4');  // Debug: Task exiting
         serial_print("DEBUG: Task exiting\n");
         
-        // Mark as zombie instead of destroying immediately
         current->state = TASK_STATE_ZOMBIE;
-        
-        // Don't destroy the task immediately - let the scheduler handle it
-        // This prevents crashes during task cleanup
-    }
+            }
 }
 
-// Idle task - runs when no other tasks are ready
 void idle_task(void) {
-    write_port(0x3F8, '1');  // Debug: Idle task started
     serial_print("DEBUG: Idle task started\n");
 
-    // Very simple idle loop - just increment a counter
     static int counter = 0;
     while (1) {
         counter++;
-        
-        // Print a character every 10 million iterations (very infrequent)
-        if (counter % 10000000 == 0) {
-            write_port(0x3F8, '.');  // Debug: Idle task running
+            if (counter % 10000000 == 0) {
+            serial_print("DEBUG: Idle task running\n");
         }
-        
-        // No yield, no complex operations - just a simple loop
     }
 }
 
 // Test task function to demonstrate context switching
 void test_task_function(void) {
-    write_port(0x3F8, '2');  // Debug: Test task started
     serial_print("DEBUG: Test task started\n");
 
     static int counter = 0;
@@ -744,24 +622,146 @@ void test_task_function(void) {
     while (1) {
         counter++;
 
-        // Print task info every 1000 iterations (more frequent)
         if (counter % 1000 == 0) {
             serial_print("DEBUG: Test task running: ");
-            // Simple counter output
             char digit = '0' + (counter / 1000) % 10;
             serial_putc(digit);
             serial_putc('\n');
         }
-
-        // Yield CPU to scheduler VERY frequently - every 10 iterations
         if (counter % 10 == 0) {
-            write_port(0x3F8, '#');  // Debug: Test task yielding
             scheduler_yield();
         }
 
-        // Very small delay - much smaller to be more responsive
         for (volatile int i = 0; i < 10; i++);
         
-        // No automatic exit - let the user control it with killtask
+    }
+}
+
+// Debug task function for mon -debug command
+void debug_task_function(void) {
+    serial_print("DEBUG: Debug task started\n");
+
+    static int counter = 0;
+
+    while (1) {
+        counter++;
+
+        if (counter % 1000 == 0) {
+            serial_print("DEBUG: Debug task running: ");
+            char digit = '0' + (counter / 1000) % 10;
+            serial_putc(digit);
+            serial_putc('\n');
+        }
+        if (counter % 10 == 0) {
+            scheduler_yield();
+        }
+
+        for (volatile int i = 0; i < 10; i++);
+    }
+}
+
+// Create a task with a specific PID
+TaskStruct* scheduler_create_task_with_pid(void (*function)(void), void* data, TaskPriority priority, uint32_t custom_pid) {
+    if (!function) {
+        serial_print("ERROR: No function provided for task creation\n");
+        return NULL;
+    }
+
+    serial_print("DEBUG: Creating new task with custom PID\n");
+
+    // Allocate task structure (simplified - in real system would use kmalloc)
+    static TaskStruct task_pool[32];
+    static uint32_t task_pool_index = 0;
+
+    if (task_pool_index >= 32) {
+        console_println_color("Task pool exhausted", CONSOLE_ERROR_COLOR);
+        serial_print("ERROR: Task pool exhausted\n");
+        return NULL;
+    }
+
+    TaskStruct* task = &task_pool[task_pool_index++];
+
+    // Initialize task
+    task_init(task, function, data, priority);
+    task->pid = custom_pid;  // Use custom PID
+    task->start_time = timer_get_ticks();
+    task->last_run_time = task->start_time;
+    serial_print("DEBUG: Allocating task stack\n");
+    // Allocate and set up stack
+    task->stack_size = TASK_STACK_SIZE;
+    task->stack_base = task_allocate_stack(task->stack_size);
+    if (!task->stack_base) {
+        console_println_color("Failed to allocate task stack", CONSOLE_ERROR_COLOR);
+        serial_print("ERROR: Failed to allocate task stack\n");
+        return NULL;
+    }
+
+    // Set stack top (stack grows downward, ensure 16-byte alignment)
+    uintptr_t stack_top_addr = (uintptr_t)task->stack_base + task->stack_size;
+    // Align to 16 bytes (x86-64 ABI requirement)
+    stack_top_addr = stack_top_addr & ~((uintptr_t)15);
+    task->stack_top = (void*)stack_top_addr;
+
+    serial_print("DEBUG: Setting up task context\n");
+    // Set up initial context for the task
+    setup_task_context(task);
+
+    // Add to ready queue
+    task->next = scheduler.ready_queue[priority];
+    if (scheduler.ready_queue[priority]) {
+        scheduler.ready_queue[priority]->prev = task;
+    }
+    scheduler.ready_queue[priority] = task;
+    task->prev = NULL;
+
+    scheduler.total_tasks++;
+    serial_print("DEBUG: Task created successfully, PID: ");
+    return task;
+}
+
+// Kill all tasks except the idle task (PID 0)
+void scheduler_kill_all_except_idle(void) {
+    for (int priority = PRIORITY_REALTIME; priority >= PRIORITY_IDLE; priority--) {
+        TaskStruct* task = scheduler.ready_queue[priority];
+        while (task) {
+            TaskStruct* next = task->next;
+            if (task->pid != 0) {  // Don't kill idle task
+                // Remove from queue
+                if (task->prev) {
+                    task->prev->next = task->next;
+                } else {
+                    scheduler.ready_queue[priority] = task->next;
+                }
+                if (task->next) {
+                    task->next->prev = task->prev;
+                }
+                
+                // Update task count
+                scheduler.total_tasks--;
+                
+                // If this was the current task, switch to idle
+                if (task == scheduler.current_task) {
+                    scheduler.current_task = NULL;  // Will be set to idle below
+                }
+            }
+            task = next;
+        }
+    }
+    
+    // Ensure idle task is running
+    if (!scheduler.current_task) {
+        // Find idle task (PID 0)
+        for (int priority = PRIORITY_REALTIME; priority >= PRIORITY_IDLE; priority--) {
+            TaskStruct* task = scheduler.ready_queue[priority];
+            while (task) {
+                if (task->pid == 0) {
+                    scheduler.current_task = task;
+                    task->state = TASK_STATE_RUNNING;
+                    break;
+                }
+                task = task->next;
+            }
+            if (scheduler.current_task) break;
+        }
     }
 }

@@ -44,10 +44,6 @@ void init_boot_screen(void) {
     // Initialize console first
     console_init();
 
-    // Debug: Write to serial port
-    extern void write_port(unsigned short port, unsigned char data);
-    write_port(0x3F8, 'C');
-
     // Draw the boot screen header
     init_draw_header();
     

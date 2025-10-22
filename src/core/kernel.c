@@ -62,6 +62,7 @@ char temp_buffer[128] = {0};  // Temporary storage for current input when browsi
 /* Function forward declarations */
 void execute_command(const char *command);
 void int_to_str(int num, char *str);
+int parse_number(const char *str);
 int get_tick_count(void);
 int strncmp(const char *str1, const char *str2, size_t n); // Declaration of strncmp
 bool write_file(const char* name, const char* content); // Declaration of write_file
@@ -226,6 +227,46 @@ void strcpy_simple(char *dest, const char *src) {
     dest[i] = '\0';
 }
 
+/* Parse a number from string */
+int parse_number(const char *str) {
+    if (str == NULL || str[0] == '\0') {
+        return -1;  // Invalid input
+    }
+    
+    int result = 0;
+    int i = 0;
+    
+    // Skip leading whitespace
+    while (str[i] == ' ' || str[i] == '\t') {
+        i++;
+    }
+    
+    // Check for negative number
+    bool negative = false;
+    if (str[i] == '-') {
+        negative = true;
+        i++;
+    }
+    
+    // Parse digits
+    while (str[i] >= '0' && str[i] <= '9') {
+        result = result * 10 + (str[i] - '0');
+        i++;
+    }
+    
+    // Skip trailing whitespace
+    while (str[i] == ' ' || str[i] == '\t') {
+        i++;
+    }
+    
+    // If we didn't consume the entire string, it's invalid
+    if (str[i] != '\0') {
+        return -1;  // Invalid format
+    }
+    
+    return negative ? -result : result;
+}
+
 /* Add command to history */
 void add_to_history(const char *command) {
     if (command == NULL || command[0] == '\0') {
@@ -280,7 +321,7 @@ static const char* available_commands[] = {
     "ls", "search", "cp", "listsys", "sysinfo",
     "mem", "mem -map", "mem -use", "mem -stats", "mem -info", "mem -debug",
     "cpu", "cpu -hz", "cpu -info",
-    "tasks", "timer", "syscalls", "debugtask", "killtask",
+    "tasks", "timer", "syscalls",
     "mon", "mon -debug", "mon -list", "mon -kill", "mon -ultramon",
     "dol", "dol -new", "dol -open", "dol -save", "dol -close", "dol -help",
     NULL
@@ -436,12 +477,6 @@ void execute_command(const char *command) {
         console_println(" - Show timer information");
         console_print_color("  syscalls", CONSOLE_PROMPT_COLOR);
         console_println(" - Show system call table");
-
-        console_print_color("  debugtask", CONSOLE_PROMPT_COLOR);
-        console_println(" - Create a debug task for testing context switching");
-
-        console_print_color("  killtask", CONSOLE_PROMPT_COLOR);
-        console_println(" - Kill the test task to regain control");
 
         console_println_color("Task Monitor Commands:", CONSOLE_INFO_COLOR);
         console_print_color("  mon -debug", CONSOLE_PROMPT_COLOR);
@@ -891,53 +926,94 @@ void execute_command(const char *command) {
     } else if (strcmp(command, "syscalls") == 0) {
         extern void syscall_print_table(void);
         syscall_print_table();
-    } else if (strcmp(command, "debugtask") == 0) {
-        // Check if test task already exists
-        extern TaskStruct* scheduler_get_current_task(void);
-        extern void scheduler_print_tasks(void);
+    } else if (strncmp(command, "mon ", 4) == 0) {
+        // Task monitor commands: mon -debug, mon -list, mon -kill, mon -ultramon
+        const char* args = command + 4;
         
-        // Simple check - if we have more than 1 task (idle + test), don't create another
-        extern uint32_t scheduler_get_task_count(void);
-        uint32_t task_count = scheduler_get_task_count();
-        
-        if (task_count > 1) {
-            console_print_error("Test task already running. Use 'killtask' to stop it first.");
-            return;
-        }
-        
-        // Create a simple debug task for testing
-        extern void test_task_function(void);
-        extern TaskStruct* scheduler_create_task(void (*function)(void), void* data, TaskPriority priority);
-        TaskStruct* test_task = scheduler_create_task(test_task_function, NULL, PRIORITY_NORMAL);
-        if (test_task) {
-            console_print_success("Debug task created successfully");
-            char buffer[32];
-            int_to_str(test_task->pid, buffer);
-            console_print_color("Task PID: ", CONSOLE_INFO_COLOR);
-            console_println_color(buffer, CONSOLE_SUCCESS_COLOR);
+        if (strcmp(args, "-debug") == 0) {
+            // Start a debug task
+            extern TaskStruct* scheduler_create_task(void (*function)(void), void* data, TaskPriority priority);
+            extern void debug_task_function(void);
+            extern uint32_t scheduler_get_task_count(void);
             
-            // Debug: Check if test task is in ready queue
-            extern SchedulerState scheduler;
-            if (scheduler.ready_queue[PRIORITY_NORMAL]) {
-                write_port(0x3F8, 'T');  // Debug: Test task in queue
-            } else {
-                write_port(0x3F8, 'Y');  // Debug: Test task NOT in queue!
+            uint32_t task_count = scheduler_get_task_count();
+            if (task_count > 1) {
+                console_print_error("Debug task already running. Use 'mon -kill [pid]' to stop it first.");
+                return;
             }
+            
+            TaskStruct* task = scheduler_create_task(debug_task_function, NULL, PRIORITY_NORMAL);
+            if (task) {
+                console_print_success("Debug task started");
+                console_print_color("PID: ", CONSOLE_INFO_COLOR);
+                char buffer[32];
+                int_to_str(task->pid, buffer);
+                console_println_color(buffer, CONSOLE_FG_COLOR);
+            } else {
+                console_print_error("Failed to create debug task");
+            }
+        } else if (strncmp(args, "-debug ", 7) == 0) {
+            // Start debug task with custom PID
+            const char* pid_str = args + 7;
+            int custom_pid = parse_number(pid_str);
+            
+            if (custom_pid < 0) {
+                console_print_error("Invalid PID. Must be a positive number.");
+                return;
+            }
+            
+            extern TaskStruct* scheduler_create_task_with_pid(void (*function)(void), void* data, TaskPriority priority, uint32_t custom_pid);
+            extern void debug_task_function(void);
+            
+            TaskStruct* task = scheduler_create_task_with_pid(debug_task_function, NULL, PRIORITY_NORMAL, custom_pid);
+            if (task) {
+                console_print_success("Debug task started with custom PID");
+                console_print_color("PID: ", CONSOLE_INFO_COLOR);
+                char buffer[32];
+                int_to_str(task->pid, buffer);
+                console_println_color(buffer, CONSOLE_FG_COLOR);
+            } else {
+                console_print_error("Failed to create debug task with custom PID");
+            }
+        } else if (strcmp(args, "-list") == 0) {
+            // List all running tasks
+            extern void scheduler_print_tasks(void);
+            console_newline();
+            console_println_color("=== TASK LIST ===", CONSOLE_HEADER_COLOR);
+            scheduler_print_tasks();
+        } else if (strncmp(args, "-kill ", 6) == 0) {
+            // Kill specific task by PID
+            const char* pid_str = args + 6;
+            int pid = parse_number(pid_str);
+            
+            if (pid < 0) {
+                console_print_error("Invalid PID. Must be a positive number.");
+                return;
+            }
+            
+            if (pid == 0) {
+                console_print_error("Cannot kill idle task (PID 0)");
+                return;
+            }
+            
+            extern void scheduler_destroy_task(uint32_t pid);
+            scheduler_destroy_task(pid);
+            console_print_success("Task killed");
+        } else if (strcmp(args, "-ultramon") == 0) {
+            // Kill all tasks except idle
+            extern void scheduler_kill_all_except_idle(void);
+            extern void scheduler_print_tasks(void);
+            
+            console_print_warning("Killing all tasks except idle...");
+            scheduler_kill_all_except_idle();
+            console_print_success("All tasks killed except idle");
+            
+            console_newline();
+            console_println_color("Remaining tasks:", CONSOLE_INFO_COLOR);
+            scheduler_print_tasks();
         } else {
-            console_print_error("Failed to create debug task");
+            console_print_error("Unknown mon option. Use: -debug, -debug [pid], -list, -kill [pid], or -ultramon");
         }
-    } else if (strcmp(command, "killtask") == 0) {
-        // Kill the test task (PID 2) - find it first
-        extern void scheduler_destroy_task(uint32_t pid);
-        extern void scheduler_print_tasks(void);
-        
-        // Show current tasks first
-        console_println_color("Current tasks:", CONSOLE_INFO_COLOR);
-        scheduler_print_tasks();
-        
-        // Try to kill PID 2 (test task)
-        scheduler_destroy_task(2);
-        console_print_success("Test task killed");
     } else if (strncmp(command, "cpu ", 4) == 0) {
         // CPU commands: cpu -hz, cpu -info
         if (strcmp(command + 4, "-hz") == 0) {
