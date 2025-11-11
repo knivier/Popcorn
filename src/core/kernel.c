@@ -11,6 +11,7 @@
 #include "../includes/memory.h"
 #include "../includes/init.h"
 #include "../includes/syscall.h"
+#include "../includes/utils.h"
 #include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -47,10 +48,6 @@ extern void write_port(unsigned short port, unsigned char data);
 struct IDT_ptr;
 extern void load_idt(struct IDT_ptr *idt_ptr);
 
-/* Global variables */
-char input_buffer[128] = {0}; // Increased size to accommodate longer input
-unsigned int input_index = 0;
-
 /* Command history */
 #define HISTORY_SIZE 50
 char command_history[HISTORY_SIZE][128];
@@ -60,21 +57,19 @@ char temp_buffer[128] = {0};  // Temporary storage for current input when browsi
 
 /* Function forward declarations */
 void execute_command(const char *command);
-void int_to_str(int num, char *str);
 int parse_number(const char* str, uint32_t* result);
 int get_tick_count(void);
-int strncmp(const char *str1, const char *str2, size_t n); // Declaration of strncmp
-bool write_file(const char* name, const char* content); // Declaration of write_file
-const char* read_file(const char* name); // Declaration of read_file
-bool delete_file(const char* name); // Declaration of delete_file
-void list_files(void); // Declaration of list_files
-void list_files_console(void); // Declaration of list_files_console
-bool create_directory(const char* name); // Declaration of create_directory
-bool change_directory(const char* name); // Declaration of change_directory
-void list_hierarchy(char* vidptr); // Declaration of list_hierarchy
-const char* get_current_directory(void); // Declaration of get_current_directory
-const char* search_file(const char* name); // Declaration of search_file
-bool copy_file(const char* src_name, const char* dest_path); // Declaration of copy_file
+bool write_file(const char* name, const char* content);
+const char* read_file(const char* name);
+bool delete_file(const char* name);
+void list_files(void);
+void list_files_console(void);
+bool create_directory(const char* name);
+bool change_directory(const char* name);
+void list_hierarchy(char* vidptr);
+const char* get_current_directory(void);
+const char* search_file(const char* name);
+bool copy_file(const char* src_name, const char* dest_path);
 
 /* current cursor location */
 unsigned int current_loc = 0;
@@ -195,34 +190,6 @@ void clear_screen(void) {
 
 void printTerm(const char *str, unsigned char color) {
     console_print_color(str, color);
-}
-
-/* Simple implementation of memset because we can't use too many external libraries */
-void *memset(void *s, int c, size_t n) {
-    unsigned char *p = s;
-    while (n--) {
-        *p++ = (unsigned char)c;
-    }
-    return s;
-}
-
-/* Simple strlen implementation */
-size_t strlen_simple(const char *str) {
-    size_t len = 0;
-    while (str[len] != '\0') {
-        len++;
-    }
-    return len;
-}
-
-/* Simple strcpy implementation */
-void strcpy_simple(char *dest, const char *src) {
-    size_t i = 0;
-    while (src[i] != '\0') {
-        dest[i] = src[i];
-        i++;
-    }
-    dest[i] = '\0';
 }
 
 /* Add command to history */
@@ -350,27 +317,6 @@ void keyboard_handler_main(void) {
     
     /* The actual keyboard input is handled in the main loop */
     /* This function just acknowledges the interrupt */
-}
-
-/* Simple implementation of strcmp because we can't use too many external libraries for this source */
-int strcmp(const char *str1, const char *str2) {
-    while (*str1 && (*str1 == *str2)) {
-        str1++;
-        str2++;
-    }
-    return *(unsigned char *)str1 - *(unsigned char *)str2;
-}
-
-/* Simple implementation of strncmp because we can't use too many external libraries for this source */
-int strncmp(const char *str1, const char *str2, size_t n) {
-    size_t i = 0;
-    while (i < n && str1[i] && str2[i] && str1[i] == str2[i]) {
-        i++;
-    }
-    if (i == n) {
-        return 0;
-    }
-    return (unsigned char)str1[i] - (unsigned char)str2[i];
 }
 
 extern const PopModule spinner_module;

@@ -3,6 +3,7 @@
 #include "../includes/timer.h"
 #include "../includes/console.h"
 #include "../includes/memory.h"
+#include "../includes/utils.h"
 #include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -12,10 +13,8 @@ SchedulerState scheduler = {0};
 
 // External functions
 extern uint64_t timer_get_ticks(void);
-extern void* memset(void *s, int c, size_t n);
 extern unsigned char read_port(unsigned short port);
 extern void write_port(unsigned short port, unsigned char data);
-extern void int_to_str(int num, char *str);
 
 // Stack management constants
 #define TASK_STACK_SIZE (16 * 1024)  // 16KB per task stack
@@ -64,8 +63,6 @@ void task_free_stack(void* stack) {
 
 // Initialize the scheduler
 void scheduler_init(void) {
-    serial_print("DEBUG: Initializing scheduler\n");
-
     // Initialize scheduler state
     scheduler.current_task = NULL;
     scheduler.next_pid = 1;
@@ -77,20 +74,17 @@ void scheduler_init(void) {
         scheduler.ready_queue[i] = NULL;
     }
 
-    serial_print("DEBUG: Creating idle task\n");
     // Create idle task
     TaskStruct* idle = scheduler_create_task(idle_task, NULL, PRIORITY_IDLE);
     if (idle) {
         idle->pid = 0;  // Special PID for idle task
         scheduler.current_task = idle;
         scheduler.current_task->state = TASK_STATE_RUNNING;
-        serial_print("DEBUG: Idle task created successfully\n");
     } else {
         serial_print("ERROR: Failed to create idle task\n");
     }
 
     scheduler.scheduler_active = true;
-    serial_print("DEBUG: Scheduler initialization complete\n");
     console_println_color("Scheduler initialized", CONSOLE_SUCCESS_COLOR);
 }
 
@@ -149,8 +143,6 @@ TaskStruct* scheduler_create_task(void (*function)(void), void* data, TaskPriori
         return NULL;
     }
 
-    serial_print("DEBUG: Creating new task\n");
-
     // Allocate task structure (simplified - in real system would use kmalloc)
     static TaskStruct task_pool[32];
     static uint32_t task_pool_index = 0;
@@ -168,7 +160,7 @@ TaskStruct* scheduler_create_task(void (*function)(void), void* data, TaskPriori
     task->pid = scheduler.next_pid++;
     task->start_time = timer_get_ticks();
     task->last_run_time = task->start_time;
-    serial_print("DEBUG: Allocating task stack\n");
+
     // Allocate and set up stack
     task->stack_size = TASK_STACK_SIZE;
     task->stack_base = task_allocate_stack(task->stack_size);
@@ -184,7 +176,6 @@ TaskStruct* scheduler_create_task(void (*function)(void), void* data, TaskPriori
     stack_top_addr = stack_top_addr & ~((uintptr_t)15);
     task->stack_top = (void*)stack_top_addr;
 
-    serial_print("DEBUG: Setting up task context\n");
     // Set up initial context for the task
     setup_task_context(task);
 
@@ -197,7 +188,6 @@ TaskStruct* scheduler_create_task(void (*function)(void), void* data, TaskPriori
     task->prev = NULL;
 
     scheduler.total_tasks++;
-    serial_print("DEBUG: Task created successfully, PID: ");
     return task;
 }
 
@@ -595,8 +585,6 @@ void setup_task_context(TaskStruct* task) {
     // Set up FPU state
     task->context.fpu_control = 0x37F;  // Default FPU control word
     memset(task->context.fpu_state, 0, sizeof(task->context.fpu_state));
-
-    serial_print("DEBUG: Context setup complete for task\n");
 }
 
 // Context switch - now with real CPU register saving/restoring
@@ -626,65 +614,41 @@ void task_switch(TaskStruct* from, TaskStruct* to) {
 void task_exit(void) {
     TaskStruct* current = scheduler_get_current_task();
     if (current) {
-        serial_print("DEBUG: Task exiting\n");
-        
         current->state = TASK_STATE_ZOMBIE;
-            }
+    }
 }
 
 // Idle task - runs when no other tasks are ready
 void idle_task(void) {
-    serial_print("DEBUG: Idle task started\n");
-
     // Very simple idle loop - just increment a counter
     static int counter = 0;
     while (1) {
         counter++;
-            if (counter % 10000000 == 0) {
-            serial_print("DEBUG: Idle task running\n");
-        }
     }
 }
 
 // Test task function to demonstrate context switching
 void test_task_function(void) {
-    serial_print("DEBUG: Test task started\n");
-
     static int counter = 0;
 
     while (1) {
         counter++;
 
-        if (counter % 1000 == 0) {
-            serial_print("DEBUG: Test task running: ");
-            char digit = '0' + (counter / 1000) % 10;
-            serial_putc(digit);
-            serial_putc('\n');
-        }
         if (counter % 10 == 0) {
             scheduler_yield();
         }
 
         for (volatile int i = 0; i < 10; i++);
-        
     }
 }
 
 // Debug task function for mon -debug command
 void debug_task_function(void) {
-    serial_print("DEBUG: Debug task started\n");
-
     static int counter = 0;
 
     while (1) {
         counter++;
 
-        if (counter % 1000 == 0) {
-            serial_print("DEBUG: Debug task running: ");
-            char digit = '0' + (counter / 1000) % 10;
-            serial_putc(digit);
-            serial_putc('\n');
-        }
         if (counter % 10 == 0) {
             scheduler_yield();
         }
@@ -699,8 +663,6 @@ TaskStruct* scheduler_create_task_with_pid(void (*function)(void), void* data, T
         serial_print("ERROR: No function provided for task creation\n");
         return NULL;
     }
-
-    serial_print("DEBUG: Creating new task with custom PID\n");
 
     // Allocate task structure (simplified - in real system would use kmalloc)
     static TaskStruct task_pool[32];
@@ -719,7 +681,7 @@ TaskStruct* scheduler_create_task_with_pid(void (*function)(void), void* data, T
     task->pid = custom_pid;  // Use custom PID
     task->start_time = timer_get_ticks();
     task->last_run_time = task->start_time;
-    serial_print("DEBUG: Allocating task stack\n");
+
     // Allocate and set up stack
     task->stack_size = TASK_STACK_SIZE;
     task->stack_base = task_allocate_stack(task->stack_size);
@@ -735,7 +697,6 @@ TaskStruct* scheduler_create_task_with_pid(void (*function)(void), void* data, T
     stack_top_addr = stack_top_addr & ~((uintptr_t)15);
     task->stack_top = (void*)stack_top_addr;
 
-    serial_print("DEBUG: Setting up task context\n");
     // Set up initial context for the task
     setup_task_context(task);
 
@@ -748,7 +709,6 @@ TaskStruct* scheduler_create_task_with_pid(void (*function)(void), void* data, T
     task->prev = NULL;
 
     scheduler.total_tasks++;
-    serial_print("DEBUG: Task created successfully, PID: ");
     return task;
 }
 

@@ -1,5 +1,11 @@
 #include "../includes/console.h"
 
+// VGA Hardware Cursor Ports
+#define VGA_CTRL_PORT  0x3D4
+#define VGA_DATA_PORT  0x3D5
+#define VGA_CURSOR_LOC_LOW  0x0F
+#define VGA_CURSOR_LOC_HIGH 0x0E
+
 // External console state (defined in core/kernel.c)
 extern ConsoleState console_state;
 static char* vga_memory = (char*)VGA_MEMORY_ADDRESS;
@@ -13,8 +19,6 @@ static ScrollbackBuffer scrollback = {{0}, 0, 0};
 
 // External variables from core/kernel.c
 extern unsigned int current_loc;
-extern char input_buffer[128];
-extern unsigned int input_index;
 
 // External port I/O functions
 extern void write_port(unsigned short port, unsigned char data);
@@ -25,12 +29,12 @@ static void update_hardware_cursor(unsigned int x, unsigned int y) {
     unsigned short position = (y * VGA_WIDTH) + x;
     
     // Cursor location low byte
-    write_port(0x3D4, 0x0F);
-    write_port(0x3D5, (unsigned char)(position & 0xFF));
+    write_port(VGA_CTRL_PORT, VGA_CURSOR_LOC_LOW);
+    write_port(VGA_DATA_PORT, (unsigned char)(position & 0xFF));
     
     // Cursor location high byte
-    write_port(0x3D4, 0x0E);
-    write_port(0x3D5, (unsigned char)((position >> 8) & 0xFF));
+    write_port(VGA_CTRL_PORT, VGA_CURSOR_LOC_HIGH);
+    write_port(VGA_DATA_PORT, (unsigned char)((position >> 8) & 0xFF));
 }
 
 // Initialize the console system

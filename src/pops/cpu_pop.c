@@ -1,6 +1,7 @@
 // src/pops/cpu_pop.c
 #include "../includes/cpu_pop.h"
 #include "../includes/console.h"
+#include "../includes/utils.h"
 #include <stddef.h>
 #include <stdbool.h>
 
@@ -12,9 +13,6 @@ static bool cpu_freq_initialized = false;
 
 // Access console state
 extern ConsoleState console_state;
-
-// External function to convert int to string
-extern void int_to_str(int num, char *str);
 
 // Delay function
 extern void util_delay(unsigned int milliseconds);

@@ -2,6 +2,7 @@
 #include "../includes/memory_pop.h"
 #include "../includes/console.h"
 #include "../includes/multiboot2.h"
+#include "../includes/utils.h"
 #include <stddef.h>
 #include <stdbool.h>
 
@@ -14,9 +15,6 @@ extern ConsoleState console_state;
 
 // External multiboot2 pointer
 extern uint64_t multiboot2_info_ptr;
-
-// External function to convert int to string
-extern void int_to_str(int num, char *str);
 
 // Memory type to string
 static const char* memory_type_to_string(uint32_t type) {

@@ -11,9 +11,9 @@
 #include "../includes/dolphin_pop.h"
 #include "../includes/spinner_pop.h"
 #include "../includes/syscall.h"
+#include "../includes/utils.h"
 #include <stddef.h>
 
-extern void int_to_str(int num, char *str);
 extern void multiboot2_parse(void);
 extern void idt_init(void);
 extern void kb_init(void);

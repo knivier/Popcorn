@@ -1,6 +1,7 @@
 #include "../includes/pop_module.h"
 #include "../includes/console.h"
 #include "../includes/error_codes.h"
+#include "../includes/utils.h"
 #include <stdbool.h>
 #include <stddef.h> // Include for NULL
 
@@ -268,9 +269,6 @@ int strrncmp(const char* str1, const char* str2, size_t num) {
     }
     return 0;
 }
-
-// Forward declaration of external int_to_str from uptime_pop.c
-extern void int_to_str(int value, char* buffer);
 
 // Function to list all files in the current directory
 void list_files_console(void) {

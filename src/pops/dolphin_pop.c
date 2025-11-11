@@ -1,6 +1,7 @@
 // src/pops/dolphin_pop.c - Dolphin Text Editor
 #include "../includes/dolphin_pop.h"
 #include "../includes/console.h"
+#include "../includes/utils.h"
 #include <stddef.h>
 #include <stdbool.h>
 
@@ -213,7 +214,6 @@ void dolphin_save(void) {
         console_print_color(editor.filename, CONSOLE_FG_COLOR);
         console_print(" (");
         char buf[16];
-        extern void int_to_str(int num, char *str);
         int_to_str(pos, buf);
         console_print(buf);
         console_print(" bytes)");
@@ -401,7 +401,6 @@ void dolphin_render(void) {
             
             // Show line number
             char buf[8];
-            extern void int_to_str(int num, char *str);
             int_to_str(line_num + 1, buf);
             console_print_color(buf, CONSOLE_INFO_COLOR);
             console_print(": ");
@@ -430,7 +429,6 @@ void dolphin_render(void) {
     console_set_cursor(0, 24);
     console_print_color("Line ", CONSOLE_INFO_COLOR);
     char buf[16];
-    extern void int_to_str(int num, char *str);
     int_to_str(editor.cursor_line + 1, buf);
     console_print_color(buf, CONSOLE_SUCCESS_COLOR);
     console_print("/");

@@ -1,28 +1,11 @@
 #include "../includes/pop_module.h"
 #include "../includes/console.h"
 #include "../includes/timer.h"
+#include "../includes/utils.h"
 
 // External timer functions
 extern uint64_t timer_get_ticks(void);
 extern uint64_t timer_get_uptime_ms(void);
-
-void int_to_str(int value, char* buffer) {
-    char temp[10];
-    int i = 0, j = 0;
-
-    if (value == 0) {
-        buffer[i++] = '0';
-    } else {
-        while (value > 0) {
-            temp[j++] = (value % 10) + '0';
-            value /= 10;
-        }
-        while (j > 0) {
-            buffer[i++] = temp[--j];
-        }
-    }
-    buffer[i] = '\0';
-}
 
 // Access console state to save/restore cursor
 extern ConsoleState console_state;

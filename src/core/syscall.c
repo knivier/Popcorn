@@ -4,6 +4,7 @@
 #include "../includes/memory.h"
 #include "../includes/scheduler.h"
 #include "../includes/timer.h"
+#include "../includes/utils.h"
 #include <stddef.h>
 
 // Global system call table
@@ -88,7 +89,6 @@ int64_t syscall_dispatch(syscall_context_t* ctx) {
     // Unknown system call
     console_print_color("ERROR: Unknown system call: ", CONSOLE_ERROR_COLOR);
     char buffer[16];
-    extern void int_to_str(int num, char *str);
     int_to_str(syscall_num, buffer);
     console_println_color(buffer, CONSOLE_ERROR_COLOR);
     return SYSCALL_EINVAL;
@@ -121,7 +121,6 @@ void syscall_print_table(void) {
     
     for (uint32_t i = 0; i < syscall_count; i++) {
         char buffer[32];
-        extern void int_to_str(int num, char *str);
         
         console_print_color("0x", CONSOLE_INFO_COLOR);
         int_to_str(syscall_table[i].syscall_num, buffer);
@@ -146,7 +145,6 @@ int64_t sys_exit(syscall_context_t* ctx) {
     int exit_code = (int)ctx->rdi;
     console_print_color("Process exit with code: ", CONSOLE_INFO_COLOR);
     char buffer[16];
-    extern void int_to_str(int num, char *str);
     int_to_str(exit_code, buffer);
     console_println_color(buffer, CONSOLE_INFO_COLOR);
     return SYSCALL_SUCCESS;
@@ -207,7 +205,6 @@ int64_t sys_close(syscall_context_t* ctx) {
     int fd = (int)ctx->rdi;
     console_print_color("Closing file descriptor: ", CONSOLE_INFO_COLOR);
     char buffer[16];
-    extern void int_to_str(int num, char *str);
     int_to_str(fd, buffer);
     console_println_color(buffer, CONSOLE_INFO_COLOR);
     return SYSCALL_SUCCESS;
@@ -223,7 +220,6 @@ int64_t sys_seek(syscall_context_t* ctx) {
     
     console_print_color("Seeking in fd ", CONSOLE_INFO_COLOR);
     char buffer[16];
-    extern void int_to_str(int num, char *str);
     int_to_str(fd, buffer);
     console_print_color(buffer, CONSOLE_INFO_COLOR);
     console_println_color("", CONSOLE_FG_COLOR);
@@ -293,7 +289,6 @@ int64_t sys_sleep(syscall_context_t* ctx) {
     uint32_t ms = (uint32_t)ctx->rdi;
     console_print_color("Sleep for ", CONSOLE_INFO_COLOR);
     char buffer[16];
-    extern void int_to_str(int num, char *str);
     int_to_str(ms, buffer);
     console_print_color(buffer, CONSOLE_INFO_COLOR);
     console_println_color(" ms", CONSOLE_INFO_COLOR);

@@ -2,6 +2,7 @@
 #include "../includes/memory.h"
 #include "../includes/console.h"
 #include "../includes/multiboot2.h"
+#include "../includes/utils.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -9,18 +10,8 @@
 extern uint64_t multiboot2_info_ptr;
 
 // External functions
-extern void int_to_str(int num, char *str);
 extern ConsoleState console_state;
 extern void console_draw_separator(unsigned int y, unsigned char color);
-
-// Simple strlen implementation
-static size_t strlen_simple(const char *str) {
-    size_t len = 0;
-    while (str[len] != '\0') {
-        len++;
-    }
-    return len;
-}
 
 // Format memory size in human-readable form
 static void format_memory_size(uint64_t bytes, char* buffer, size_t buffer_size) {

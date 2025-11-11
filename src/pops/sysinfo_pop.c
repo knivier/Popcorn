@@ -2,6 +2,7 @@
 #include "../includes/sysinfo_pop.h"
 #include "../includes/console.h"
 #include "../includes/multiboot2.h"
+#include "../includes/utils.h"
 #include <stdbool.h>
 #include <stddef.h>
 
@@ -11,9 +12,6 @@ static bool cpu_info_initialized = false;
 
 // Access console state to save/restore cursor
 extern ConsoleState console_state;
-
-// External function to convert int to string
-extern void int_to_str(int num, char *str);
 
 // External keyboard functions
 extern char read_port(unsigned short port);

@@ -58,7 +58,7 @@ Features:
 
 2. Select "build kernel". This will automatically erase and build the kernel for you. If you have missing dependencies, the build should tell you. You will need NASM, GCC, LD, QEMU (x86_64 version), and GRUB tools. If you have build errors, it will not show the specific errors; use trymake.sh to have a non-fancy version of the building system
 
-**Note:** Direct kernel loading with `-kernel` may not work with all QEMU versions for 64-bit multiboot kernels. The ISO method is rhighly ecommended.
+**Note:** Direct kernel loading with `-kernel` may not work with all QEMU versions for 64-bit multiboot kernels. The ISO method is highly recommended.
 
 **Required tools for 64-bit build:**
 
