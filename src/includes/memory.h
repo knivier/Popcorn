@@ -50,6 +50,9 @@ void kfree(void* ptr);
 void* krealloc(void* ptr, size_t size);
 void* kcalloc(size_t count, size_t size);
 
+// Allocation validation
+bool is_valid_allocation(void* ptr);
+
 // Page management
 void* alloc_pages(size_t num_pages, uint32_t flags);
 void free_pages(void* ptr, size_t num_pages);

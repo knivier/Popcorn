@@ -344,7 +344,17 @@ int64_t sys_free(syscall_context_t* ctx) {
     void* ptr = (void*)ctx->rdi;
     
     // kfree handles NULL pointers, so we allow it
-    // In real kernel, would verify ptr was actually allocated by this process
+    if (!ptr) {
+        return SYSCALL_SUCCESS;
+    }
+    
+    // Validate that this pointer was actually allocated
+    if (!is_valid_allocation(ptr)) {
+        // Invalid pointer - not allocated or already freed
+        // This prevents freeing arbitrary memory addresses
+        return SYSCALL_EINVAL;
+    }
+    
     kfree(ptr);
     return SYSCALL_SUCCESS;
 }

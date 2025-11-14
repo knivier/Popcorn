@@ -176,29 +176,67 @@ void* kmalloc(size_t size, uint32_t flags) {
     return ptr;
 }
 
+// Find the memory block for a given pointer
+static mem_block* find_block_for_ptr(void* ptr) {
+    if (!ptr) {
+        return NULL;
+    }
+    
+    // Search through all allocated blocks to find the one matching this pointer
+    for (uint32_t i = 0; i < memory_block_index; i++) {
+        mem_block* block = &memory_blocks[i];
+        if (block->base == ptr && !block->is_free) {
+            return block;
+        }
+    }
+    
+    return NULL;
+}
+
 // Free memory
 void kfree(void* ptr) {
     if (!ptr) {
         return;
     }
     
-    // Find which pool this pointer belongs to and free it
-    // This is simplified - in a real system would track allocations properly
+    // Find the block for this pointer
+    mem_block* block = find_block_for_ptr(ptr);
     
-    // For now, just mark as free in normal pool
-    mem_block* block = (mem_block*)ptr - 1;  // Assuming block header
-    if (block->is_free) {
-        return;  // Already freed
+    if (!block) {
+        // Pointer not found in allocated blocks - invalid pointer!
+        // In a real kernel, this would be a security violation
+        // For now, silently ignore (could log error in production)
+        return;
     }
     
+    if (block->is_free) {
+        // Double-free detected - security issue
+        return;
+    }
+    
+    // Mark as free
     block->is_free = true;
+    
+    // Update pool statistics (find which pool this belongs to)
+    // For simplicity, assume normal pool
     normal_pool.free_size += block->size;
     normal_pool.allocated_size -= block->size;
     normal_pool.free_blocks++;
     normal_pool.total_blocks--;
     
+    // Update global statistics
     mem_stats.free_bytes += block->size;
     mem_stats.used_bytes -= block->size;
+}
+
+// Check if a pointer is a valid allocation
+bool is_valid_allocation(void* ptr) {
+    if (!ptr) {
+        return false;
+    }
+    
+    mem_block* block = find_block_for_ptr(ptr);
+    return (block != NULL && !block->is_free);
 }
 
 // Reallocate memory
