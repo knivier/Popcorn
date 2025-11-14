@@ -227,7 +227,7 @@ const char* get_history_command(int offset) {
     if (history_count == 0 || offset < 0 || offset >= (int)history_count) {
         return NULL;
     }
-        unsigned int index;
+    unsigned int index;
     if (history_count <= HISTORY_SIZE) {
         index = offset;
     } else {
@@ -525,7 +525,7 @@ void execute_command(const char *command) {
             i++;
         }
         filename[i] = '\0';
-            if (i == 0) {
+        if (i == 0) {
             console_print_error("Filename cannot be empty");
             return;
         }

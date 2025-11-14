@@ -174,6 +174,16 @@ int64_t sys_write(syscall_context_t* ctx) {
     const void* buf = (const void*)ctx->rsi;
     size_t count = (size_t)ctx->rdx;
     
+    // Validate buffer pointer (basic check - in real kernel would check user space)
+    if (!buf) {
+        return SYSCALL_EINVAL;
+    }
+    
+    // Limit maximum write size to prevent DoS
+    if (count > 4096) {
+        return SYSCALL_EINVAL;
+    }
+    
     // Simplified: write to console for now
     if (fd == 1 || fd == 2) { // stdout or stderr
         const char* str = (const char*)buf;
@@ -315,6 +325,12 @@ int64_t sys_wait(syscall_context_t* ctx) {
 
 int64_t sys_malloc(syscall_context_t* ctx) {
     size_t size = (size_t)ctx->rdi;
+    
+    // Validate size: prevent zero-size allocation and check for overflow
+    if (size == 0 || size > (1024 * 1024 * 1024)) {  // Max 1GB
+        return SYSCALL_EINVAL;
+    }
+    
     void* ptr = kmalloc(size, MEM_ALLOC_NORMAL);
     
     if (ptr) {
@@ -326,6 +342,9 @@ int64_t sys_malloc(syscall_context_t* ctx) {
 
 int64_t sys_free(syscall_context_t* ctx) {
     void* ptr = (void*)ctx->rdi;
+    
+    // kfree handles NULL pointers, so we allow it
+    // In real kernel, would verify ptr was actually allocated by this process
     kfree(ptr);
     return SYSCALL_SUCCESS;
 }
@@ -357,6 +376,11 @@ int64_t sys_mmap(syscall_context_t* ctx) {
         return SYSCALL_EINVAL;
     }
     
+    // Validate length to prevent integer overflow and DoS
+    if (length > (1024 * 1024 * 1024)) {  // Max 1GB
+        return SYSCALL_EINVAL;
+    }
+    
     // Allocate memory using our memory manager
     void* mapped_addr = kmalloc(length, MEM_ALLOC_NORMAL);
     
@@ -365,7 +389,6 @@ int64_t sys_mmap(syscall_context_t* ctx) {
     }
     
     // Zero the allocated memory
-    extern void memory_zero(void* ptr, size_t size);
     memory_zero(mapped_addr, length);
     
     console_print_color("Mmap: Mapped ", CONSOLE_INFO_COLOR);
@@ -429,11 +452,17 @@ int64_t sys_getcwd(syscall_context_t* ctx) {
     char* buf = (char*)ctx->rdi;
     size_t size = (size_t)ctx->rsi;
     
+    // Validate buffer pointer
+    if (!buf) {
+        return SYSCALL_EINVAL;
+    }
+    
     // Simplified: return current directory
     const char* cwd = "/";
-    size_t len = 1;
+    size_t len = 1;  // Length of "/" without null terminator
     
-    if (len >= size) {
+    // Need space for string plus null terminator
+    if (len + 1 > size) {
         return SYSCALL_EINVAL;
     }
     
@@ -495,7 +524,6 @@ int64_t sys_stat(syscall_context_t* ctx) {
     statbuf->st_blocks = (file_size + 511) / 512; // Convert to 512-byte blocks
     
     // Set timestamps (simplified - use current time)
-    extern uint64_t timer_get_uptime_ms(void);
     uint64_t current_time = timer_get_uptime_ms();
     statbuf->st_atime = current_time;
     statbuf->st_mtime = current_time;
@@ -532,7 +560,8 @@ int64_t sys_ioctl(syscall_context_t* ctx) {
                 
             case 0x540B: // TIOCGWINSZ - Get window size
                 if (argp) {
-                    // Fill in window size structure (simplified)
+                    // Validate pointer before writing (basic check)
+                    // In real kernel, would verify argp is in user space
                     uint16_t* winsize = (uint16_t*)argp;
                     winsize[0] = 80;  // rows
                     winsize[1] = 25;  // cols

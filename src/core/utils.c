@@ -24,8 +24,13 @@ size_t strlen_simple(const char *str) {
     return len;
 }
 
-// Simple strcpy implementation
+// Simple strcpy implementation with bounds checking
+// Note: This is safer but still requires caller to ensure dest buffer is large enough
 void strcpy_simple(char *dest, const char *src) {
+    if (!dest || !src) {
+        return;  // Safety check
+    }
+    
     size_t i = 0;
     while (src[i] != '\0') {
         dest[i] = src[i];

@@ -4,8 +4,6 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-
-// Timer configuration
 #define PIT_FREQUENCY 1193182  // Base frequency in Hz
 #define TIMER_FREQUENCY 100    // Desired timer frequency (100Hz = 10ms intervals)
 #define TIMER_INTERRUPT_VECTOR 0x20  // IRQ 0
@@ -16,9 +14,8 @@ typedef struct {
     uint64_t frequency;
     bool is_active;
     void (*tick_handler)(void);
-} TimerState;
 
-// Global timer state
+} TimerState;
 extern TimerState global_timer;
 
 // Function declarations
