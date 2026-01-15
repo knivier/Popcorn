@@ -104,17 +104,17 @@ class ModernPopcornBuilder:
         title_container.pack(expand=True)
         
         self.title_label = tk.Label(title_container, 
-                                   text="🍿 Popcorn Kernel Builder",
-                                   font=("SF Pro Display", 28, "bold"),
-                                   bg=self.colors['surface'],
-                                   fg=self.colors['text'])
+                       text="🍿 Popcorn Kernel Builder",
+                       font=("Arial", 28, "bold"),
+                       bg=self.colors['surface'],
+                       fg=self.colors['text'])
         self.title_label.pack(pady=(10, 5))
         
         self.subtitle_label = tk.Label(title_container,
-                                      text="x86-64 Long Mode Edition",
-                                      font=("SF Pro Display", 12),
-                                      bg=self.colors['surface'],
-                                      fg=self.colors['text_secondary'])
+                          text="x86-64 Long Mode Edition",
+                          font=("Arial", 12),
+                          bg=self.colors['surface'],
+                          fg=self.colors['text_secondary'])
         self.subtitle_label.pack()
         
         # Status indicator
@@ -128,9 +128,9 @@ class ModernPopcornBuilder:
         self.status_indicator.pack(side=tk.LEFT)
         
         self.status_label = tk.Label(self.status_frame, text="Ready",
-                                   font=("SF Pro Display", 10),
-                                   bg=self.colors['surface'],
-                                   fg=self.colors['text_secondary'])
+                       font=("Arial", 10),
+                       bg=self.colors['surface'],
+                       fg=self.colors['text_secondary'])
         self.status_label.pack(side=tk.LEFT, padx=(5, 0))
     
     def create_control_panel(self, parent):
@@ -149,9 +149,9 @@ class ModernPopcornBuilder:
         self.auto_btn.pack(fill=tk.X, pady=10)
         
         tk.Label(auto_frame, text="One-click: Clean → Build → ISO → Run",
-                font=("SF Pro Display", 9),
-                bg=self.colors['surface'],
-                fg=self.colors['text_secondary']).pack()
+            font=("Arial", 9),
+            bg=self.colors['surface'],
+            fg=self.colors['text_secondary']).pack()
         
         # Manual section
         manual_frame = self.create_card(parent, "🔧 Manual Mode")
@@ -303,9 +303,9 @@ class ModernPopcornBuilder:
         header.pack(fill=tk.X, padx=15, pady=(15, 10))
         
         title_label = tk.Label(header, text=title,
-                              font=("SF Pro Display", 12, "bold"),
-                              bg=self.colors['surface'],
-                              fg=self.colors['text'])
+                      font=("Arial", 12, "bold"),
+                      bg=self.colors['surface'],
+                      fg=self.colors['text'])
         title_label.pack(anchor=tk.W)
         
         # Card content
@@ -318,17 +318,17 @@ class ModernPopcornBuilder:
                             width=None, height=None, state=tk.NORMAL):
         """Create a modern animated button"""
         btn = tk.Button(parent,
-                       text=text,
-                       command=command,
-                       bg=bg_color,
-                       fg=self.colors['text'],
-                       font=("SF Pro Display", 10, "bold"),
-                       relief=tk.FLAT,
-                       borderwidth=0,
-                       cursor="hand2",
-                       state=state,
-                       width=width,
-                       height=height)
+                   text=text,
+                   command=command,
+                   bg=bg_color,
+                   fg=self.colors['text'],
+                   font=("Arial", 10, "bold"),
+                   relief=tk.FLAT,
+                   borderwidth=0,
+                   cursor="hand2",
+                   state=state,
+                   width=width,
+                   height=height)
         
         # Add hover effects
         def on_enter(e):
@@ -363,7 +363,7 @@ class ModernPopcornBuilder:
             
             # Apply scaling by adjusting font size
             font_size = int(10 * new_scale)
-            widget.config(font=("SF Pro Display", font_size, "bold"))
+            widget.config(font=("Arial", font_size, "bold"))
             
             widget._current_scale = new_scale
             widget._animation_id = self.root.after(16, animate)  # ~60fps
@@ -403,17 +403,42 @@ class ModernPopcornBuilder:
     
     def animate_status_indicator(self, color, text):
         """Animate status indicator"""
-        def pulse():
-            for i in range(3):
-                self.status_indicator.config(fg=color)
-                self.root.update()
-                time.sleep(0.1)
+        # Use Tk's `after` to modify widgets on the main thread instead
+        pulses = 3
+
+        def do_pulse(count):
+            if count <= 0:
+                # restore neutral color after pulses
                 self.status_indicator.config(fg=self.colors['text_secondary'])
-                self.root.update()
-                time.sleep(0.1)
-        
-        threading.Thread(target=pulse, daemon=True).start()
-        self.status_label.config(text=text, fg=color)
+                return
+
+            # set to active color
+            self.status_indicator.config(fg=color)
+
+            # schedule revert to secondary color after 100ms, then continue pulses
+            def revert_and_continue():
+                self.status_indicator.config(fg=self.colors['text_secondary'])
+                # schedule next pulse after another 100ms
+                self.root.after(100, lambda: do_pulse(count - 1))
+
+            self.root.after(100, revert_and_continue)
+
+        # Ensure the status label update is done on the main thread
+        self.root.after(0, lambda: self.status_label.config(text=text, fg=color))
+        # start pulsing on the main thread
+        self.root.after(0, lambda: do_pulse(pulses))
+
+    def call_on_main(self, func, *args, **kwargs):
+        """Schedule `func` to run on the Tk main thread."""
+        try:
+            self.root.after(0, lambda: func(*args, **kwargs))
+        except Exception:
+            # In case root isn't available, call directly as fallback
+            try:
+                func(*args, **kwargs)
+            except Exception:
+                pass
+
     
     def check_dependencies(self):
         """Check for required build tools"""
@@ -437,22 +462,35 @@ class ModernPopcornBuilder:
             msg += "\n\n💡 Install with:\nsudo dnf install nasm gcc qemu-system-x86 grub2-tools-extra grub2-pc-modules xorriso mtools"
             self.log(msg, "ERROR")
             self.animate_status_indicator(self.colors['error'], "Missing dependencies")
-            messagebox.showwarning("Missing Dependencies", msg)
+            # showwarning runs on main thread (this function is called during init on main)
+            # Schedule the dialog to appear after mainloop starts to avoid
+            # Tcl errors when called too early (some platforms require an
+            # active event loop before grab can be used).
+            try:
+                self.root.after(500, lambda: messagebox.showwarning("Missing Dependencies", msg))
+            except Exception:
+                # Fallback to printing if scheduling fails
+                print(msg)
         else:
             self.log("✅ All dependencies found", "SUCCESS")
             self.animate_status_indicator(self.colors['success'], "Ready")
     
     def log(self, message, level="INFO"):
         """Add message to log with color coding"""
-        timestamp = subprocess.run(['date', '+%H:%M:%S'], 
-                                  capture_output=True, text=True).stdout.strip()
-        
-        self.log_text.insert(tk.END, f"[{timestamp}] ", "timestamp")
-        self.log_text.insert(tk.END, f"[{level}] ", level)
-        self.log_text.insert(tk.END, f"{message}\n")
-        
-        self.log_text.see(tk.END)
-        self.root.update()
+        timestamp = subprocess.run(['date', '+%H:%M:%S'], capture_output=True, text=True).stdout.strip()
+
+        def _append():
+            try:
+                self.log_text.insert(tk.END, f"[{timestamp}] ", "timestamp")
+                self.log_text.insert(tk.END, f"[{level}] ", level)
+                self.log_text.insert(tk.END, f"{message}\n")
+                self.log_text.see(tk.END)
+            except Exception:
+                # If GUI is not available or destroyed, ignore
+                pass
+
+        # Always schedule append on the main thread to avoid Tk race conditions
+        self.call_on_main(_append)
     
     def clear_logs(self):
         """Clear log output"""
@@ -481,40 +519,52 @@ class ModernPopcornBuilder:
         settings_window.grab_set()
         
         tk.Label(settings_window, text="⚙️ Build Settings",
-                font=("SF Pro Display", 16, "bold"),
-                bg=self.colors['surface'],
-                fg=self.colors['text']).pack(pady=20)
+            font=("Arial", 16, "bold"),
+            bg=self.colors['surface'],
+            fg=self.colors['text']).pack(pady=20)
         
         tk.Label(settings_window, text="Settings panel coming soon!",
-                font=("SF Pro Display", 12),
-                bg=self.colors['surface'],
-                fg=self.colors['text_secondary']).pack(pady=50)
+            font=("Arial", 12),
+            bg=self.colors['surface'],
+            fg=self.colors['text_secondary']).pack(pady=50)
         
         tk.Button(settings_window, text="Close",
-                command=settings_window.destroy,
-                bg=self.colors['primary'],
-                fg=self.colors['text'],
-                font=("SF Pro Display", 10, "bold"),
-                relief=tk.FLAT,
-                borderwidth=0,
-                cursor="hand2",
-                width=10).pack(pady=20)
+            command=settings_window.destroy,
+            bg=self.colors['primary'],
+            fg=self.colors['text'],
+            font=("Arial", 10, "bold"),
+            relief=tk.FLAT,
+            borderwidth=0,
+            cursor="hand2",
+            width=10).pack(pady=20)
     
     def disable_buttons(self):
         """Disable build buttons during operation"""
-        self.build_running = True
-        self.build_verbose_btn.config(state=tk.DISABLED)
-        self.build_iso_btn.config(state=tk.DISABLED)
-        self.run_qemu_btn.config(state=tk.DISABLED)
-        self.progress.start()
+        def _do_disable():
+            self.build_running = True
+            try:
+                self.build_verbose_btn.config(state=tk.DISABLED)
+                self.build_iso_btn.config(state=tk.DISABLED)
+                self.run_qemu_btn.config(state=tk.DISABLED)
+                self.progress.start()
+            except Exception:
+                pass
+
+        self.call_on_main(_do_disable)
     
     def enable_buttons(self):
         """Enable build buttons after operation"""
-        self.build_running = False
-        self.build_verbose_btn.config(state=tk.NORMAL)
-        self.build_iso_btn.config(state=tk.NORMAL)
-        self.run_qemu_btn.config(state=tk.NORMAL)
-        self.progress.stop()
+        def _do_enable():
+            self.build_running = False
+            try:
+                self.build_verbose_btn.config(state=tk.NORMAL)
+                self.build_iso_btn.config(state=tk.NORMAL)
+                self.run_qemu_btn.config(state=tk.NORMAL)
+                self.progress.stop()
+            except Exception:
+                pass
+
+        self.call_on_main(_do_enable)
     
     def run_command(self, cmd, verbose=False, log_file=None):
         """Run a shell command and capture output"""
@@ -645,14 +695,15 @@ class ModernPopcornBuilder:
                 self.log("🎉 BUILD SUCCESSFUL!", "SUCCESS")
                 self.log("=" * 60)
                 self.animate_status_indicator(self.colors['success'], "Build successful!")
-                messagebox.showinfo("Success", "✅ Kernel built successfully!\n\nNext: Build ISO or run in QEMU")
+                # Show dialog on main thread
+                self.call_on_main(messagebox.showinfo, "Success", "✅ Kernel built successfully!\n\nNext: Build ISO or run in QEMU")
             else:
                 self.log("=" * 60)
                 self.log("💥 BUILD FAILED - Check error log", "ERROR")
                 self.log("=" * 60)
                 self.animate_status_indicator(self.colors['error'], "Build failed")
-                messagebox.showerror("Build Failed", 
-                    f"❌ Build failed. Check the output above.\nErrors saved to: {error_log}")
+                self.call_on_main(messagebox.showerror, "Build Failed",
+                                  f"❌ Build failed. Check the output above.\nErrors saved to: {error_log}")
             
             self.enable_buttons()
         
@@ -718,15 +769,15 @@ class ModernPopcornBuilder:
                 if iso_success:
                     self.log("✅ ISO created: popcorn.iso", "SUCCESS")
                     self.animate_status_indicator(self.colors['success'], "Build complete!")
-                    messagebox.showinfo("Success", 
-                        "🎉 Kernel and ISO created successfully!\n\n📀 popcorn.iso is ready to boot.")
+                    self.call_on_main(messagebox.showinfo, "Success",
+                                      "🎉 Kernel and ISO created successfully!\n\n📀 popcorn.iso is ready to boot.")
                 else:
                     self.log("❌ ISO creation failed", "ERROR")
                     self.animate_status_indicator(self.colors['error'], "ISO creation failed")
             else:
                 self.log("❌ Build failed", "ERROR")
                 self.animate_status_indicator(self.colors['error'], "Build failed")
-                messagebox.showerror("Build Failed", "❌ Build failed. Check the output above.")
+                self.call_on_main(messagebox.showerror, "Build Failed", "❌ Build failed. Check the output above.")
             
             self.enable_buttons()
         
@@ -735,13 +786,14 @@ class ModernPopcornBuilder:
     def run_qemu(self):
         """Run the ISO in QEMU"""
         if not Path('popcorn.iso').exists():
-            messagebox.showerror("ISO Not Found", 
-                "❌ popcorn.iso not found!\n\nPlease build the kernel and create ISO first.")
+            self.call_on_main(messagebox.showerror, "ISO Not Found",
+                              "❌ popcorn.iso not found!\n\nPlease build the kernel and create ISO first.")
             return
         
         def run():
             self.disable_buttons()
-            self.stop_qemu_btn.config(state=tk.NORMAL)
+            # ensure button state changes happen on main thread
+            self.call_on_main(lambda: self.stop_qemu_btn.config(state=tk.NORMAL))
             self.animate_status_indicator(self.colors['warning'], "Running QEMU...")
             self.log("🚀 Starting QEMU with popcorn.iso...")
             self.log("💡 Press Ctrl+C in terminal or click 'Stop QEMU' to exit")
@@ -764,7 +816,7 @@ class ModernPopcornBuilder:
             
             finally:
                 self.qemu_process = None
-                self.stop_qemu_btn.config(state=tk.DISABLED)
+                self.call_on_main(lambda: self.stop_qemu_btn.config(state=tk.DISABLED))
                 self.animate_status_indicator(self.colors['success'], "Ready")
                 self.enable_buttons()
         
@@ -808,7 +860,7 @@ class ModernPopcornBuilder:
             if not success:
                 self.log("❌ Automation failed at build step", "ERROR")
                 self.enable_buttons()
-                messagebox.showerror("Automation Failed", "❌ Build failed. Check logs.")
+                self.call_on_main(messagebox.showerror, "Automation Failed", "❌ Build failed. Check logs.")
                 return
             
             self.log("✅ Build successful", "SUCCESS")
@@ -835,7 +887,7 @@ class ModernPopcornBuilder:
             if not iso_success:
                 self.log("❌ Automation failed at ISO creation", "ERROR")
                 self.enable_buttons()
-                messagebox.showerror("Automation Failed", "❌ ISO creation failed. Check logs.")
+                self.call_on_main(messagebox.showerror, "Automation Failed", "❌ ISO creation failed. Check logs.")
                 return
             
             self.log("✅ ISO created", "SUCCESS")
