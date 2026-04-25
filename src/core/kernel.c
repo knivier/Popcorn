@@ -12,6 +12,7 @@
 #include "../includes/init.h"
 #include "../includes/syscall.h"
 #include "../includes/utils.h"
+#include "../includes/keyboard_queue.h"
 #include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -37,6 +38,8 @@
 #define PAGE_UP_CODE 0x49
 #define PAGE_DOWN_CODE 0x51
 #define TAB_KEY_CODE 0x0F
+/* PS/2 set 1: next scancode is extended (e.g. arrow keys = E0 48) */
+#define KEYBOARD_EXT_PREFIX 0xE0
 
 extern unsigned char keyboard_map[128];
 extern void keyboard_handler(void);
@@ -97,6 +100,48 @@ struct IDT_ptr {
     unsigned short limit;
     unsigned long base;
 } __attribute__((packed));
+
+/*
+ * PS/2 scancode queue: IRQ1 pushes; kmain / halt / Dolphin pop (SPSC).
+ *
+ * Invariant: any loop that does { pop; else scheduler_yield() } needs the PIT
+ * (IRQ0) enabled, or that yield may never be preempted. init_transition_to_console()
+ * calls timer_enable() before init_boot_screen() returns, so kmain is safe. Do not
+ * re-enter a queue+yield wait before the timer is active.
+ *
+ * If IF is held clear for a long time (e.g. cli in context switch), keyboard IRQs
+ * are only delayed; latency can spike. Keep those windows short.
+ */
+#define KEY_QUEUE_CAP 256
+static volatile unsigned char key_queue[KEY_QUEUE_CAP];
+static volatile uint32_t key_queue_head;
+static volatile uint32_t key_queue_tail;
+
+static void key_queue_push(unsigned char scancode)
+{
+    uint32_t tail = key_queue_tail;
+    uint32_t next = (tail + 1U) % KEY_QUEUE_CAP;
+    uint32_t head = key_queue_head;
+    if (next == head) {
+        return; /* full: drop */
+    }
+    key_queue[tail] = scancode;
+    key_queue_tail = next;
+}
+
+bool key_queue_pop(uint8_t* out)
+{
+    if (!out) {
+        return false;
+    }
+    uint32_t head = key_queue_head;
+    if (head == key_queue_tail) {
+        return false;
+    }
+    *out = key_queue[head];
+    key_queue_head = (head + 1U) % KEY_QUEUE_CAP;
+    return true;
+}
 
 void idt_init(void)
 {
@@ -312,11 +357,13 @@ void autocomplete_command(char *buffer, unsigned int *index) {
 }
 
 void keyboard_handler_main(void) {
-    /* write EOI - End of Interrupt */
+    unsigned char status = read_port(KEYBOARD_STATUS_PORT);
+    if (status & 0x01) {
+        unsigned char keycode = read_port(KEYBOARD_DATA_PORT);
+        key_queue_push(keycode);
+    }
+    /* Master PIC: End of interrupt */
     write_port(0x20, 0x20);
-    
-    /* The actual keyboard input is handled in the main loop */
-    /* This function just acknowledges the interrupt */
 }
 
 extern const PopModule spinner_module;
@@ -450,9 +497,8 @@ void execute_command(const char *command) {
     } else if (strcmp(command, "halt") == 0) {
         console_print_warning("System halted. Press Enter to continue...");
         while (1) {
-            unsigned char status = read_port(KEYBOARD_STATUS_PORT);
-            if (status & 0x01) {
-                char keycode = read_port(KEYBOARD_DATA_PORT);
+            unsigned char keycode;
+            if (key_queue_pop(&keycode)) {
                 if (keycode == ENTER_KEY_CODE) {
                     console_clear();
                     console_draw_header("Popcorn Kernel v0.5");
@@ -461,6 +507,7 @@ void execute_command(const char *command) {
                 }
             }
             halt_module.pop_function(current_loc);
+            scheduler_yield();
         }
     } else if (strcmp(command, "stop") == 0) {
         console_print_warning("Shutting down...");
@@ -995,115 +1042,104 @@ void kmain(void) {
     char temp_buffer[256] = {0};
     unsigned int input_index = 0;
     int history_index = -1;
-    
-    // Main kernel loop - now interrupt-driven
+    /* PS/2 set 1: 0xE0 byte prefixes extended scancode; break = make | 0x80. */
+    static bool kbd_expect_e0 = false;
+
+    // Main kernel loop: keyboard IRQ buffers scancodes; we dequeue here.
     while (1) {
-        // Handle keyboard input
-        unsigned char status;
-        char keycode;
-        status = read_port(KEYBOARD_STATUS_PORT);
-        
-        if (status & 0x01) {
-            keycode = read_port(KEYBOARD_DATA_PORT);
-            if (keycode < 0)
-                continue;
-            
-            // If Dolphin editor is active, route all input to it
-            if (dolphin_is_active()) {
-                dolphin_handle_key(keycode);
-                continue;
+        unsigned char keycode;
+        if (!key_queue_pop(&keycode)) {
+            scheduler_yield();
+            continue;
+        }
+
+        if (kbd_expect_e0) {
+            kbd_expect_e0 = false;
+            if (keycode & 0x80) {
+                continue; /* extended key release, e.g. 0xC8 */
             }
-            
-            if (keycode == ENTER_KEY_CODE) {
+            /* extended make: 0x48/50/4B/4D/49/51 — same values as our arrow/page defs */
+        } else if (keycode == KEYBOARD_EXT_PREFIX) {
+            kbd_expect_e0 = true;
+            continue;
+        } else if (keycode & 0x80) {
+            continue; /* key release: do not pass to map or as text */
+        }
+
+        if (dolphin_is_active()) {
+            dolphin_handle_key(keycode);
+            continue;
+        }
+
+        if (keycode == ENTER_KEY_CODE) {
+            input_buffer[input_index] = '\0';
+            add_to_history(input_buffer);  // Add to history
+            console_newline();
+            execute_command(input_buffer);
+            input_index = 0;
+            history_index = -1;  // Reset history browsing
+            memset(input_buffer, 0, sizeof(input_buffer));
+            memset(temp_buffer, 0, sizeof(temp_buffer));
+            console_newline();
+            console_draw_prompt_with_path(get_current_directory());
+        } else if (keycode == BACKSPACE_KEY_CODE) {
+            if (input_index > 0) {
+                input_index--;
                 input_buffer[input_index] = '\0';
-                add_to_history(input_buffer);  // Add to history
-                console_newline();
-                execute_command(input_buffer);
-                input_index = 0;
-                history_index = -1;  // Reset history browsing
-                memset(input_buffer, 0, sizeof(input_buffer));
-                memset(temp_buffer, 0, sizeof(temp_buffer));
-                console_newline();
-                console_draw_prompt_with_path(get_current_directory());
-            } else if (keycode == BACKSPACE_KEY_CODE) {
-                // Handle backspace: remove from buffer and screen
-                if (input_index > 0) {
+                console_backspace();
+            }
+        } else if (keycode == TAB_KEY_CODE) {
+            autocomplete_command(input_buffer, &input_index);
+        } else if (keycode == UP_ARROW_CODE) {
+            if (history_count > 0) {
+                if (history_index == -1) {
+                    strcpy_simple(temp_buffer, input_buffer);
+                    history_index = history_count;
+                }
+                if (history_index > 0) {
+                    history_index--;
+                    const char *cmd = get_history_command(history_index);
+                    if (cmd) {
+                        while (input_index > 0) {
+                            input_index--;
+                            console_backspace();
+                        }
+                        strcpy_simple(input_buffer, cmd);
+                        input_index = strlen_simple(input_buffer);
+                        console_print(input_buffer);
+                    }
+                }
+            }
+        } else if (keycode == DOWN_ARROW_CODE) {
+            if (history_index != -1) {
+                history_index++;
+                while (input_index > 0) {
                     input_index--;
-                    input_buffer[input_index] = '\0';
                     console_backspace();
                 }
-            } else if (keycode == TAB_KEY_CODE) {
-                // Autocomplete
-                autocomplete_command(input_buffer, &input_index);
-            } else if (keycode == UP_ARROW_CODE) {
-                // Navigate history up (older commands)
-                if (history_count > 0) {
-                    // Save current input if starting to browse
-                    if (history_index == -1) {
-                        strcpy_simple(temp_buffer, input_buffer);
-                        history_index = history_count;
-                    }
-                    
-                    if (history_index > 0) {
-                        history_index--;
-                        const char *cmd = get_history_command(history_index);
-                        if (cmd) {
-                            // Clear current line
-                            while (input_index > 0) {
-                                input_index--;
-                                console_backspace();
-                            }
-                            // Display history command
-                            strcpy_simple(input_buffer, cmd);
-                            input_index = strlen_simple(input_buffer);
-                            console_print(input_buffer);
-                        }
-                    }
-                }
-            } else if (keycode == DOWN_ARROW_CODE) {
-                // Navigate history down (newer commands)
-                if (history_index != -1) {
-                    history_index++;
-                    
-                    // Clear current line
-                    while (input_index > 0) {
-                        input_index--;
-                        console_backspace();
-                    }
-                    
-                    if (history_index >= (int)history_count) {
-                        // Restore original input
-                        strcpy_simple(input_buffer, temp_buffer);
-                        history_index = -1;
-                    } else {
-                        // Display history command
-                        const char *cmd = get_history_command(history_index);
-                        if (cmd) {
-                            strcpy_simple(input_buffer, cmd);
-                        }
-                    }
-                    
-                    input_index = strlen_simple(input_buffer);
-                    console_print(input_buffer);
-                }
-            } else if (keycode == PAGE_UP_CODE) {
-                // Scroll up in history
-                console_scroll_up();
-            } else if (keycode == PAGE_DOWN_CODE) {
-                // Scroll down in history
-                console_scroll_down();
-            } else if (input_index < sizeof(input_buffer) - 1) {
-                char ch = keyboard_map[(unsigned char)keycode];
-                if (ch != 0) {  // Only add printable characters
-                    input_buffer[input_index++] = ch;
-                    console_putchar(ch);
-                    // Reset history browsing when typing
+                if (history_index >= (int)history_count) {
+                    strcpy_simple(input_buffer, temp_buffer);
                     history_index = -1;
+                } else {
+                    const char *cmd = get_history_command(history_index);
+                    if (cmd) {
+                        strcpy_simple(input_buffer, cmd);
+                    }
                 }
+                input_index = strlen_simple(input_buffer);
+                console_print(input_buffer);
+            }
+        } else if (keycode == PAGE_UP_CODE) {
+            console_scroll_up();
+        } else if (keycode == PAGE_DOWN_CODE) {
+            console_scroll_down();
+        } else if (input_index < sizeof(input_buffer) - 1 && keycode < 128) {
+            char ch = keyboard_map[keycode];
+            if (ch != 0) {
+                input_buffer[input_index++] = ch;
+                console_putchar(ch);
+                history_index = -1;
             }
         }
-        
-        // Yield CPU to scheduler
-        scheduler_yield();
     }
 }

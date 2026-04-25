@@ -591,7 +591,7 @@ void setup_task_context(TaskStruct* task) {
 void task_switch(TaskStruct* from, TaskStruct* to) {
     if (!to) return;
 
-    // Disable interrupts during context switch
+    /* IF=0: pending IRQs (e.g. keyboard) wait; keep this section short to bound input latency. */
     __asm__ volatile("cli");
 
     // If we have a current task, save its context

@@ -319,6 +319,7 @@ void init_transition_to_console(void) {
 
     timer_set_tick_handler(scheduler_tick);
 
+    /* Unmask IRQ0: required before kmain() spins on key_queue_pop + scheduler_yield(). */
     timer_enable();
 
     console_draw_prompt_with_path(get_current_directory());
