@@ -20,13 +20,9 @@ typedef struct {
 } AddressSpace;
 
 /*
- * Long-term memory policy (target): kernel invariant in the upper canonical
- * range, user in the low canonical range, with no accidental identity/MMIO
- * in user PML4s. Today the boot path still uses a low identity map, so
- * "kernel visibility" and bootstrap machinery are tied to the same PML4 slot.
- * vmm_init_process_address_space() is the policy entry; vmm_clone_kernel_space()
- * is the bootstrap implementation until explicit high-half (or per-range)
- * injection replaces it.
+ * Policy: process roots get an explicit layout (vmm_map_kernel_region), not a
+ * clone of boot tables. Long-term target remains high-half kernel + user low;
+ * PMM/kmalloc currently assume the first 1 GiB identity (see memory.c).
  */
 
 /* Call once after physmem is up; enables EFER.NXE so VMM_PTE_NX is legal. */
@@ -36,35 +32,32 @@ void vmm_init(void);
 uint64_t vmm_alloc_pml4(void);
 
 /*
- * Share kernel page-table structure into an empty (or prepared) PML4.
- * Copies PML4[i] from src to dst for fixed kernel slot indices. Subtables
- * (PDPT/PD/PT) are shared: same machine pointers, no deep copy of frames.
+ * Layout-driven kernel region: identity-map the first 1 GiB (VA 0 .. 1GiB-1)
+ * to the same physical addresses using 512 × 2 MiB pages (same policy as
+ * kernel.asm bootstrap). Allocates fresh PDPT and PD pages; does not copy
+ * pointers from the boot PML4.
  *
- * Invariant: any PML4 loaded for a task must lead to the same *kernel* VA
- * mappings as the boot root, or syscalls/IRQ/IRET will miss kernel code.
+ * Requires PML4 slot 0 clear. Covers kernel, framebuffer, and PMM-backed
+ * heap frames in the first gigabyte. (vmm_map_4k in 0..1GiB on such a root
+ * would require splitting a 2 MiB PDE; not implemented—use user VAs above 1 GiB
+ * or add a splitter when you need 4 KiB overlays in the low gigabyte.)
  *
- * Current layout: boot identity (1 GiB) lives under PML4 slot 0 (first
- * 512 GiB of canonical low addresses). A future high-half kernel would add
- * more slot indices. Note: sharing slot 0 shares the *entire* subtree under
- * it between roots; for multiple *isolated* user spaces, plan either a
- * high-half kernel + user-only low tables, or stop sharing slot 0 and
- * install kernel mappings explicitly per policy.
- *
- * Returns: 0 success, -1 missing kernel slot in src, -2 invalid alignment,
- * -3 dst slot already maps a different subtree.
+ * Returns: 0, -1 OOM, -2 bad pml4 alignment, -3 PML4[0] already used.
+ */
+int vmm_map_kernel_region(uint64_t pml4_phys);
+
+/*
+ * Legacy / migration: duplicate selected PML4 slots from an existing root
+ * (shares PDPT/PD/PT physical pages). Prefer vmm_map_kernel_region for new
+ * address spaces. Return codes: 0, -1..-3 as before.
  */
 int vmm_clone_kernel_space(uint64_t dst_pml4_phys, uint64_t src_pml4_phys);
 
 /*
- * Prepare a *process* PML4: ensure kernel is reachable the same way as
- * `kernel_reference_pml4` (e.g. scheduler_kernel_pml4_phys()). `process_pml4`
- * should be a fresh vmm_alloc_pml4() root. User mappings stay empty;
- * vmm_map_4k() fills the user portion later.
- *
- * Current implementation: delegates to vmm_clone_kernel_space (duplicates
- * "kernel" slots from the reference root). Future: replace with explicit
- * invariant kernel mappings and no boot-identity over-share for user space.
- * Return codes same as vmm_clone_kernel_space; -4 if process_pml4 is 0.
+ * Prepare a process PML4: apply kernel memory policy (vmm_map_kernel_region).
+ * process_pml4 should be from vmm_alloc_pml4(). kernel_reference_pml4_phys is
+ * unused (kept for API stability); previously used for clone-based init.
+ * Returns: vmm_map_kernel_region errors, or -4 if process_pml4 is 0.
  */
 int vmm_init_process_address_space(uint64_t process_pml4_phys, uint64_t kernel_reference_pml4_phys);
 

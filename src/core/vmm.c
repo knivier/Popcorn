@@ -4,11 +4,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* 2 MiB PDE: present + writable + page size (huge) */
+#define VMM_PDE_2M (VMM_PTE_P | VMM_PTE_RW | (1ull << 7))
+#define VMM_2M_COUNT 512u /* 512 × 2 MiB = 1 GiB */
+
 /*
- * PML4 indices whose entries must be replicated from the kernel (boot) root
- * into a new PML4 so the CPU can still run kernel code after task_set_address_space.
- * Only slot 0 for the current 512 GiB low region containing the 1 GiB identity map;
- * add 256..511 when the kernel is also mapped in the upper canonical range.
+ * PML4 indices for vmm_clone_kernel_space (legacy; prefer vmm_map_kernel_region).
  */
 static const uint32_t g_kernel_pml4_slot[] = {0u};
 
@@ -60,6 +61,37 @@ uint64_t vmm_alloc_pml4(void) {
     return (uint64_t)(uintptr_t)p;
 }
 
+int vmm_map_kernel_region(uint64_t pml4_phys) {
+    if ((pml4_phys & (PAGE_SIZE - 1U)) != 0) {
+        return -2;
+    }
+    uint64_t* pml4 = vmm_phys_to_ptr(pml4_phys);
+    if (pml4[0] != 0) {
+        return -3;
+    }
+
+    void* p_pdpt = alloc_pages(1, MEM_ALLOC_ZERO);
+    void* p_pd = alloc_pages(1, MEM_ALLOC_ZERO);
+    if (!p_pdpt || !p_pd) {
+        return -1;
+    }
+    uint64_t pdpt_phys = (uint64_t)(uintptr_t)p_pdpt;
+    uint64_t pd_phys = (uint64_t)(uintptr_t)p_pd;
+
+    pml4[0] = pdpt_phys | TABLE_ENT;
+
+    uint64_t* pdpt = vmm_phys_to_ptr(pdpt_phys);
+    pdpt[0] = pd_phys | TABLE_ENT;
+
+    uint64_t* pd = vmm_phys_to_ptr(pd_phys);
+    for (uint32_t i = 0; i < VMM_2M_COUNT; i++) {
+        /* Identity: 2 MiB each, same as kernel.asm p2_2m_loop (| 0x83). */
+        uint64_t base = (uint64_t)i * (2ull * 1024ull * 1024ull);
+        pd[i] = base | VMM_PDE_2M;
+    }
+    return 0;
+}
+
 int vmm_clone_kernel_space(uint64_t dst_pml4_phys, uint64_t src_pml4_phys) {
     if ((dst_pml4_phys & (PAGE_SIZE - 1U)) != 0 || (src_pml4_phys & (PAGE_SIZE - 1U)) != 0) {
         return -2;
@@ -86,10 +118,11 @@ int vmm_clone_kernel_space(uint64_t dst_pml4_phys, uint64_t src_pml4_phys) {
 }
 
 int vmm_init_process_address_space(uint64_t process_pml4_phys, uint64_t kernel_reference_pml4_phys) {
+    (void)kernel_reference_pml4_phys;
     if (process_pml4_phys == 0) {
         return -4;
     }
-    return vmm_clone_kernel_space(process_pml4_phys, kernel_reference_pml4_phys);
+    return vmm_map_kernel_region(process_pml4_phys);
 }
 
 int vmm_map_4k(uint64_t pml4_phys, uint64_t vaddr, uint64_t paddr, uint64_t flags) {

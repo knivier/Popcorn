@@ -103,9 +103,9 @@ void task_set_address_space(TaskStruct* task, uint64_t pml4_phys) {
     /*
      * New PML4 must still map the kernel (same VAs as boot) or the next
      * syscall/IRQ will fault. For a process root: vmm_alloc_pml4() then
-     * vmm_init_process_address_space(new, scheduler_kernel_pml4_phys()),
-     * then vmm_map_4k for user pages. (Clone is the bootstrap; policy hook
-     * may be replaced with explicit kernel injection later.)
+     * vmm_init_process_address_space(new, 0) (reference arg unused), then
+     * vmm_map_4k for user pages. Init uses vmm_map_kernel_region (layout).
+     * See vmm.h: 4 KiB overlays in 0..1 GiB need a 2 MiB PDE split first.
      */
     task->address_space.pml4_phys = pml4_phys;
 }
