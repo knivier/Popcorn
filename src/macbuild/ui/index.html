@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Popcorn Builder</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="bg">
+      <div class="noise"></div>
+      <div class="chrome">
+        <header class="topbar glass">
+          <div class="title">
+            <div class="mark">🍿</div>
+            <div>
+              <div class="h1">Popcorn Builder</div>
+              <div class="sub">macOS Tahoe-style · x86-64 toolchain</div>
+            </div>
+          </div>
+          <div class="status">
+            <div class="dot" id="statusDot"></div>
+            <div class="label" id="statusLabel">Ready</div>
+          </div>
+        </header>
+
+        <main class="grid">
+          <section class="panel glass">
+            <div class="panel-title">Actions</div>
+
+            <button class="btn primary big" id="btnRecomp">
+              <span class="btn-title">Recomp</span>
+              <span class="btn-sub">Clean → Build → ISO → Run</span>
+            </button>
+
+            <div class="row">
+              <button class="btn" id="btnBuild">
+                <span class="btn-title">Build</span>
+                <span class="btn-sub">Compile & link kernel</span>
+              </button>
+              <button class="btn" id="btnIso">
+                <span class="btn-title">ISO</span>
+                <span class="btn-sub">Create bootable ISO</span>
+              </button>
+            </div>
+
+            <div class="row">
+              <button class="btn" id="btnRun">
+                <span class="btn-title">Run</span>
+                <span class="btn-sub">Run existing `popcorn.iso`</span>
+              </button>
+              <button class="btn danger" id="btnStopQemu" disabled>
+                <span class="btn-title">Stop QEMU</span>
+                <span class="btn-sub">Terminate emulator</span>
+              </button>
+            </div>
+
+            <div class="row">
+              <button class="btn ghost" id="btnClear">
+                <span class="btn-title">Clear</span>
+                <span class="btn-sub">Clear logs</span>
+              </button>
+              <div></div>
+            </div>
+
+            <div class="divider"></div>
+            <div class="kv">
+              <div class="k">Toolchain</div>
+              <div class="v" id="toolchainLabel">Detecting…</div>
+              <div class="k">mkrescue</div>
+              <div class="v" id="mkrescueLabel">Detecting…</div>
+            </div>
+          </section>
+
+          <section class="panel glass terminal">
+            <div class="panel-title">
+              Terminal
+              <div class="pill" id="pillRunning">Idle</div>
+            </div>
+            <div class="term" id="term"></div>
+            <div class="term-footer">
+              <div class="hint">Live stream · errors highlighted · auto-scroll</div>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
