@@ -6,6 +6,7 @@ ENTRY(start)
 SECTIONS
 {
    . = 0x100000;
+   __kernel_start = .;
    
    .multiboot : {
       *(.multiboot)
@@ -27,6 +28,12 @@ SECTIONS
       *(.bss)
       *(COMMON)
    } :data
+
+   /* So kernel code can reserve the loaded image, BSS, and bitmap. */
+   . = ALIGN(0x1000);
+   __kernel_end = .;
+   PROVIDE(_end = .);
+   PROVIDE(_kernel_end = .);
 }
 
 PHDRS

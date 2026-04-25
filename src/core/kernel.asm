@@ -33,8 +33,10 @@ start:
   
   ; Set up page tables for long mode
   ; Clear page table memory
+  ; 3 page tables = 12 KiB (3072 dwords). Do not use 4096: that clears 16 KiB
+  ; and overwrites the first 4 KiB of stack_bottom in .bss.
   mov edi, page_table_l4
-  mov ecx, 4096
+  mov ecx, 3072
   xor eax, eax
   rep stosd
   
@@ -45,9 +47,21 @@ start:
   mov edi, page_table_l3
   mov DWORD [edi], page_table_l2 + 0x003  ; present + writable
   
+  ; P2: 512 x 2MB huge pages = 1GB identity-mapped (real backing for pmm/heap)
   mov edi, page_table_l2
-  mov DWORD [edi], 0x000000 + 0x083       ; present + writable + huge (2MB page)
-  
+  mov ecx, 512
+  xor ebx, ebx
+.p2_2m_loop:
+  lea eax, [edi+ebx*8]
+  mov edx, ebx
+  shl edx, 21
+  or  edx, 0x083
+  mov [eax], edx
+  mov DWORD [eax+4], 0
+  inc ebx
+  dec ecx
+  jne .p2_2m_loop
+
   ; Enable PAE
   mov eax, cr4
   or eax, 1 << 5
@@ -83,7 +97,17 @@ start64:
   mov fs, ax
   mov gs, ax
   mov ss, ax
-  
+
+  ; CR0.EM=1 (left by the loader) makes SSE instructions #UD. GCC may emit
+  ; pxor/movaps for memsets / struct init; enable SSE in ring 0.
+  mov rax, cr0
+  and rax, ~0x4      ; clear EM
+  or  rax, 0x2       ; set MP
+  mov cr0, rax
+  mov rax, cr4
+  or  rax, (1 << 9) | (1 << 10)  ; OSFXSR | OSXMMEXCPT
+  mov cr4, rax
+
   ; Set up stack
   mov rsp, stack_top
 

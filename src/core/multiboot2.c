@@ -105,6 +105,37 @@ void multiboot2_parse(void) {
     sys_info.valid = true;
 }
 
+void multiboot2_foreach_mmap(multiboot_mmap_fn fn, void* user) {
+    if (!fn) {
+        return;
+    }
+    if (multiboot2_info_ptr == 0) {
+        return;
+    }
+    uint32_t* mbi = (uint32_t*)(uintptr_t)multiboot2_info_ptr;
+    uint32_t total_size = mbi[0];
+    if (total_size < 8 || total_size > 0x100000) {
+        return;
+    }
+    struct multiboot_tag* tag = (struct multiboot_tag*)((uint8_t*)mbi + 8);
+    while (tag->type != MULTIBOOT_TAG_TYPE_END) {
+        if (tag->type == MULTIBOOT_TAG_TYPE_MMAP) {
+            struct multiboot_tag_mmap* mmap_tag = (struct multiboot_tag_mmap*)tag;
+            uint32_t num_entries = (mmap_tag->size - sizeof(struct multiboot_tag_mmap)) / mmap_tag->entry_size;
+            for (uint32_t i = 0; i < num_entries; i++) {
+                struct multiboot_mmap_entry* entry = (struct multiboot_mmap_entry*)
+                    ((uint8_t*)mmap_tag->entries + i * mmap_tag->entry_size);
+                fn(entry->addr, entry->len, entry->type, user);
+            }
+        }
+        uint32_t tag_size = tag->size;
+        tag = (struct multiboot_tag*)((uint8_t*)tag + ((tag_size + 7) & ~7U));
+        if ((uintptr_t)tag >= (uintptr_t)mbi + total_size) {
+            break;
+        }
+    }
+}
+
 /*
  * Get pointer to parsed system info
  */

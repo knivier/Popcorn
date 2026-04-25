@@ -90,6 +90,10 @@ typedef struct {
 // External reference to multiboot info pointer (set in core/kernel.asm)
 extern uint64_t multiboot2_info_ptr;
 
+/* Iterates MMAP tag entries; safe after multiboot2_parse. */
+typedef void (*multiboot_mmap_fn)(uint64_t base, uint64_t len, uint32_t type, void* user);
+void multiboot2_foreach_mmap(multiboot_mmap_fn fn, void* user);
+
 // Function declarations
 void multiboot2_parse(void);
 SystemInfo* multiboot2_get_info(void);

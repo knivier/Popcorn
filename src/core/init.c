@@ -36,6 +36,7 @@ extern ConsoleState console_state;
 static const int total_init_steps = 9;
 
 void init_boot_screen(void) {
+    multiboot2_parse();
 
     console_init();
 
@@ -308,8 +309,6 @@ void init_transition_to_console(void) {
     console_draw_header("Popcorn Kernel v0.5");
     console_println_color("Welcome to Popcorn Kernel!", CONSOLE_SUCCESS_COLOR);
     console_newline();
-    multiboot2_parse();
-
     if (multiboot2_info_ptr == 0) {
         console_println_color("Warning: No Multiboot2 info received", CONSOLE_WARNING_COLOR);
     }
