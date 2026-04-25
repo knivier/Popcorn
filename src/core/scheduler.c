@@ -11,6 +11,9 @@
 // Global scheduler state
 SchedulerState scheduler = {0};
 
+/* Boot page-table root (asm identity map); all tasks use this until given another PML4. */
+static uint64_t g_kernel_pml4_phys;
+
 // External functions
 extern uint64_t timer_get_ticks(void);
 extern unsigned char read_port(unsigned short port);
@@ -63,6 +66,8 @@ void task_free_stack(void* stack) {
 
 // Initialize the scheduler
 void scheduler_init(void) {
+    g_kernel_pml4_phys = vmm_get_cr3();
+
     // Initialize scheduler state
     scheduler.current_task = NULL;
     scheduler.next_pid = 1;
@@ -86,6 +91,23 @@ void scheduler_init(void) {
 
     scheduler.scheduler_active = true;
     console_println_color("Scheduler initialized", CONSOLE_SUCCESS_COLOR);
+    console_println_color("  Address spaces: per-task PML4; CR3 on switch", CONSOLE_INFO_COLOR);
+}
+
+uint64_t scheduler_kernel_pml4_phys(void) { return g_kernel_pml4_phys; }
+
+void task_set_address_space(TaskStruct* task, uint64_t pml4_phys) {
+    if (!task) {
+        return;
+    }
+    /*
+     * New PML4 must still map the kernel (same VAs as boot) or the next
+     * syscall/IRQ will fault. For a process root: vmm_alloc_pml4() then
+     * vmm_init_process_address_space(new, scheduler_kernel_pml4_phys()),
+     * then vmm_map_4k for user pages. (Clone is the bootstrap; policy hook
+     * may be replaced with explicit kernel injection later.)
+     */
+    task->address_space.pml4_phys = pml4_phys;
 }
 
 // Scheduler tick handler (called from timer interrupt)
@@ -493,6 +515,8 @@ void task_init(TaskStruct* task, void (*function)(void), void* data, TaskPriorit
     
     task->next = NULL;
     task->prev = NULL;
+
+    task->address_space.pml4_phys = g_kernel_pml4_phys;
 }
 
 // Set up initial context for a new task
@@ -597,6 +621,19 @@ void task_switch(TaskStruct* from, TaskStruct* to) {
     // If we have a current task, save its context
     if (from && from != to) {
         context_save(&from->context);
+    }
+
+    /*
+     * Load the next task's page-table root after saving the outgoing state.
+     * Stays a no-op while every task uses the boot identity PML4; required once
+     * per-process PML4s map different user VAs. Kernel VAs must remain valid in
+     * every such root (e.g. permanent kernel map into each user table).
+     */
+    if (to->address_space.pml4_phys != 0) {
+        uint64_t cr = vmm_get_cr3();
+        if (to->address_space.pml4_phys != cr) {
+            vmm_load_cr3(to->address_space.pml4_phys);
+        }
     }
 
     // Switch to the new task

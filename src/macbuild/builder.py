@@ -75,6 +75,7 @@ class KernelBuilder:
             ("core/timer.c", "timer.o"),
             ("core/scheduler.c", "scheduler.o"),
             ("core/memory.c", "memory.o"),
+            ("core/vmm.c", "vmm.o"),
             ("core/init.c", "init.o"),
             ("core/syscall.c", "syscall.o"),
         ]

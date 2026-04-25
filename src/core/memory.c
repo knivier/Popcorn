@@ -1,5 +1,6 @@
 // src/core/memory.c — bitmap physical allocator, identity-mapped 4K pages
 #include "../includes/memory.h"
+#include "../includes/vmm.h"
 #include "../includes/console.h"
 #include "../includes/multiboot2.h"
 #include "../includes/utils.h"
@@ -199,7 +200,9 @@ void memory_init(void) {
     memory_block_index = 0;
     normal_pool = (memory_pool){0};
     physmem_init();
+    vmm_init();
     console_println_color("Physical memory: bitmap pmm, 1 GiB identity-mapped", CONSOLE_SUCCESS_COLOR);
+    console_println_color("Virtual: 4K map (PML4 walk), invlpg + load_cr3; asm identity map unchanged", CONSOLE_INFO_COLOR);
 }
 
 void* kmalloc(size_t size, uint32_t flags) {
