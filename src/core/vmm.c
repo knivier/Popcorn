@@ -11,7 +11,7 @@
 /*
  * PML4 indices for vmm_clone_kernel_space (legacy; prefer vmm_map_kernel_region).
  */
-static const uint32_t g_kernel_pml4_slot[] = {0u};
+static const uint32_t g_kernel_pml4_slot[] = {0u, 256u};
 
 #define G_KERNEL_PML4_SLOT_LEN (sizeof g_kernel_pml4_slot / sizeof g_kernel_pml4_slot[0])
 
@@ -89,6 +89,19 @@ int vmm_map_kernel_region(uint64_t pml4_phys) {
         uint64_t base = (uint64_t)i * (2ull * 1024ull * 1024ull);
         pd[i] = base | VMM_PDE_2M;
     }
+
+    /* PML4[256]: 0xFFFF800000000000..+1G -> same phys 0..1G (shared PD as boot). */
+    if (pml4[256] != 0) {
+        return -3;
+    }
+    void* p_l3h = alloc_pages(1, MEM_ALLOC_ZERO);
+    if (!p_l3h) {
+        return -1;
+    }
+    uint64_t l3h_phys = (uint64_t)(uintptr_t)p_l3h;
+    pml4[256] = l3h_phys | TABLE_ENT;
+    uint64_t* l3h = vmm_phys_to_ptr(l3h_phys);
+    l3h[0] = pd_phys | TABLE_ENT;
     return 0;
 }
 

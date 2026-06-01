@@ -10,6 +10,9 @@
 extern uint64_t multiboot2_info_ptr;
 extern char __kernel_start[];
 extern char __kernel_end[];
+/* Absolute (LMA) range of the multiboot-loaded image from link.ld. */
+extern char __kernel_lma_start[];
+extern char __kernel_lma_end[];
 
 extern ConsoleState console_state;
 extern void console_draw_separator(unsigned int y, unsigned char color);
@@ -156,7 +159,11 @@ void physmem_init(void) {
     /* Reserve low 1 MiB: IVT, BDA, etc. (also avoids handing out 0 / NULL frames). */
     pmm_mark_range_used(0, 0x100000u);
 
-    pmm_mark_range_used((uint64_t)(uintptr_t)__kernel_start, (uint64_t)(uintptr_t)__kernel_end);
+    /* LMA: physical span [__kernel_lma_start, __kernel_lma_end). */
+    pmm_mark_range_used(
+        (uint64_t)(uintptr_t)__kernel_lma_start,
+        (uint64_t)(uintptr_t)__kernel_lma_end - (uint64_t)(uintptr_t)__kernel_lma_start
+    );
 
     if (multiboot2_info_ptr != 0) {
         const uint8_t* m = (const uint8_t*)(uintptr_t)multiboot2_info_ptr;

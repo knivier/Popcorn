@@ -32,13 +32,13 @@ void vmm_init(void);
 uint64_t vmm_alloc_pml4(void);
 
 /*
- * Layout-driven kernel region: identity-map the first 1 GiB (VA 0 .. 1GiB-1)
- * to the same physical addresses using 512 × 2 MiB pages (same policy as
- * kernel.asm bootstrap). Allocates fresh PDPT and PD pages; does not copy
- * pointers from the boot PML4.
+ * Layout-driven kernel region: (1) identity-map the first 1 GiB at slot 0;
+ * (2) map 0xFFFF800000000000..+1G to the same physical 0..1G at PML4 slot
+ * 256 (shared PD page as boot). Same policy as kernel.asm.
+ * Allocates fresh tables; does not copy the boot PML4.
  *
- * Requires PML4 slot 0 clear. Covers kernel, framebuffer, and PMM-backed
- * heap frames in the first gigabyte. (vmm_map_4k in 0..1GiB on such a root
+ * Requires PML4 slots 0 and 256 clear. Covers low identity + high-half kernel VAs.
+ * (vmm_map_4k in 0..1GiB on such a root
  * would require splitting a 2 MiB PDE; not implemented—use user VAs above 1 GiB
  * or add a splitter when you need 4 KiB overlays in the low gigabyte.)
  *

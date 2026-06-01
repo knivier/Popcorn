@@ -524,14 +524,14 @@ void dolphin_handle_key(unsigned char keycode) {
                     break;
                 }
             } else {
-                scheduler_yield();
+                __asm__ volatile("sti; hlt" ::: "memory");
             }
         }
         
         while (in_command) {
             unsigned char cmd_key;
             if (!key_queue_pop(&cmd_key)) {
-                scheduler_yield();
+                __asm__ volatile("sti; hlt" ::: "memory");
                 continue;
             }
             
