@@ -322,11 +322,11 @@ void init_transition_to_console(void) {
     /* Enable keyboard IRQs for interactive console input. */
     kb_init();
     /*
-     * Keep PIT scheduling disabled for now; keyboard input works without it and this avoids
-     * reintroducing timer-driven instability while we finish stabilizing context switching.
+     * Re-enable PIT scheduling. scheduler.c has bootstrap guards to avoid switching while
+     * CPU still executes kmain on boot stack before first real task run.
      */
-    // timer_set_tick_handler(scheduler_tick);
-    // timer_enable();
+    timer_set_tick_handler(scheduler_tick);
+    timer_enable();
 
     console_draw_prompt_with_path(get_current_directory());
 

@@ -51,6 +51,13 @@ static uint64_t g_kernel_pml4_phys;
  * that "idle" context would clobber setup_task_context() with kmain's RIP/RSP and fault on iretq. */
 static bool idle_cpu_has_run;
 
+/* True while scheduler.current_task is synthetic idle but CPU still executes kmain boot stack. */
+static bool bootstrap_on_kmain_stack(void) {
+    return scheduler.current_task &&
+           scheduler.current_task->pid == 0 &&
+           !idle_cpu_has_run;
+}
+
 // External functions
 extern uint64_t timer_get_ticks(void);
 extern unsigned char read_port(unsigned short port);
@@ -160,6 +167,9 @@ void scheduler_tick(void) {
     if (!scheduler.scheduler_active || !scheduler.current_task) {
         return;
     }
+    if (bootstrap_on_kmain_stack()) {
+        return;
+    }
 
     // Update current task runtime
     uint64_t current_time = timer_get_ticks();
@@ -191,7 +201,7 @@ void scheduler_tick(void) {
 
 // Yield CPU to another task
 void scheduler_yield(void) {
-    if (scheduler.scheduler_active) {
+    if (scheduler.scheduler_active && !bootstrap_on_kmain_stack()) {
         scheduler_schedule();
     }
 }
