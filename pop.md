@@ -26,7 +26,7 @@ static int module_count = 0;            // Keep track of how many we have
    - Write your pop function with proper cursor save/restore
    - Define a PopModule structure
    - Register it in kmain() using register_pop_module()
-   - Add the .c file to all build scripts (build.sh, trymake.sh, build.ps1)
+   - Add the .c file to all build scripts (`build/macos.sh`, `build/linux.sh`, and the Python builders in `build/popcorn_build/`)
 
 For example, if you wanted to add a new "beep" pop, you could create beep_pop.c:
 ```c

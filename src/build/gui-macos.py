@@ -1,27 +1,24 @@
 #!/usr/bin/env python3
 """
-mac-build.py (Tahoe WebView Edition)
+Popcorn macOS GUI builder (WebView edition).
 
-- UI: HTML/CSS/JS only (Tahoe-inspired dark glass + animations)
-- Backend: modular Python build system (cross toolchain preferred on macOS)
-
-Actions:
-- Build: compile + link kernel
-- ISO: build kernel then create bootable ISO
-- Recomp: clean → build → ISO → run QEMU (big button)
+Run from anywhere:
+  python3 src/build/gui-macos.py
 """
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from threading import Lock, Thread
 
-
-SRC_DIR = Path(__file__).resolve().parent
+BUILD_DIR = Path(__file__).resolve().parent
+SRC_DIR = BUILD_DIR.parent
+sys.path.insert(0, str(BUILD_DIR))
 
 
 def _read_ui() -> str:
-    ui_dir = SRC_DIR / "macbuild" / "ui"
+    ui_dir = BUILD_DIR / "popcorn_build" / "ui"
     html = (ui_dir / "index.html").read_text()
     css = (ui_dir / "styles.css").read_text()
     js = (ui_dir / "app.js").read_text()
@@ -32,7 +29,7 @@ def _read_ui() -> str:
 
 def main() -> int:
     if not (SRC_DIR / "core" / "kernel.asm").exists():
-        print("Run this from the Popcorn src/ directory.")
+        print("Could not find kernel sources (expected src/core/kernel.asm).")
         return 2
 
     try:
@@ -42,11 +39,11 @@ def main() -> int:
         print("Install: pip3 install pywebview")
         return 3
 
-    from macbuild.builder import KernelBuilder
-    from macbuild.iso import IsoBuilder
-    from macbuild.log import LogBuffer
-    from macbuild.qemu import QemuConfig, QemuRunner
-    from macbuild.toolchain import Toolchain, detect_mkrescue, detect_toolchain, have
+    from popcorn_build.builder import KernelBuilder
+    from popcorn_build.iso import IsoBuilder
+    from popcorn_build.log import LogBuffer
+    from popcorn_build.qemu import QemuConfig, QemuRunner
+    from popcorn_build.toolchain import Toolchain, detect_mkrescue, detect_toolchain, have
 
     logs = LogBuffer()
 

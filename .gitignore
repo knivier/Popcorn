@@ -1,17 +1,33 @@
-obj/
-src/obj/root-leftovers/
-src/dbg/
-src/*.o
-src/qemu-*.log
+# Build artifacts
+src/obj/
+src/kernel
+src/popcorn.iso
+src/isodir/
+src/buildbase/
 buildbase/
+
+# Object files and leftovers
+src/*.o
+src/obj/root-leftovers/
+
+# Logs
+*.log
+build_log.txt
+src/build_errors.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE / editor
 .idea/
 .vscode/
-src/kernel
 slnx.sqlite
 FileContentIndex/
 v17/
 CoPilotIndices/
 VSWorkspaceState.json
-src/build_errors.log
-src/popcorn.iso
-build_log.txt
+
+# Debug scratch space
+src/dbg/
