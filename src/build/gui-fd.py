@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
 """
-Popcorn Kernel Builder - Modern GUI Edition
-A beautiful, animated GUI build tool for the Popcorn x64 kernel
+Popcorn Kernel Builder - Tkinter GUI
 
-Features:
-- Modern dark theme with animations
-- Full automation mode (one-click build and run)
-- Manual mode with individual build steps
-- Real-time build logs and error reporting
-- QEMU integration with smooth transitions
+Run from anywhere:
+  python3 src/build/gui-tk.py
 """
 
 import tkinter as tk
@@ -48,10 +43,11 @@ class ModernPopcornBuilder:
         self.root.configure(bg=self.colors['bg'])
         
         # Check if we're in the src directory
-        if not Path("core/kernel.asm").exists():
+        src_dir = Path(__file__).resolve().parent.parent
+        os.chdir(src_dir)
+        if not (src_dir / "core" / "kernel.asm").exists():
             messagebox.showerror("Error", 
-                "Please run this script from the src/ directory\n" +
-                "containing core/ and pops/ subdirectories.")
+                "Could not find kernel sources (expected src/core/kernel.asm).")
             sys.exit(1)
         
         # Variables

@@ -1,4 +1,7 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Define colors and styles
 GREEN='\033[0;32m'
@@ -255,7 +258,7 @@ menuentry "Popcorn Kernel x64" {
 }
 EOF
     
-    # Create the ISO using GRUB mkrescue tools like buildmon.py, falling back to xorriso
+    # Create the ISO using GRUB mkrescue tools like gui-tk.py, falling back to xorriso
     if [ -n "$GRUB_MKRESCUE" ]; then
         log "INFO" "Building ISO using $GRUB_MKRESCUE..."
         echo "Running: $GRUB_MKRESCUE -o popcorn.iso isodir" >> "$BUILD_LOG"

@@ -9,7 +9,7 @@ A modern, modular 64-bit kernel framework designed for learning operating system
 1. **Build and Run**:
    ```bash
    cd src
-   python3 buildmon.py
+   python3 build/gui-tk.py
    # Click "Full Automation" for one-click build and run
    ```
 
@@ -41,7 +41,7 @@ We provide a beautiful GUI build tool with modern animations:
 
 ```bash
 cd src
-python3 buildmon.py
+python3 build/gui-tk.py
 ```
 
 Features:
@@ -52,11 +52,32 @@ Features:
 - **Modern UI**: Dark theme with smooth animations
 - **QEMU Integration**: Direct kernel testing
 
-### Alternative: Interactive Build System
+### Alternative: Shell Build Scripts
 
-1. Run build.sh on WSL via `./build.sh` - If you are having issues with this, use dos2unix to convert the file; GitHub seems to like putting nonunix characters in its files or something
+All build tooling lives under `src/build/`:
 
-2. Select "build kernel". This will automatically erase and build the kernel for you. If you have missing dependencies, the build should tell you. You will need NASM, GCC, LD, QEMU (x86_64 version), and GRUB tools. If you have build errors, it will not show the specific errors; use trymake.sh to have a non-fancy version of the building system
+| Script | Platform | Description |
+|--------|----------|-------------|
+| `build/macos.sh` | macOS | CLI + dialog menu; cross toolchain (clang/lld or x86_64-elf-gcc) |
+| `build/linux.sh` | Linux / Fedora | CLI + dialog menu; native gcc/ld |
+| `build/gui-macos.py` | macOS | WebView GUI (requires `pywebview`) |
+| `build/gui-tk.py` | Cross-platform | Tkinter GUI with full automation |
+
+**macOS (CLI):**
+```bash
+cd src
+./build/macos.sh build    # build kernel
+./build/macos.sh iso      # create bootable ISO
+./build/macos.sh run      # boot in QEMU
+```
+
+**Linux / Fedora (CLI):**
+```bash
+cd src
+./build/linux.sh          # interactive dialog menu
+```
+
+For verbose compile errors without the dialog UI, use `./build/macos.sh build` from a terminal (macOS) or the Tkinter GUI’s verbose build mode.
 
 **Note:** Direct kernel loading with `-kernel` may not work with all QEMU versions for 64-bit multiboot kernels. The ISO method is highly recommended.
 
@@ -82,13 +103,9 @@ sudo dnf install nasm gcc qemu-system-x86 grub2-tools-extra grub2-pc-modules xor
 sudo apt-get install nasm gcc qemu-system-x86 grub-pc-bin grub-common xorriso
 ```
 
-Please note, build.sh is a unix only tool (some get arounds using Git Bash) and is WSL built. Please also note, build.sh is a complete builder tool that ships with this product and should auto install any dependencies that aren't on your system. If you are encountering bugs, they will not show up on build.sh; you will get an abstracted error code. Use "trymake.sh" instead for all error codes listed (but less interactive).
+Please note, the shell build scripts are Unix-only tools. They auto-detect dependencies and can install missing packages on macOS (Homebrew) or Linux (dnf/apt/pacman). For detailed compiler output, use the CLI commands or the Tkinter GUI verbose build mode.
 
-If you are on Windows and don't want to use WSL (unrecommended), you can use build.ps1 inside PowerShell (5 or higher, requires external script enabling). All .ps1 build/make systems are untested and may need updating for 64-bit.
-
-Finally, all build systems are at your own risk. I'm not responsible for any installations not working correctly nor any inconfigurations nor any other errors that may occur. This software is provided AS-IS without warranties as shown in the LICENSE (please see that). If you are on a version below v1 (so, 0.1, 0.2, 0.3, etc) you are using a trial version.
-
-Assembly instructions for linux-based systems (or WSL) without a build maker are no longer provided due to the annoyance of keeping notes UTD. They are, therefore, not being included in this readme. Look through the trymake.sh to find out how you can implement it yourself instead.
+If you are on Windows without WSL, use the Tkinter GUI (`build/gui-tk.py`) where possible.
 
 ## Project Overview
 
@@ -110,75 +127,29 @@ ROOT
     
     └── src/
     
-        ├── build.sh          (Interactive build system)
+        ├── build/              (All build scripts and tooling)
         
-        ├── build.ps1         (PowerShell build script)
+        │   ├── macos.sh        (macOS CLI build system)
         
-        ├── trymake.sh        (Simple build script)
+        │   ├── linux.sh        (Linux/Fedora CLI build system)
         
-        ├── kernel.c          (Main kernel)
+        │   ├── gui-macos.py    (macOS WebView GUI builder)
         
-        ├── kernel.asm        (Bootloader)
+        │   ├── gui-tk.py       (Tkinter GUI builder)
         
-        ├── console.c         (Console system)
+        │   └── popcorn_build/  (Python build library + UI assets)
         
-        ├── utils.c           (Shared utilities)
+        ├── core/               (Kernel core: boot, scheduler, memory, …)
         
-        ├── pop_module.c      (Pop module manager)
+        ├── pops/               (Pop modules: console commands, Dolphin, …)
         
-        ├── halt_pop.c        (Halt module)
+        ├── includes/           (Shared headers)
         
-        ├── spinner_pop.c     (Spinner animation)
+        ├── link.ld             (Linker script)
         
-        ├── uptime_pop.c      (Uptime counter)
+        ├── buildbase/          (Build logs and saved config; generated)
         
-        ├── filesystem_pop.c  (Filesystem module)
-        
-        ├── multiboot2.c      (Multiboot2 info parser)
-        
-        ├── sysinfo_pop.c     (System information)
-        
-        ├── memory_pop.c      (Memory management)
-        
-        ├── cpu_pop.c         (CPU information)
-        
-        ├── dolphin_pop.c     (Text editor)
-        
-        ├── shimjapii_pop.c   (Example pop)
-        
-        ├── idt.asm           (Interrupt descriptor)
-        
-        ├── link.ld           (Linker script)
-        
-        ├── buildbase/
-        
-        │   ├── .build_config
-        
-        │   └── build.log
-        
-        ├── includes/
-        
-        │   ├── console.h     (Console system header)
-        
-        │   ├── utils.h       (Utilities header)
-        
-        │   ├── pop_module.h  (Pop module header)
-        
-        │   ├── spinner_pop.h (Spinner header)
-        
-        │   ├── multiboot2.h  (Multiboot2 structures)
-        
-        │   ├── sysinfo_pop.h (System info header)
-        
-        │   ├── memory_pop.h  (Memory management header)
-        
-        │   ├── cpu_pop.h     (CPU info header)
-        
-        │   ├── dolphin_pop.h (Text editor header)
-        
-        │   └── keyboard_map.h
-        
-        └── obj/              (Compiled objects)
+        └── obj/                (Compiled objects; generated)
 ```
 
 ### Building the Project

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$(cd "$SCRIPT_DIR/.." && pwd)"
+
 GREEN=$'\033[0;32m'
 RED=$'\033[0;31m'
 YELLOW=$'\033[1;33m'
@@ -385,11 +388,11 @@ main_menu() {
 Popcorn build (no dialog UI available)
 
 Usage:
-  ./src/build.sh build        Build kernel
-  ./src/build.sh iso          Create ISO (builds kernel if missing)
-  ./src/build.sh run          Run in QEMU (creates ISO if missing)
-  ./src/build.sh clean        Remove artifacts
-  ./src/build.sh logs         Show last logs
+  ./build/macos.sh build        Build kernel
+  ./build/macos.sh iso          Create ISO (builds kernel if missing)
+  ./build/macos.sh run          Run in QEMU (creates ISO if missing)
+  ./build/macos.sh clean        Remove artifacts
+  ./build/macos.sh logs         Show last logs
 EOF
     return 0
   fi
@@ -423,7 +426,7 @@ EOF
 
 usage() {
   cat <<'EOF'
-Usage: ./src/build.sh [command]
+Usage: ./build/macos.sh [command]
 
 Commands:
   build     Build kernel
