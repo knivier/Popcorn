@@ -115,6 +115,7 @@ start:
 ;; UEFI firmware enters in 64-bit long mode. Do not jump to 32-bit `start`.
 %define POPCORN_UEFI_MAGIC_CONST 0x504F50434F524E42
 %define POPCORN_HANDOFF_PHYS     0x102008
+%define POPCORN_UEFI_MBI_PHYS    0x380000
 
 bits 64
 global uefi_start
@@ -211,6 +212,13 @@ uefi_start:
   mov cr3, rax
 
   mov rsp, stack_top
+
+  mov rax, [POPCORN_HANDOFF_PHYS]
+  cmp rax, POPCORN_UEFI_MAGIC_CONST
+  jne .uefi_no_mbi
+  mov qword [rel multiboot2_info_ptr], POPCORN_UEFI_MBI_PHYS
+  mov qword [rel multiboot2_info_ptr + 8], 0
+.uefi_no_mbi:
 
   ; Keep firmware GDT/segments — retfq + SS=0x10 breaks on many Lenovo/AMD UEFI boxes.
   mov rax, kmain

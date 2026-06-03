@@ -637,6 +637,115 @@ static void __attribute__((noreturn)) jump_to_kernel(UINT64 entry) {
     __builtin_unreachable();
 }
 
+#define EFI_CONVENTIONAL_MEMORY 7u
+#define MB2_TAG_END               0u
+#define MB2_TAG_BOOT_LOADER_NAME  2u
+#define MB2_TAG_BASIC_MEMINFO     4u
+#define MB2_TAG_MMAP              6u
+#define MB2_MEM_AVAILABLE         1u
+#define MB2_MEM_RESERVED          2u
+#define MB2_MMAP_ENTRY_SIZE       24u
+
+static UINT32 mb2_align(UINT32 n) {
+    return (n + 7u) & ~7u;
+}
+
+static void build_multiboot_mbi(EFI_MEMORY_DESCRIPTOR* mmap, UINTN map_size, UINTN desc_size) {
+    UINT8* out = (UINT8*)(UINTN)POPCORN_UEFI_MBI_PHYS;
+    UINT32 total = 8;
+    UINT32 mem_upper_kb = 0;
+
+    for (UINT32 i = 0; i < 65536; i++) {
+        out[i] = 0;
+    }
+
+    {
+        const char loader_name[] = "Popcorn UEFI";
+        UINT32 name_len = sizeof(loader_name);
+        UINT32 tag_sz = mb2_align(8u + name_len);
+        UINT32* tag = (UINT32*)(out + total);
+        tag[0] = MB2_TAG_BOOT_LOADER_NAME;
+        tag[1] = tag_sz;
+        for (UINT32 i = 0; i < name_len; i++) {
+            out[total + 8u + i] = (UINT8)loader_name[i];
+        }
+        total += tag_sz;
+    }
+
+    UINT32 mmap_count = 0;
+    UINTN num_desc = (desc_size > 0) ? (map_size / desc_size) : 0;
+    for (UINTN i = 0; i < num_desc; i++) {
+        EFI_MEMORY_DESCRIPTOR* d =
+            (EFI_MEMORY_DESCRIPTOR*)((UINT8*)mmap + i * desc_size);
+        UINT64 len = d->NumberOfPages * 4096ULL;
+        if (len == 0) {
+            continue;
+        }
+        mmap_count++;
+    }
+
+    {
+        UINT32 tag_sz = mb2_align(16u + mmap_count * MB2_MMAP_ENTRY_SIZE);
+        UINT32* tag = (UINT32*)(out + total);
+        tag[0] = MB2_TAG_MMAP;
+        tag[1] = tag_sz;
+        tag[2] = MB2_MMAP_ENTRY_SIZE;
+        tag[3] = 0;
+        UINT32 entry_off = total + 16u;
+        UINT32 written = 0;
+        for (UINTN i = 0; i < num_desc; i++) {
+            EFI_MEMORY_DESCRIPTOR* d =
+                (EFI_MEMORY_DESCRIPTOR*)((UINT8*)mmap + i * desc_size);
+            UINT64 len = d->NumberOfPages * 4096ULL;
+            if (len == 0) {
+                continue;
+            }
+            UINT64 addr = d->PhysicalStart;
+            UINT32 mb2_type = MB2_MEM_RESERVED;
+            if (d->Type == EFI_CONVENTIONAL_MEMORY) {
+                mb2_type = MB2_MEM_AVAILABLE;
+                if (addr >= 0x100000ULL) {
+                    mem_upper_kb += (UINT32)(len / 1024ULL);
+                }
+            }
+            UINT8* e = out + entry_off + written * MB2_MMAP_ENTRY_SIZE;
+            *(UINT64*)(e + 0) = addr;
+            *(UINT64*)(e + 8) = len;
+            *(UINT32*)(e + 16) = mb2_type;
+            *(UINT32*)(e + 20) = 0;
+            written++;
+        }
+        total += tag_sz;
+    }
+
+    {
+        UINT32 tag_sz = mb2_align(sizeof(UINT32) * 4u);
+        UINT32* tag = (UINT32*)(out + total);
+        tag[0] = MB2_TAG_BASIC_MEMINFO;
+        tag[1] = tag_sz;
+        tag[2] = 640;
+        tag[3] = mem_upper_kb;
+        total += tag_sz;
+    }
+
+    {
+        UINT32 tag_sz = 8;
+        UINT32* tag = (UINT32*)(out + total);
+        tag[0] = MB2_TAG_END;
+        tag[1] = tag_sz;
+        total += tag_sz;
+    }
+
+    *(UINT32*)(out + 0) = total;
+
+    {
+        PopcornUefiBootInfo* info = (PopcornUefiBootInfo*)(UINTN)POPCORN_UEFI_HANDOFF_PHYS;
+        if (info->magic == POPCORN_UEFI_MAGIC) {
+            info->available_ram_bytes = (UINT64)mem_upper_kb * 1024ULL;
+        }
+    }
+}
+
 static BOOLEAN exit_boot_services(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
     EFI_BOOT_SERVICES_PARTIAL* bs = st->BootServices;
     EFI_STATUS status;
@@ -666,6 +775,7 @@ static BOOLEAN exit_boot_services(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
             bs->FreePool(mmap);
             return FALSE;
         }
+        build_multiboot_mbi(mmap, map_size, desc_size);
         status = bs->ExitBootServices(image, map_key);
         if (!EFI_ERROR(status)) {
             return TRUE;
@@ -733,14 +843,23 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* system_table) {
 
     print(system_table, L"Starting Popcorn...\r\n");
 
+    /*
+     * Always ExitBootServices before entering the kernel.
+     * Keeping Boot Services up for firmware ConIn caused PMM/allocator corruption
+     * and firmware-initiated resets (~6–8s after the shell appeared) on QEMU and
+     * ThinkPad-class hardware. PS/2 polling handles keyboard after EBS.
+     */
+    if (!exit_boot_services(image, system_table)) {
+        print_err(system_table, L"ExitBootServices failed");
+        return EFI_LOAD_ERROR;
+    }
+
     {
         PopcornUefiBootInfo* info = (PopcornUefiBootInfo*)(UINTN)handoff;
-        if (info->flags & POPCORN_UEFI_FLAG_FIRMWARE_KBD) {
-            print(system_table, L"Keeping UEFI USB keyboard (no ExitBootServices)\r\n");
-        } else if (!exit_boot_services(image, system_table)) {
-            print_err(system_table, L"ExitBootServices failed");
-            return EFI_LOAD_ERROR;
-        }
+        info->flags &= ~(POPCORN_UEFI_FLAG_FIRMWARE_KBD | POPCORN_UEFI_FLAG_INPUT_EX);
+        info->conin = 0;
+        info->boot_services = 0;
+        info->firmware_cr3 = 0;
     }
 
     jump_to_kernel(entry);

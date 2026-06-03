@@ -57,6 +57,8 @@ static uint64_t irq_save_cli(void) {
 }
 
 static void irq_restore(uint64_t flags) {
+    /* Never re-enable IF after firmware calls — latent IRQs caused hangs/reboots. */
+    flags &= ~(1ULL << 9);
     __asm__ volatile("push %0; popfq" : : "r"(flags) : "memory", "cc");
 }
 

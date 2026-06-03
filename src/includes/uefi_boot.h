@@ -5,8 +5,9 @@
 
 #define POPCORN_UEFI_MAGIC        0x504F50434F524E42ULL /* "POPCORNB" */
 /* Fixed .bss.boot layout (kernel.asm); must match loader handoff write address. */
-#define POPCORN_UEFI_MBI_PHYS     0x102000ULL
 #define POPCORN_UEFI_HANDOFF_PHYS 0x102008ULL
+/* 64 KiB scratch above the linked kernel image (see bootx64.c); loader builds Multiboot2 MBI here. */
+#define POPCORN_UEFI_MBI_PHYS     0x380000ULL
 #define POPCORN_UEFI_FLAG_FIRMWARE_KBD 0x01u /* BootServices left up; use conin */
 #define POPCORN_UEFI_FLAG_INPUT_EX     0x02u /* conin is SimpleTextInputEx* */
 
@@ -29,6 +30,7 @@ typedef struct {
     uint64_t conin;           /* TextIn or TextInEx protocol pointer */
     uint64_t boot_services;   /* EFI_BOOT_SERVICES* */
     uint64_t firmware_cr3;    /* CR3 while firmware still owns USB (before kernel switch) */
+    uint64_t available_ram_bytes; /* conventional RAM above 1 MiB (for kernel if MBI unavailable) */
 } PopcornUefiBootInfo;
 
 extern volatile PopcornUefiBootInfo popcorn_uefi_handoff;

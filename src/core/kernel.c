@@ -8,6 +8,7 @@
 #include "../includes/cpu_pop.h"
 #include "../includes/dolphin_pop.h"
 #include "../includes/timer.h"
+#include "../includes/multiboot2.h"
 #include "../includes/scheduler.h"
 #include "../includes/memory.h"
 #include "../includes/init.h"
@@ -1127,18 +1128,16 @@ void kmain(void) {
     uint64_t last_uefi_poll_tick = 0;
 
     boot_serial_putc('L');
-    /* Mask PIT; enabling IF (sti) with pending IRQs hung kmain on QEMU and ThinkPad. */
-    timer_disable();
+    /* UEFI/QEMU: sti delivers a latent IRQ and hangs; drive PIT via polling instead. */
+    timer_enable_poll();
+    boot_serial_putc('M');
 
     while (1) {
         unsigned char keycode;
         bool from_queue = false;
 
-        if ((loop_iter & 0xFFFFu) == 0u) {
-            boot_serial_putc('.');
-        }
-        /* Heartbeat text redraw is expensive on GOP MMIO; throttle hard. */
-        if ((loop_iter & 0x3FFFu) == 0u) {
+        timer_poll();
+        if ((loop_iter & 0xFFu) == 0u) {
             console_heartbeat_tick();
         }
         loop_iter++;
@@ -1167,10 +1166,16 @@ void kmain(void) {
         }
 
         if (!from_queue && !key_queue_pop(&keycode)) {
-            keyboard_poll_ps2();
+            if (!uefi_input_available()) {
+                keyboard_poll_ps2();
+            }
             if (!key_queue_pop(&keycode)) {
-                /* Avoid HLT until PIT/APIC delivery is verified on UEFI firmware. */
-                __asm__ volatile("pause");
+                /* UEFI/QEMU: sti+hlt hangs on latent IRQ; polled PIT keeps time alive. */
+                if (timer_is_poll_mode()) {
+                    __asm__ volatile("pause");
+                } else {
+                    __asm__ volatile("sti; hlt" ::: "memory");
+                }
                 continue;
             }
         }

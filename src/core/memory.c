@@ -3,6 +3,7 @@
 #include "../includes/vmm.h"
 #include "../includes/console.h"
 #include "../includes/multiboot2.h"
+#include "../includes/uefi_boot.h"
 #include "../includes/utils.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -103,12 +104,53 @@ static void pmm_give_free_range(uint64_t pstart, uint64_t plen) {
 
 struct mmap_free_ctx { int did_free; };
 
+/*
+ * ThinkPad / firmware-keyboard UEFI: Boot Services stay up. EFI "conventional"
+ * regions in the memory map are NOT safe to use until ExitBootServices — using
+ * them for PMM corrupts firmware and the next conin call reboots the machine.
+ */
+#define UEFI_FW_SAFE_RAM_BASE (64ULL * 1024ULL * 1024ULL)
+#define UEFI_FW_SAFE_RAM_BYTES ((512ULL * 1024ULL * 1024ULL) - UEFI_FW_SAFE_RAM_BASE)
+
+static bool physmem_uefi_firmware_kbd_active(void) {
+    if (!multiboot2_is_uefi_boot()) {
+        return false;
+    }
+    volatile PopcornUefiBootInfo* u =
+        (volatile PopcornUefiBootInfo*)(uintptr_t)POPCORN_UEFI_HANDOFF_PHYS;
+    return u->magic == POPCORN_UEFI_MAGIC &&
+           (u->flags & POPCORN_UEFI_FLAG_FIRMWARE_KBD) != 0;
+}
+
+static void physmem_reserve_uefi_fixed(void) {
+    if (!multiboot2_is_uefi_boot()) {
+        return;
+    }
+    pmm_mark_range_used(POPCORN_UEFI_HANDOFF_PHYS & ~(uint64_t)(PAGE_SIZE - 1),
+                        PAGE_SIZE);
+    const FramebufferInfo* fb = multiboot2_get_framebuffer();
+    if (fb && fb->present && fb->addr != 0) {
+        uint64_t span = (uint64_t)fb->pitch * (uint64_t)fb->height;
+        if (span == 0) {
+            span = (uint64_t)fb->width * (uint64_t)fb->height *
+                   (uint64_t)((fb->bpp + 7) / 8);
+        }
+        if (span > 0) {
+            pmm_mark_range_used(fb->addr, span);
+        }
+    }
+}
+
 static void mmap_unreserve_cb(uint64_t base, uint64_t len, uint32_t type, void* user) {
     struct mmap_free_ctx* ctx = (struct mmap_free_ctx*)user;
-    if (type == MULTIBOOT_MEMORY_AVAILABLE) {
-        pmm_give_free_range(base, len);
-        ctx->did_free = 1;
+    if (type != MULTIBOOT_MEMORY_AVAILABLE || len == 0) {
+        return;
     }
+    if (physmem_uefi_firmware_kbd_active()) {
+        return;
+    }
+    pmm_give_free_range(base, len);
+    ctx->did_free = 1;
 }
 
 static int32_t pmm_alloc_contig(uint32_t n) {
@@ -142,22 +184,30 @@ void physmem_init(void) {
     memset(pmm_bitmap, 0xFF, sizeof(pmm_bitmap));
 
     struct mmap_free_ctx ctx = {0};
-    multiboot2_foreach_mmap(mmap_unreserve_cb, &ctx);
+    if (!physmem_uefi_firmware_kbd_active()) {
+        multiboot2_foreach_mmap(mmap_unreserve_cb, &ctx);
+    }
 
     if (!ctx.did_free) {
-        SystemInfo* inf = multiboot2_get_info();
-        if (inf->mem_upper > 0) {
-            uint64_t from = 1024U * 1024U;
-            uint64_t to = from + (uint64_t)inf->mem_upper * 1024U;
-            if (to > (1ULL << 30)) {
-                to = 1ULL << 30;
+        if (physmem_uefi_firmware_kbd_active()) {
+            pmm_give_free_range(UEFI_FW_SAFE_RAM_BASE, UEFI_FW_SAFE_RAM_BYTES);
+            ctx.did_free = 1;
+        } else {
+            SystemInfo* inf = multiboot2_get_info();
+            if (inf->mem_upper > 0) {
+                uint64_t from = 1024U * 1024U;
+                uint64_t to = from + (uint64_t)inf->mem_upper * 1024U;
+                if (to > (1ULL << 30)) {
+                    to = 1ULL << 30;
+                }
+                pmm_give_free_range(from, to - from);
             }
-            pmm_give_free_range(from, to - from);
         }
     }
 
     /* Reserve low 1 MiB: IVT, BDA, etc. (also avoids handing out 0 / NULL frames). */
     pmm_mark_range_used(0, 0x100000u);
+    physmem_reserve_uefi_fixed();
 
     /* LMA: physical span [__kernel_lma_start, __kernel_lma_end). */
     pmm_mark_range_used(
@@ -332,6 +382,8 @@ KernelMemoryStats* memory_get_stats(void) {
 
 void kernel_memory_print_stats(void) {
     char buffer[64];
+    KernelMemoryStats* live = memory_get_stats();
+    (void)live;
     console_newline();
     console_println_color("=== MEMORY STATISTICS ===", CONSOLE_HEADER_COLOR);
     console_draw_separator(console_state.cursor_y, CONSOLE_FG_COLOR);
