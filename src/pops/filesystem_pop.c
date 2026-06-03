@@ -302,7 +302,7 @@ void list_files_console(void) {
 
 // Function to list all files in the current directory (VGA version)
 void list_files() {
-    char* vidptr = (char*)0xb8000;
+    char* vidptr = console_get_buffer();
     unsigned int pos = 0;
 
     for (int i = 0; i < MAX_FILES; ++i) {
@@ -323,6 +323,7 @@ void list_files() {
             }
         }
     }
+    console_present();
 }
 
 // Function to delete a file
@@ -651,6 +652,7 @@ void list_hierarchy(char* vidptr) {
             pos += 2;
         }
     }
+    console_present();
 }
 
 // Access console state to save/restore cursor

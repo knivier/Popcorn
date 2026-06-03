@@ -2,6 +2,7 @@
 #define UTILS_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 // Common utility functions shared across modules
 
@@ -19,6 +20,7 @@ int strncmp(const char *str1, const char *str2, size_t n);
 
 // Number conversion
 void int_to_str(int num, char *str);
+void uint64_to_str(uint64_t num, char *str);
 
 #endif // UTILS_H
 

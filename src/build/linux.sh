@@ -160,6 +160,7 @@ build_kernel() {
     compile_file "pops/halt_pop.c" "$OBJ_DIR/halt_pop.o" "c"
     compile_file "pops/filesystem_pop.c" "$OBJ_DIR/filesystem_pop.o" "c"
     compile_file "core/multiboot2.c" "$OBJ_DIR/multiboot2.o" "c"
+    compile_file "core/uefi_input.c" "$OBJ_DIR/uefi_input.o" "c"
     compile_file "pops/sysinfo_pop.c" "$OBJ_DIR/sysinfo_pop.o" "c"
     compile_file "pops/memory_pop.c" "$OBJ_DIR/memory_pop.o" "c"
     compile_file "pops/cpu_pop.c" "$OBJ_DIR/cpu_pop.o" "c"
@@ -201,6 +202,7 @@ build_kernel() {
         "$OBJ_DIR/halt_pop.o" \
         "$OBJ_DIR/filesystem_pop.o" \
         "$OBJ_DIR/multiboot2.o" \
+        "$OBJ_DIR/uefi_input.o" \
         "$OBJ_DIR/sysinfo_pop.o" \
         "$OBJ_DIR/memory_pop.o" \
         "$OBJ_DIR/cpu_pop.o" \

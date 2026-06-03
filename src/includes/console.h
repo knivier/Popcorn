@@ -2,6 +2,7 @@
 #define CONSOLE_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 // VGA Text Mode Constants
 #define VGA_WIDTH 80
@@ -79,6 +80,15 @@ typedef struct {
 // Function declarations
 void console_init(void);
 void console_clear(void);
+
+// Framebuffer text backend (UEFI/no-CSM machines). console_present() mirrors the
+// 80x25 text cells to the linear framebuffer; it is a no-op in VGA text mode.
+// console_get_buffer() returns the active text-cell buffer (0xB8000 or shadow).
+void console_present(void);
+char* console_get_buffer(void);
+bool console_fb_active(void);
+void console_fb_paint_background(uint32_t rgb);
+void console_fb_relayout(void);
 void console_set_color(unsigned char color);
 void console_set_cursor(unsigned int x, unsigned int y);
 void console_putchar(char c);
@@ -94,6 +104,7 @@ void console_draw_header(const char* title);
 void console_draw_prompt(void);
 void console_draw_prompt_with_path(const char* path);
 void console_print_status_bar(void);
+void console_heartbeat_tick(void);
 void console_print_error(const char* message);
 void console_print_success(const char* message);
 void console_print_info(const char* message);

@@ -2,9 +2,6 @@
 #include "../includes/console.h"
 #include "../includes/utils.h"
 
-// Access VGA memory for special effects
-#define VGA_MEMORY ((char*)0xb8000)
-
 // Function to display the halt message with animation
 void halt_pop_func(unsigned int start_pos) {
     (void)start_pos; // Unused parameter
@@ -19,13 +16,14 @@ void halt_pop_func(unsigned int start_pos) {
 
     // Clear the screen with green background using console system
     console_clear();
-    
-    // Fill screen with green background
-    char* vidptr = VGA_MEMORY;
+
+    // Use the active text backend (real VGA in BIOS/QEMU, RAM shadow on UEFI).
+    char* vidptr = console_get_buffer();
     for (unsigned int m = 0; m < 80 * 25 * 2; m += 2) {
         vidptr[m] = ' ';
         vidptr[m + 1] = 0x20; // Green background with black text
     }
+    console_present();
 
     // Display centered message using console system
     unsigned int msg_len = 0;
@@ -42,6 +40,7 @@ void halt_pop_func(unsigned int start_pos) {
         for (unsigned int m = 0; m < 80 * 25 * 2; m += 2) {
             vidptr[m + 1] ^= 0x08; // Toggle blink bit
         }
+        console_present();
         util_delay(500);
     }
 
@@ -50,6 +49,7 @@ void halt_pop_func(unsigned int start_pos) {
         for (unsigned int m = 0; m < 80 * 25 * 2; m += 2) {
             vidptr[m + 1] = (unsigned char)((rainbow << 4) | 0x0F);
         }
+        console_present();
         util_delay(300);
     }
 
@@ -58,6 +58,7 @@ void halt_pop_func(unsigned int start_pos) {
         for (unsigned int m = 0; m < 80 * 25 * 2; m += 2) {
             vidptr[m + 1] = (unsigned char)fade;
         }
+        console_present();
         util_delay(100);
     }
     

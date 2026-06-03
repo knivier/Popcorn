@@ -678,7 +678,7 @@ class ModernPopcornBuilder:
                 obj_files = ['obj/kasm.o', 'obj/kc.o', 'obj/console.o', 'obj/utils.o',
                            'obj/pop_module.o', 'obj/shimjapii_pop.o', 'obj/idt.o',
                            'obj/context_switch.o', 'obj/spinner_pop.o', 'obj/uptime_pop.o', 
-                           'obj/halt_pop.o', 'obj/filesystem_pop.o', 'obj/multiboot2.o', 
+                           'obj/halt_pop.o', 'obj/filesystem_pop.o', 'obj/multiboot2.o',
                            'obj/sysinfo_pop.o', 'obj/memory_pop.o', 'obj/cpu_pop.o', 
                            'obj/dolphin_pop.o', 'obj/timer.o', 'obj/scheduler.o', 
                            'obj/memory.o', 'obj/vmm.o', 'obj/init.o', 'obj/syscall.o']

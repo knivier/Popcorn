@@ -104,3 +104,25 @@ void int_to_str(int num, char *str) {
     }
 }
 
+void uint64_to_str(uint64_t num, char *str) {
+    int i = 0;
+    if (num == 0) {
+        str[0] = '0';
+        str[1] = '\0';
+        return;
+    }
+    while (num != 0) {
+        str[i++] = (char)('0' + (num % 10));
+        num /= 10;
+    }
+    str[i] = '\0';
+    int start = 0;
+    int end = i - 1;
+    while (start < end) {
+        char t = str[start];
+        str[start] = str[end];
+        str[end] = t;
+        start++;
+        end--;
+    }
+}
