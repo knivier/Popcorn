@@ -9,6 +9,7 @@
 // Reference: https://www.gnu.org/software/grub/manual/multiboot2/multiboot.html
 
 #define MULTIBOOT2_BOOTLOADER_MAGIC 0x36d76289
+#define MBI_STAGING_SIZE              65536
 
 // Multiboot2 tag types
 #define MULTIBOOT_TAG_TYPE_END               0
@@ -69,6 +70,92 @@ struct multiboot_tag_mmap {
     struct multiboot_mmap_entry entries[0];
 };
 
+/* VBE mode info (subset used by Multiboot2 VBE tag). */
+struct multiboot_vbe_mode_info {
+    uint16_t attributes;
+    uint8_t  window_a;
+    uint8_t  window_b;
+    uint16_t granularity;
+    uint16_t window_size;
+    uint16_t segment_a;
+    uint16_t segment_b;
+    uint32_t win_func_ptr;
+    uint16_t pitch;
+    uint16_t width;
+    uint16_t height;
+    uint8_t  w_char;
+    uint8_t  y_char;
+    uint8_t  planes;
+    uint8_t  bpp;
+    uint8_t  banks;
+    uint8_t  memory_model;
+    uint8_t  bank_size;
+    uint8_t  image_pages;
+    uint8_t  reserved0;
+    uint8_t  red_mask;
+    uint8_t  red_position;
+    uint8_t  green_mask;
+    uint8_t  green_position;
+    uint8_t  blue_mask;
+    uint8_t  blue_position;
+    uint8_t  reserved_mask;
+    uint8_t  reserved_position;
+    uint8_t  direct_color_attributes;
+    uint32_t framebuffer;
+    uint32_t off_screen_mem_off;
+    uint16_t off_screen_mem_size;
+    uint8_t  reserved1[206];
+} __attribute__((packed));
+
+// VBE tag (type 7)
+struct multiboot_tag_vbe {
+    uint32_t type;
+    uint32_t size;
+    uint16_t vbe_mode;
+    uint16_t vbe_interface_seg;
+    uint16_t vbe_interface_off;
+    uint16_t vbe_interface_len;
+    uint8_t  vbe_control_info[512];
+    struct multiboot_vbe_mode_info mode_info;
+} __attribute__((packed));
+
+// Framebuffer tag (type 8)
+struct multiboot_tag_framebuffer {
+    uint32_t type;
+    uint32_t size;
+    uint64_t framebuffer_addr;
+    uint32_t framebuffer_pitch;
+    uint32_t framebuffer_width;
+    uint32_t framebuffer_height;
+    uint8_t  framebuffer_bpp;
+    uint8_t  framebuffer_type;
+    uint16_t reserved;
+    uint8_t  framebuffer_red_field_position;
+    uint8_t  framebuffer_red_mask_size;
+    uint8_t  framebuffer_green_field_position;
+    uint8_t  framebuffer_green_mask_size;
+    uint8_t  framebuffer_blue_field_position;
+    uint8_t  framebuffer_blue_mask_size;
+} __attribute__((packed));
+
+#define MULTIBOOT_FRAMEBUFFER_TYPE_INDEXED  0
+#define MULTIBOOT_FRAMEBUFFER_TYPE_RGB      1
+#define MULTIBOOT_FRAMEBUFFER_TYPE_EGA_TEXT 2
+
+// Parsed framebuffer info (valid only when GRUB provided a framebuffer tag)
+typedef struct {
+    bool present;
+    uint64_t addr;
+    uint32_t pitch;
+    uint32_t width;
+    uint32_t height;
+    uint8_t  bpp;
+    uint8_t  type;
+    uint8_t  red_pos, red_size;
+    uint8_t  green_pos, green_size;
+    uint8_t  blue_pos, blue_size;
+} FramebufferInfo;
+
 // Memory map entry types
 #define MULTIBOOT_MEMORY_AVAILABLE        1
 #define MULTIBOOT_MEMORY_RESERVED         2
@@ -96,7 +183,13 @@ void multiboot2_foreach_mmap(multiboot_mmap_fn fn, void* user);
 
 // Function declarations
 void multiboot2_parse(void);
+/* Walk tags for framebuffer/VBE only — call before console_init on UEFI hardware. */
+void multiboot2_parse_framebuffer(void);
+void popcorn_apply_uefi_boot_info(void);
+void uefi_boot_mark_console(void);
+bool multiboot2_is_uefi_boot(void);
 SystemInfo* multiboot2_get_info(void);
+const FramebufferInfo* multiboot2_get_framebuffer(void);
 const char* multiboot2_get_bootloader_name(void);
 const char* multiboot2_get_command_line(void);
 uint64_t multiboot2_get_total_memory(void);

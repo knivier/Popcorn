@@ -221,6 +221,7 @@ build_kernel() {
   compile_c "pops/halt_pop.c" "$OBJ_DIR/halt_pop.o"
   compile_c "pops/filesystem_pop.c" "$OBJ_DIR/filesystem_pop.o"
   compile_c "core/multiboot2.c" "$OBJ_DIR/multiboot2.o"
+  compile_c "core/uefi_input.c" "$OBJ_DIR/uefi_input.o"
   compile_c "pops/sysinfo_pop.c" "$OBJ_DIR/sysinfo_pop.o"
   compile_c "pops/memory_pop.c" "$OBJ_DIR/memory_pop.o"
   compile_c "pops/cpu_pop.c" "$OBJ_DIR/cpu_pop.o"
@@ -246,6 +247,7 @@ build_kernel() {
     "$OBJ_DIR/halt_pop.o"
     "$OBJ_DIR/filesystem_pop.o"
     "$OBJ_DIR/multiboot2.o"
+    "$OBJ_DIR/uefi_input.o"
     "$OBJ_DIR/sysinfo_pop.o"
     "$OBJ_DIR/memory_pop.o"
     "$OBJ_DIR/cpu_pop.o"
@@ -309,6 +311,11 @@ create_iso() {
   cp "$KERNEL_OUT" isodir/boot/kernel
 
   cat > isodir/boot/grub/grub.cfg <<'EOF'
+insmod all_video
+insmod efi_gop
+set gfxmode=1024x768x32
+set gfxpayload=1024x768x32
+
 set timeout=3
 set default=0
 

@@ -38,7 +38,7 @@ void timer_interrupt_handler(void) {
     if (global_timer.tick_handler) {
         global_timer.tick_handler();
     }
-    
+
     // Send EOI (End of Interrupt) to PIC
     write_port(0x20, 0x20);
 }

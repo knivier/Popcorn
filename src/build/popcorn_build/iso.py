@@ -39,13 +39,10 @@ class IsoBuilder:
             isodir / "boot" / "grub" / "grub.cfg",
             "\n".join(
                 [
-                    # Force a larger, modern framebuffer-ish mode for QEMU window sizing.
-                    # This does not change kernel code; it just makes GRUB use a 720p-like mode.
                     "insmod all_video",
-                    "insmod gfxterm",
-                    "terminal_output gfxterm",
-                    "set gfxmode=1280x720",
-                    "set gfxpayload=keep",
+                    "insmod efi_gop",
+                    "set gfxmode=1024x768x32",
+                    "set gfxpayload=1024x768x32",
                     "",
                     "set timeout=3",
                     "set default=0",

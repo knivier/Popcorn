@@ -2,6 +2,13 @@
 src/obj/
 src/kernel
 src/popcorn.iso
+src/popcorn-uefi.iso
+src/popcorn-uefi.img
+src/efi_part.img
+src/BOOTX64.EFI
+src/EFI/
+src/boot/
+src/uefi_usb/
 src/isodir/
 src/buildbase/
 buildbase/

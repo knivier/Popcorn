@@ -5,6 +5,7 @@
 #include "../includes/memory.h"
 #include "../includes/pop_module.h"
 #include "../includes/multiboot2.h"
+#include "../includes/uefi_input.h"
 #include "../includes/sysinfo_pop.h"
 #include "../includes/memory_pop.h"
 #include "../includes/cpu_pop.h"
@@ -12,6 +13,7 @@
 #include "../includes/spinner_pop.h"
 #include "../includes/syscall.h"
 #include "../includes/utils.h"
+#include "../includes/boot_fb.h"
 #include <stddef.h>
 
 extern void multiboot2_parse(void);
@@ -33,15 +35,31 @@ extern const char* get_current_directory(void);
 extern uint64_t multiboot2_info_ptr;
 extern ConsoleState console_state;
 
+static void boot_stage(char c) {
+    boot_serial_putc(c);
+}
+
 static const int total_init_steps = 9;
 
 void init_boot_screen(void) {
-    multiboot2_parse();
-
-    /* IDT before any task runs with IF=1 (see setup_task_context rflags) or context_save's sti. */
-    idt_init();
-
+    boot_stage('i');
+    /* UEFI: paint framebuffer and parse GOP handoff before IDT/PIC (still on loader text until FB draws). */
+    uefi_boot_mark_console();
+    multiboot2_parse_framebuffer();
     console_init();
+    boot_stage('c');
+    if (console_fb_active()) {
+        console_fb_relayout();
+    }
+
+    idt_init();
+    boot_stage('d');
+
+    if (!console_fb_active()) {
+        boot_diag_caps_led_on();
+    }
+
+    multiboot2_parse();
 
     init_draw_header();
 
@@ -58,10 +76,15 @@ void init_boot_screen(void) {
     init_draw_progress_bar(total_init_steps, total_init_steps, "Initialization Complete");
     console_println_color("", CONSOLE_FG_COLOR);
     console_println_color("", CONSOLE_FG_COLOR);
+    console_heartbeat_tick();
 
-    init_wait_for_enter();
+    if (!console_fb_active()) {
+        init_wait_for_enter();
+    }
 
+    boot_stage('t');
     init_transition_to_console();
+    boot_stage('e');
 }
 
 void init_draw_header(void) {
@@ -82,6 +105,7 @@ void init_draw_header(void) {
 
     console_set_cursor(15, 2);
     console_println_color("POPCORN KERNEL v0.5", BOOT_TITLE_COLOR);
+    console_heartbeat_tick();
 
     console_set_cursor(0, 3);
     console_print_color("=", BOOT_TITLE_COLOR);
@@ -311,16 +335,29 @@ void init_wait_for_enter(void) {
 }
 
 void init_transition_to_console(void) {
+    if (console_fb_active()) {
+        console_fb_paint_background(POPCORN_FB_BG_RGB);
+        console_fb_relayout();
+    }
+
     console_clear();
     console_draw_header("Popcorn Kernel v0.5");
+    console_heartbeat_tick();
     console_println_color("Welcome to Popcorn Kernel!", CONSOLE_SUCCESS_COLOR);
     console_newline();
-    if (multiboot2_info_ptr == 0) {
+    if (multiboot2_is_uefi_boot()) {
+        if (uefi_input_available()) {
+            console_println_color("Boot: UEFI USB keyboard (firmware CR3)", CONSOLE_INFO_COLOR);
+        } else {
+            console_println_color("Boot: UEFI native loader (GOP framebuffer)", CONSOLE_INFO_COLOR);
+        }
+    } else if (multiboot2_info_ptr == 0) {
         console_println_color("Warning: No Multiboot2 info received", CONSOLE_WARNING_COLOR);
     }
 
-    /* Enable keyboard IRQs for interactive console input. */
-    kb_init();
+    if (!uefi_input_available()) {
+        kb_init();
+    }
     /*
      * Re-enable PIT scheduling. scheduler.c has bootstrap guards to avoid switching while
      * CPU still executes kmain on boot stack before first real task run.
@@ -331,4 +368,5 @@ void init_transition_to_console(void) {
     console_draw_prompt_with_path(get_current_directory());
 
     console_print_status_bar();
-    }
+    console_heartbeat_tick();
+}

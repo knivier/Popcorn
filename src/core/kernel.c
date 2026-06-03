@@ -1,4 +1,5 @@
 #include "../includes/keyboard_map.h"
+#include "../includes/uefi_input.h"
 #include "../includes/pop_module.h"
 #include "../includes/spinner_pop.h"
 #include "../includes/console.h"
@@ -266,12 +267,34 @@ void idt_init(void)
         };
         __asm__ volatile("lidt %0" : : "m"(idt_desc) : "memory");
     }
-    __asm__ volatile("sti" ::: "memory");
+    /* Leave interrupts off until init_boot_screen finishes; UEFI laptops can mis-deliver IRQs here. */
+}
+
+static void kbc_wait_input(void) {
+    for (int i = 0; i < 100000; i++) {
+        if ((read_port(KEYBOARD_STATUS_PORT) & 0x02) == 0) {
+            return;
+        }
+    }
 }
 
 void kb_init(void)
 {
-    write_port(0x21 , 0xFD);
+    /* Enable PS/2 keyboard and drain stale bytes (ThinkPad/UEFI often skips IRQ1). */
+    kbc_wait_input();
+    write_port(KEYBOARD_STATUS_PORT, 0xAE);
+    kbc_wait_input();
+    while (read_port(KEYBOARD_STATUS_PORT) & 0x01) {
+        (void)read_port(KEYBOARD_DATA_PORT);
+    }
+    write_port(0x21, 0xFD);
+}
+
+void keyboard_poll_ps2(void) {
+    unsigned char status = read_port(KEYBOARD_STATUS_PORT);
+    if (status & 0x01) {
+        key_queue_push(read_port(KEYBOARD_DATA_PORT));
+    }
 }
 
 void kprint(const char *str) {
@@ -853,7 +876,7 @@ void execute_command(const char *command) {
         console_newline();
         console_println_color("File System Hierarchy:", CONSOLE_HEADER_COLOR);
         console_draw_separator(console_state.cursor_y, CONSOLE_FG_COLOR);
-        list_hierarchy(vidptr);
+        list_hierarchy(console_get_buffer());
         console_newline();
     } else if (strcmp(command, "sysinfo") == 0) {
         sysinfo_print_full();
@@ -1078,10 +1101,12 @@ void execute_command(const char *command) {
     }
 }
 
+extern void boot_serial_putc(char c);
+
 void kmain(void) {
-    // Initialize the boot screen and show initialization process
     init_boot_screen();
-    
+    boot_serial_putc('K');
+
     // At this point, init_boot_screen() has already:
     // - Initialized memory management
     // - Initialized timer system
@@ -1098,12 +1123,56 @@ void kmain(void) {
     /* PS/2 set 1: 0xE0 byte prefixes extended scancode; break = make | 0x80. */
     static bool kbd_expect_e0 = false;
 
-    // Main kernel loop: keyboard IRQ buffers scancodes; we dequeue here.
+    uint64_t loop_iter = 0;
+    uint64_t last_uefi_poll_tick = 0;
+
+    boot_serial_putc('L');
+    /* Mask PIT; enabling IF (sti) with pending IRQs hung kmain on QEMU and ThinkPad. */
+    timer_disable();
+
     while (1) {
         unsigned char keycode;
-        if (!key_queue_pop(&keycode)) {
-            __asm__ volatile("sti; hlt" ::: "memory");
-            continue;
+        bool from_queue = false;
+
+        if ((loop_iter & 0xFFFFu) == 0u) {
+            boot_serial_putc('.');
+        }
+        /* Heartbeat text redraw is expensive on GOP MMIO; throttle hard. */
+        if ((loop_iter & 0x3FFFu) == 0u) {
+            console_heartbeat_tick();
+        }
+        loop_iter++;
+
+        /* Firmware ReadKeyStroke can hang; poll at most ~10 Hz via PIT ticks. */
+        if (uefi_input_available()) {
+            uint64_t now = timer_get_ticks();
+            if (now - last_uefi_poll_tick >= 10u) {
+                bool is_scancode = false;
+                last_uefi_poll_tick = now;
+                if (uefi_input_poll(&keycode, &is_scancode)) {
+                    if (!is_scancode) {
+                        if (dolphin_is_active()) {
+                            continue;
+                        }
+                        if (input_index < sizeof(input_buffer) - 1) {
+                            input_buffer[input_index++] = (char)keycode;
+                            console_putchar((char)keycode);
+                            history_index = -1;
+                        }
+                        continue;
+                    }
+                    from_queue = true;
+                }
+            }
+        }
+
+        if (!from_queue && !key_queue_pop(&keycode)) {
+            keyboard_poll_ps2();
+            if (!key_queue_pop(&keycode)) {
+                /* Avoid HLT until PIT/APIC delivery is verified on UEFI firmware. */
+                __asm__ volatile("pause");
+                continue;
+            }
         }
 
         if (kbd_expect_e0) {
