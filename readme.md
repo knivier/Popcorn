@@ -58,26 +58,25 @@ All build tooling lives under `src/build/`:
 
 | Script | Platform | Description |
 |--------|----------|-------------|
-| `build/macos.sh` | macOS | CLI + dialog menu; cross toolchain (clang/lld or x86_64-elf-gcc) |
-| `build/linux.sh` | Linux / Fedora | CLI + dialog menu; native gcc/ld |
+| `build/core.sh` | All | Unified CLI: kernel, UEFI img, ISO, QEMU tests |
+| `build/macos.sh` | macOS | Delegates to `core.sh`; dialog menu when run with no args |
+| `build/linux.sh` | Linux / Fedora | Delegates to `core.sh`; dialog menu when run with no args |
 | `build/gui-macos.py` | macOS | WebView GUI (requires `pywebview`) |
 | `build/gui-tk.py` | Cross-platform | Tkinter GUI with full automation |
 
-**macOS (CLI):**
+**CLI (from `src/`):**
 ```bash
-cd src
-./build/macos.sh build    # build kernel
-./build/macos.sh iso      # create bootable ISO
-./build/macos.sh run      # boot in QEMU
+./build/core.sh build       # kernel only
+./build/core.sh all         # kernel + UEFI loader + popcorn-uefi.img (flash this)
+./build/core.sh test-uefi   # QEMU smoke tests
+./build/core.sh run-uefi    # interactive QEMU with UEFI USB image
+./build/core.sh iso         # legacy GRUB popcorn.iso
+./build/core.sh run         # QEMU with legacy ISO
 ```
 
-**Linux / Fedora (CLI):**
-```bash
-cd src
-./build/linux.sh          # interactive dialog menu
-```
+`./build/macos.sh` and `./build/linux.sh` accept the same commands as `core.sh`.
 
-For verbose compile errors without the dialog UI, use `./build/macos.sh build` from a terminal (macOS) or the Tkinter GUI’s verbose build mode.
+For verbose compile errors, run `./build/core.sh build` from a terminal or use the Tkinter GUI verbose build mode.
 
 **Note:** Direct kernel loading with `-kernel` may not work with all QEMU versions for 64-bit multiboot kernels. The ISO method is highly recommended.
 
@@ -129,9 +128,13 @@ ROOT
     
         ├── build/              (All build scripts and tooling)
         
-        │   ├── macos.sh        (macOS CLI build system)
+        │   ├── core.sh         (Unified build entry point)
         
-        │   ├── linux.sh        (Linux/Fedora CLI build system)
+        │   ├── lib/            (kernel, UEFI, img, ISO, QEMU modules)
+        
+        │   ├── macos.sh        (macOS: core.sh + dialog menu)
+        
+        │   ├── linux.sh        (Linux: core.sh + dialog menu)
         
         │   ├── gui-macos.py    (macOS WebView GUI builder)
         

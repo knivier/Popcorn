@@ -85,6 +85,8 @@ void console_clear(void);
 // 80x25 text cells to the linear framebuffer; it is a no-op in VGA text mode.
 // console_get_buffer() returns the active text-cell buffer (0xB8000 or shadow).
 void console_present(void);
+void console_sync_begin(void);
+void console_sync_end(void);
 char* console_get_buffer(void);
 bool console_fb_active(void);
 void console_fb_paint_background(uint32_t rgb);

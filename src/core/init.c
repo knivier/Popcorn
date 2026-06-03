@@ -90,6 +90,7 @@ void init_boot_screen(void) {
 void init_draw_header(void) {
     console_clear();
 
+    console_sync_begin();
     console_set_cursor(0, 0);
     for (int i = 0; i < BOOT_SCREEN_WIDTH; i++) {
         console_print_color("=", BOOT_TITLE_COLOR);
@@ -131,12 +132,14 @@ void init_draw_header(void) {
     console_set_cursor(0, 14);
     console_println_color("Initialization Progress:", BOOT_SUBTITLE_COLOR);
     console_draw_separator(15, BOOT_INFO_COLOR);
+    console_sync_end();
 }
 
 void init_draw_progress_bar(int current, int total, const char* item) {
     char buffer[64];
     int progress_percent = (current * 100) / total;
 
+    console_sync_begin();
     console_set_cursor(0, 16);
     console_print_color("[", BOOT_INFO_COLOR);
 
@@ -162,6 +165,7 @@ void init_draw_progress_bar(int current, int total, const char* item) {
     for (int i = 0; i < 20; i++) {
         console_print_color(" ", CONSOLE_FG_COLOR);
     }
+    console_sync_end();
 }
 
 void init_show_memory_info(void) {
@@ -346,24 +350,25 @@ void init_transition_to_console(void) {
     console_println_color("Welcome to Popcorn Kernel!", CONSOLE_SUCCESS_COLOR);
     console_newline();
     if (multiboot2_is_uefi_boot()) {
-        if (uefi_input_available()) {
-            console_println_color("Boot: UEFI USB keyboard (firmware CR3)", CONSOLE_INFO_COLOR);
-        } else {
-            console_println_color("Boot: UEFI native loader (GOP framebuffer)", CONSOLE_INFO_COLOR);
-        }
+        console_println_color("Boot: UEFI native loader (GOP framebuffer)", CONSOLE_INFO_COLOR);
+        console_println_color("Keyboard: PS/2 poll (ExitBootServices)", CONSOLE_INFO_COLOR);
     } else if (multiboot2_info_ptr == 0) {
         console_println_color("Warning: No Multiboot2 info received", CONSOLE_WARNING_COLOR);
     }
 
-    if (!uefi_input_available()) {
-        kb_init();
-    }
     /*
      * Re-enable PIT scheduling. scheduler.c has bootstrap guards to avoid switching while
      * CPU still executes kmain on boot stack before first real task run.
      */
+    /* PS/2 keyboard after ExitBootServices (firmware ConIn is not used in the kernel). */
+    kb_init();
     timer_set_tick_handler(scheduler_tick);
-    timer_enable();
+    if (multiboot2_is_uefi_boot()) {
+        timer_enable_poll();
+    } else {
+        pic_acknowledge_pending();
+        timer_enable();
+    }
 
     console_draw_prompt_with_path(get_current_directory());
 

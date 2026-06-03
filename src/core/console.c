@@ -54,6 +54,8 @@ static uint8_t  fb_bpos = 0, fb_bsize = 8;
 static uint32_t fb_origin_x = 0, fb_origin_y = 0;
 static bool     fb_active = false;
 static unsigned int fb_prev_cursor = 0xFFFFFFFFu;
+static uint32_t fb_dirty_rows = 0;
+static unsigned int fb_defer_sync = 0;
 
 // Shadow of the 80x25 text cells (char, attr) used while in framebuffer mode.
 static char fb_text_shadow[VGA_MEMORY_SIZE];
@@ -211,6 +213,8 @@ static uint32_t fb_cell_h(void) {
 
 static void fb_draw_cell(unsigned int cx, unsigned int cy);
 static void fb_draw_cursor(unsigned int cx, unsigned int cy);
+static void console_fb_sync_cell(unsigned int cx, unsigned int cy);
+static void console_fb_sync_cursor(void);
 
 static void console_fb_fill_text_panel(void) {
     if (!fb_active || !fb_base) {
@@ -226,6 +230,34 @@ static void console_fb_fill_text_panel(void) {
             fb_put_pixel(x, y, pix);
         }
     }
+}
+
+static void console_fb_mark_row(unsigned int cy) {
+    if (cy < VGA_HEIGHT) {
+        fb_dirty_rows |= (1u << cy);
+    }
+}
+
+static void console_fb_sync_row(unsigned int cy) {
+    if (!fb_active || cy >= VGA_HEIGHT) {
+        return;
+    }
+    for (unsigned int cx = 0; cx < VGA_WIDTH; cx++) {
+        console_fb_sync_cell(cx, cy);
+    }
+}
+
+static void console_fb_flush_dirty_rows(void) {
+    if (!fb_active) {
+        return;
+    }
+    for (unsigned int cy = 0; cy < VGA_HEIGHT; cy++) {
+        if (fb_dirty_rows & (1u << cy)) {
+            console_fb_sync_row(cy);
+        }
+    }
+    fb_dirty_rows = 0;
+    console_fb_sync_cursor();
 }
 
 static void console_fb_sync_cell(unsigned int cx, unsigned int cy) {
@@ -360,26 +392,30 @@ char* console_get_buffer(void) {
     return vga_memory;
 }
 
+void console_sync_begin(void) {
+    if (fb_active) {
+        fb_defer_sync++;
+    }
+}
+
+void console_sync_end(void) {
+    if (fb_active && fb_defer_sync > 0) {
+        fb_defer_sync--;
+        if (fb_defer_sync == 0) {
+            console_fb_flush_dirty_rows();
+        }
+    }
+}
+
 // Mirror the text shadow into the linear framebuffer (no-op in VGA text mode).
 void console_present(void) {
     if (!fb_active) {
         return;
     }
-    for (unsigned int i = 0; i < VGA_MEMORY_SIZE; i += 2) {
-        if (fb_text_rendered[i] != vga_memory[i] ||
-            fb_text_rendered[i + 1] != vga_memory[i + 1]) {
-            unsigned int cell = i / 2;
-            fb_draw_cell(cell % VGA_WIDTH, cell / VGA_WIDTH);
-            fb_text_rendered[i] = vga_memory[i];
-            fb_text_rendered[i + 1] = vga_memory[i + 1];
-        }
+    for (unsigned int cy = 0; cy < VGA_HEIGHT; cy++) {
+        console_fb_sync_row(cy);
     }
-    unsigned int cur = console_state.cursor_y * VGA_WIDTH + console_state.cursor_x;
-    if (fb_prev_cursor != cur && fb_prev_cursor != 0xFFFFFFFFu) {
-        fb_draw_cell(fb_prev_cursor % VGA_WIDTH, fb_prev_cursor / VGA_WIDTH);
-    }
-    fb_draw_cursor(console_state.cursor_x, console_state.cursor_y);
-    fb_prev_cursor = cur;
+    console_fb_sync_cursor();
 }
 
 // Set up framebuffer text backend from the Multiboot2 framebuffer tag.
@@ -591,8 +627,12 @@ void console_putchar(char c) {
     
     update_hardware_cursor(console_state.cursor_x, console_state.cursor_y);
     if (fb_active) {
-        console_fb_sync_cell(cx, cy);
-        console_fb_sync_cursor();
+        if (fb_defer_sync) {
+            console_fb_mark_row(cy);
+        } else {
+            console_fb_sync_cell(cx, cy);
+            console_fb_sync_cursor();
+        }
         return;
     }
     console_present();
@@ -600,8 +640,19 @@ void console_putchar(char c) {
 
 // Print a string with current color
 void console_print(const char* str) {
+    if (fb_active) {
+        fb_defer_sync++;
+    }
     while (*str) {
         console_putchar(*str++);
+    }
+    if (fb_active) {
+        if (fb_defer_sync > 0) {
+            fb_defer_sync--;
+        }
+        if (fb_defer_sync == 0) {
+            console_fb_flush_dirty_rows();
+        }
     }
 }
 
@@ -670,6 +721,13 @@ void console_scroll(void) {
     
     // Reset scroll offset when new content appears
     console_state.scroll_offset = 0;
+    if (fb_active) {
+        for (unsigned int y = 0; y < VGA_HEIGHT; y++) {
+            console_fb_mark_row(y);
+        }
+        console_fb_flush_dirty_rows();
+        return;
+    }
     console_present();
 }
 
@@ -828,20 +886,20 @@ static void console_heartbeat_paint(uint64_t alive, uint64_t tsc_lo, uint64_t ue
         unsigned int pos = (HEARTBEAT_ROW * VGA_WIDTH + cx) * 2u;
         vga_memory[pos] = line[j];
         vga_memory[pos + 1] = (char)(CONSOLE_BG_COLOR | CONSOLE_SUCCESS_COLOR);
-        if (fb_active) {
-            console_fb_sync_cell(cx, HEARTBEAT_ROW);
-        }
+    }
+    if (fb_active) {
+        console_fb_sync_row(HEARTBEAT_ROW);
     }
 }
 
 void console_heartbeat_tick(void) {
     console_alive_seq++;
-    if ((console_alive_seq & 0x1Fu) != 0u) {
-        return;
-    }
     uint64_t polls = uefi_input_available() ? uefi_input_poll_attempts() : 0;
-    uint64_t tsc = console_read_tsc();
-    console_heartbeat_paint(console_alive_seq, tsc, polls);
+    uint64_t ticks = timer_get_ticks();
+    if (ticks == 0) {
+        ticks = console_read_tsc() & 0xFFFFFu;
+    }
+    console_heartbeat_paint(console_alive_seq, ticks, polls);
 }
 
 // Print status bar at bottom

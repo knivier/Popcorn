@@ -69,7 +69,7 @@ static void multiboot2_walk_tags(bool framebuffer_only) {
     }
     uint32_t* mbi = (uint32_t*)(uintptr_t)multiboot2_info_ptr;
     uint32_t total_size = mbi[0];
-    if (total_size < 8 || total_size > MBI_STAGING_SIZE) {
+    if (total_size < 8 || total_size > 0x100000) {
         boot_serial_putc('?');
         return;
     }
@@ -194,14 +194,28 @@ void multiboot2_parse(void) {
     sys_info.total_memory = 0;
     sys_info.available_memory_regions = 0;
 
+    if (multiboot2_info_ptr == 0 && multiboot2_is_uefi_boot()) {
+        volatile PopcornUefiBootInfo* u = uefi_handoff_ptr();
+        strncpy_safe(sys_info.bootloader_name, "Popcorn UEFI", sizeof(sys_info.bootloader_name));
+        sys_info.mem_lower = 640;
+        sys_info.mem_upper = (uint32_t)(u->available_ram_bytes / 1024ULL);
+        sys_info.total_memory = u->available_ram_bytes;
+        sys_info.valid = true;
+        multiboot2_info_ptr = POPCORN_UEFI_MBI_PHYS;
+    }
+
     if (multiboot2_info_ptr == 0) {
         sys_info.mem_lower = 640;
         sys_info.mem_upper = 0;
         sys_info.valid = true;
         return;
     }
+    boot_serial_putc('P');
     multiboot2_walk_tags(false);
     sys_info.valid = true;
+    if (sys_info.total_memory > 0) {
+        boot_serial_putc('R');
+    }
 }
 
 void multiboot2_foreach_mmap(multiboot_mmap_fn fn, void* user) {

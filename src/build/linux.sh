@@ -1,7 +1,17 @@
 #!/usr/bin/env bash
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$(cd "$SCRIPT_DIR/.." && pwd)"
+POPCORN_BUILD="$SCRIPT_DIR"
+POPCORN_SRC="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+_core_commands="build uefi img iso iso-uefi all run run-uefi test-uefi test-uefi-stability clean logs help --help -h"
+for c in $_core_commands; do
+  if [[ "${1:-}" == "$c" ]]; then
+    exec "$SCRIPT_DIR/core.sh" "$@"
+  fi
+done
+
+cd "$POPCORN_SRC"
 
 # Define colors and styles
 GREEN='\033[0;32m'

@@ -171,9 +171,21 @@ void memory_calculate_stats(void) {
         }
     }
     
-    // Simulate used memory (kernel + modules = ~2MB)
-    mem_stats.total_used = 2 * 1024 * 1024;
-    
+    if (mem_stats.total_available == 0) {
+        const SystemInfo* inf = multiboot2_get_info();
+        if (inf && inf->total_memory > 0) {
+            mem_stats.total_available = inf->total_memory;
+            mem_stats.total_physical = inf->total_memory;
+            mem_stats.num_regions = 1;
+            mem_stats.num_available_regions = 1;
+        }
+    }
+
+    /* Kernel footprint estimate until PMM stats are wired here. */
+    if (mem_stats.total_available > 0) {
+        mem_stats.total_used = 2 * 1024 * 1024;
+    }
+
     stats_initialized = true;
 }
 
