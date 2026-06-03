@@ -8,8 +8,55 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+extern char __kernel_start[];
+extern char __text_vend[];
+
+_Static_assert(
+    offsetof(TaskStruct, context) == 72,
+    "context_switch_to_task: update add rdi, N in context_switch.asm to match offsetof(TaskStruct, context)");
+_Static_assert(offsetof(CPUContext, r15) == 0, "asm context_save: update offsets");
+_Static_assert(offsetof(CPUContext, rax) == 112, "asm context_save: update offsets");
+_Static_assert(offsetof(CPUContext, rip) == 120, "asm context_save: mov [r10+120]");
+_Static_assert(offsetof(CPUContext, rsp) == 128, "asm context_save/restore: +128");
+_Static_assert(offsetof(CPUContext, rflags) == 136, "asm context_save: rflags");
+_Static_assert(offsetof(TaskStruct, address_space) == 584, "task_switch vmm: reload offsetof");
+
+static bool context_looks_sane(const CPUContext* c) {
+    if (!c) {
+        return false;
+    }
+    const uintptr_t rip = (uintptr_t)c->rip;
+    const uintptr_t sp = (uintptr_t)c->rsp;
+    const uintptr_t t0 = (uintptr_t)__kernel_start;
+    const uintptr_t t1 = (uintptr_t)__text_vend;
+    if (rip < t0 || rip >= t1) {
+        return false;
+    }
+    if (sp < 0x1000U || (sp & 7U) != 0U) {
+        return false;
+    }
+    if (sp < 24U) {
+        return false;
+    }
+    return true;
+}
+
 // Global scheduler state
 SchedulerState scheduler = {0};
+
+/* Boot page-table root (asm identity map); all tasks use this until given another PML4. */
+static uint64_t g_kernel_pml4_phys;
+
+/* current_task may be the idle task while the CPU still runs kmain on the boot stack. Saving
+ * that "idle" context would clobber setup_task_context() with kmain's RIP/RSP and fault on iretq. */
+static bool idle_cpu_has_run;
+
+/* True while scheduler.current_task is synthetic idle but CPU still executes kmain boot stack. */
+static bool bootstrap_on_kmain_stack(void) {
+    return scheduler.current_task &&
+           scheduler.current_task->pid == 0 &&
+           !idle_cpu_has_run;
+}
 
 // External functions
 extern uint64_t timer_get_ticks(void);
@@ -63,6 +110,8 @@ void task_free_stack(void* stack) {
 
 // Initialize the scheduler
 void scheduler_init(void) {
+    g_kernel_pml4_phys = vmm_get_cr3();
+
     // Initialize scheduler state
     scheduler.current_task = NULL;
     scheduler.next_pid = 1;
@@ -75,6 +124,7 @@ void scheduler_init(void) {
     }
 
     // Create idle task
+    idle_cpu_has_run = false;
     TaskStruct* idle = scheduler_create_task(idle_task, NULL, PRIORITY_IDLE);
     if (idle) {
         idle->pid = 0;  // Special PID for idle task
@@ -86,6 +136,23 @@ void scheduler_init(void) {
 
     scheduler.scheduler_active = true;
     console_println_color("Scheduler initialized", CONSOLE_SUCCESS_COLOR);
+    console_println_color("  Address spaces: per-task PML4; CR3 on switch", CONSOLE_INFO_COLOR);
+}
+
+uint64_t scheduler_kernel_pml4_phys(void) { return g_kernel_pml4_phys; }
+
+void task_set_address_space(TaskStruct* task, uint64_t pml4_phys) {
+    if (!task) {
+        return;
+    }
+    /*
+     * New PML4 must still map the kernel (same VAs as boot) or the next
+     * syscall/IRQ will fault. For a process root: vmm_alloc_pml4() then
+     * vmm_init_process_address_space(new, 0) (reference arg unused), then
+     * vmm_map_4k for user pages. Init uses vmm_map_kernel_region (layout).
+     * See vmm.h: 4 KiB overlays in 0..1 GiB need a 2 MiB PDE split first.
+     */
+    task->address_space.pml4_phys = pml4_phys;
 }
 
 // Scheduler tick handler (called from timer interrupt)
@@ -98,6 +165,9 @@ void scheduler_tick(void) {
     }
 
     if (!scheduler.scheduler_active || !scheduler.current_task) {
+        return;
+    }
+    if (bootstrap_on_kmain_stack()) {
         return;
     }
 
@@ -131,7 +201,7 @@ void scheduler_tick(void) {
 
 // Yield CPU to another task
 void scheduler_yield(void) {
-    if (scheduler.scheduler_active) {
+    if (scheduler.scheduler_active && !bootstrap_on_kmain_stack()) {
         scheduler_schedule();
     }
 }
@@ -493,6 +563,8 @@ void task_init(TaskStruct* task, void (*function)(void), void* data, TaskPriorit
     
     task->next = NULL;
     task->prev = NULL;
+
+    task->address_space.pml4_phys = g_kernel_pml4_phys;
 }
 
 // Set up initial context for a new task
@@ -585,22 +657,54 @@ void setup_task_context(TaskStruct* task) {
     // Set up FPU state
     task->context.fpu_control = 0x37F;  // Default FPU control word
     memset(task->context.fpu_state, 0, sizeof(task->context.fpu_state));
+
+    task->context.rip = (uint64_t)task->task_function;
 }
 
 // Context switch - now with real CPU register saving/restoring
 void task_switch(TaskStruct* from, TaskStruct* to) {
     if (!to) return;
 
-    // Disable interrupts during context switch
+    /* IF=0: pending IRQs (e.g. keyboard) wait; keep this section short to bound input latency. */
     __asm__ volatile("cli");
 
     // If we have a current task, save its context
     if (from && from != to) {
-        context_save(&from->context);
+        const bool fake_idle =
+            (from->pid == 0 && !idle_cpu_has_run);
+        if (!fake_idle) {
+            context_save(&from->context);
+            if (!context_looks_sane(&from->context)) {
+                serial_print("FATAL: context_save produced invalid RIP/RSP; halting\n");
+                for (;;) {
+                    __asm__ volatile("cli; hlt");
+                }
+            }
+        }
+    }
+
+    /*
+     * Load the next task's page-table root after saving the outgoing state.
+     * Stays a no-op while every task uses the boot identity PML4; required once
+     * per-process PML4s map different user VAs. Kernel VAs must remain valid in
+     * every such root (e.g. permanent kernel map into each user table).
+     */
+    if (to->address_space.pml4_phys != 0) {
+        uint64_t cr = vmm_get_cr3();
+        if (to->address_space.pml4_phys != cr) {
+            vmm_load_cr3(to->address_space.pml4_phys);
+        }
     }
 
     // Switch to the new task
     scheduler.current_task = to;
+
+    if (!context_looks_sane(&to->context)) {
+        serial_print("FATAL: would iretq to non-text RIP or bad RSP; halting\n");
+        for (;;) {
+            __asm__ volatile("cli; hlt");
+        }
+    }
 
     // Restore the new task's context
     context_restore(&to->context);
@@ -620,6 +724,7 @@ void task_exit(void) {
 
 // Idle task - runs when no other tasks are ready
 void idle_task(void) {
+    idle_cpu_has_run = true;
     // Very simple idle loop - just increment a counter
     static int counter = 0;
     while (1) {

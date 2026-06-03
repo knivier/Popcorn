@@ -225,6 +225,7 @@ build_kernel() {
   compile_c "core/timer.c" "$OBJ_DIR/timer.o"
   compile_c "core/scheduler.c" "$OBJ_DIR/scheduler.o"
   compile_c "core/memory.c" "$OBJ_DIR/memory.o"
+  compile_c "core/vmm.c" "$OBJ_DIR/vmm.o"
   compile_c "core/init.c" "$OBJ_DIR/init.o"
   compile_c "core/syscall.c" "$OBJ_DIR/syscall.o"
 
@@ -249,6 +250,7 @@ build_kernel() {
     "$OBJ_DIR/timer.o"
     "$OBJ_DIR/scheduler.o"
     "$OBJ_DIR/memory.o"
+    "$OBJ_DIR/vmm.o"
     "$OBJ_DIR/init.o"
     "$OBJ_DIR/syscall.o"
   )

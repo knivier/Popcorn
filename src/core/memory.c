@@ -1,447 +1,425 @@
-// src/core/memory.c
+// src/core/memory.c — bitmap physical allocator, identity-mapped 4K pages
 #include "../includes/memory.h"
+#include "../includes/vmm.h"
 #include "../includes/console.h"
 #include "../includes/multiboot2.h"
 #include "../includes/utils.h"
 #include <stddef.h>
 #include <stdint.h>
 
-// External multiboot2 pointer
 extern uint64_t multiboot2_info_ptr;
+extern char __kernel_start[];
+extern char __kernel_end[];
+/* Absolute (LMA) range of the multiboot-loaded image from link.ld. */
+extern char __kernel_lma_start[];
+extern char __kernel_lma_end[];
 
-// External functions
 extern ConsoleState console_state;
 extern void console_draw_separator(unsigned int y, unsigned char color);
 
-// Format memory size in human-readable form
-static void format_memory_size(uint64_t bytes, char* buffer, size_t buffer_size) {
-    (void)buffer_size;  // Suppress unused parameter warning
-    if (bytes >= 1024 * 1024 * 1024) {
-        // GB
-        uint64_t gb = bytes / (1024 * 1024 * 1024);
-        uint64_t mb = (bytes % (1024 * 1024 * 1024)) / (1024 * 1024);
-        int_to_str((int)gb, buffer);
-        int len = strlen_simple(buffer);
-        buffer[len++] = '.';
-        int_to_str((int)(mb / 102), buffer + len);
-        len += strlen_simple(buffer + len);
-        buffer[len++] = 'G';
-        buffer[len++] = 'B';
-        buffer[len] = '\0';
-    } else if (bytes >= 1024 * 1024) {
-        // MB
-        uint64_t mb = bytes / (1024 * 1024);
-        uint64_t kb = (bytes % (1024 * 1024)) / 1024;
-        int_to_str((int)mb, buffer);
-        int len = strlen_simple(buffer);
-        buffer[len++] = '.';
-        int_to_str((int)(kb / 102), buffer + len);
-        len += strlen_simple(buffer + len);
-        buffer[len++] = 'M';
-        buffer[len++] = 'B';
-        buffer[len] = '\0';
-    } else if (bytes >= 1024) {
-        // KB
-        uint64_t kb = bytes / 1024;
-        uint64_t b = bytes % 1024;
-        int_to_str((int)kb, buffer);
-        int len = strlen_simple(buffer);
-        buffer[len++] = '.';
-        int_to_str((int)(b / 102), buffer + len);
-        len += strlen_simple(buffer + len);
-        buffer[len++] = 'K';
-        buffer[len++] = 'B';
-        buffer[len] = '\0';
-    } else {
-        // Bytes
-        int_to_str((int)bytes, buffer);
-        int len = strlen_simple(buffer);
-        buffer[len++] = 'B';
-        buffer[len] = '\0';
-    }
-}
+/* 1GB identity-mapped in kernel.asm (512 x 2MB huge pages) = 2^18 4K frames */
+#define PMM_MAX_4K_FRAMES (1U << 18)
+#define PMM_BITMAP_BYTES (PMM_MAX_4K_FRAMES / 8U)
 
-// Memory management structures
+/* Bit 1 = used, 0 = free */
+static uint8_t pmm_bitmap[PMM_BITMAP_BYTES] __attribute__((aligned(4096)));
+static bool pmm_ready = false;
+
 typedef struct {
     void* base;
     size_t size;
     bool is_free;
-    struct mem_block* next;
-    struct mem_block* prev;
 } mem_block;
 
 typedef struct {
-    mem_block* free_list;
-    mem_block* allocated_list;
     size_t total_size;
     size_t free_size;
     size_t allocated_size;
-    uint32_t total_blocks;
-    uint32_t free_blocks;
 } memory_pool;
 
-// Global memory pools for different zones
-static memory_pool dma_pool = {0};
-static memory_pool normal_pool = {0};
-static memory_pool highmem_pool = {0};
+static memory_pool normal_pool;
+static KernelMemoryStats mem_stats;
 
-// Memory statistics
-static KernelMemoryStats mem_stats = {0};
-
-// Memory block pool (simplified - in real system would use pages)
 #define MAX_MEMORY_BLOCKS 1024
 static mem_block memory_blocks[MAX_MEMORY_BLOCKS];
 static uint32_t memory_block_index = 0;
 
-// Initialize memory management
-void memory_init(void) {
-    // Initialize memory pools
-    dma_pool.free_list = NULL;
-    dma_pool.allocated_list = NULL;
-    dma_pool.total_size = 0;
-    dma_pool.free_size = 0;
-    dma_pool.allocated_size = 0;
-    dma_pool.total_blocks = 0;
-    dma_pool.free_blocks = 0;
-    
-    normal_pool.free_list = NULL;
-    normal_pool.allocated_list = NULL;
-    normal_pool.total_size = 0;
-    normal_pool.free_size = 0;
-    normal_pool.allocated_size = 0;
-    normal_pool.total_blocks = 0;
-    normal_pool.free_blocks = 0;
-    
-    highmem_pool.free_list = NULL;
-    highmem_pool.allocated_list = NULL;
-    highmem_pool.total_size = 0;
-    highmem_pool.free_size = 0;
-    highmem_pool.allocated_size = 0;
-    highmem_pool.total_blocks = 0;
-    highmem_pool.free_blocks = 0;
-    
-    // Initialize memory statistics
-    mem_stats.total_pages = 0;
-    mem_stats.free_pages = 0;
-    mem_stats.used_pages = 0;
-    mem_stats.reserved_pages = 0;
-    mem_stats.total_bytes = 0;
-    mem_stats.free_bytes = 0;
-    mem_stats.used_bytes = 0;
-    
-    // Get memory information from multiboot2
-    if (multiboot2_info_ptr != 0) {
-        // Parse memory map and initialize pools
-        // This is simplified - in a real system would parse multiboot2 memory map
-        mem_stats.total_bytes = 256 * 1024 * 1024;  // Assume 256MB
-        mem_stats.free_bytes = mem_stats.total_bytes - (2 * 1024 * 1024);  // Reserve 2MB for kernel
-        mem_stats.used_bytes = 2 * 1024 * 1024;
-        
-        mem_stats.total_pages = mem_stats.total_bytes / PAGE_SIZE;
-        mem_stats.free_pages = mem_stats.free_bytes / PAGE_SIZE;
-        mem_stats.used_pages = mem_stats.used_bytes / PAGE_SIZE;
-        
-        // Initialize normal pool with available memory
-        normal_pool.total_size = mem_stats.free_bytes;
-        normal_pool.free_size = mem_stats.free_bytes;
+static void pmm_set_used(uint32_t f) {
+    if (f >= PMM_MAX_4K_FRAMES) {
+        return;
     }
-    
-    console_println_color("Memory management initialized", CONSOLE_SUCCESS_COLOR);
+    pmm_bitmap[f >> 3U] |= (uint8_t)(1U << (f & 7U));
 }
 
-// Allocate memory
+static void pmm_set_free(uint32_t f) {
+    if (f >= PMM_MAX_4K_FRAMES) {
+        return;
+    }
+    pmm_bitmap[f >> 3U] &= (uint8_t)~(1U << (f & 7U));
+}
+
+static int pmm_frame_free(uint32_t f) {
+    if (f >= PMM_MAX_4K_FRAMES) {
+        return 0;
+    }
+    return (pmm_bitmap[f >> 3U] & (1U << (f & 7U))) == 0;
+}
+
+static uint32_t pmm_count_free(void) {
+    uint32_t n = 0;
+    for (uint32_t f = 0; f < PMM_MAX_4K_FRAMES; f++) {
+        if (pmm_frame_free(f)) {
+            n++;
+        }
+    }
+    return n;
+}
+
+static void pmm_mark_range_used(uint64_t pstart, uint64_t pend) {
+    if (pend <= pstart) {
+        return;
+    }
+    pstart = pstart & ~(uint64_t)(PAGE_SIZE - 1);
+    pend = (pend + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+    for (uint64_t a = pstart; a < pend; a += PAGE_SIZE) {
+        uint32_t f = (uint32_t)(a / PAGE_SIZE);
+        pmm_set_used(f);
+    }
+}
+
+static void pmm_give_free_range(uint64_t pstart, uint64_t plen) {
+    if (plen == 0) {
+        return;
+    }
+    uint64_t end = pstart + plen;
+    pstart = (pstart + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+    for (uint64_t a = pstart; a < end; a += PAGE_SIZE) {
+        uint32_t f = (uint32_t)(a / PAGE_SIZE);
+        if (f < PMM_MAX_4K_FRAMES) {
+            pmm_set_free(f);
+        }
+    }
+}
+
+struct mmap_free_ctx { int did_free; };
+
+static void mmap_unreserve_cb(uint64_t base, uint64_t len, uint32_t type, void* user) {
+    struct mmap_free_ctx* ctx = (struct mmap_free_ctx*)user;
+    if (type == MULTIBOOT_MEMORY_AVAILABLE) {
+        pmm_give_free_range(base, len);
+        ctx->did_free = 1;
+    }
+}
+
+static int32_t pmm_alloc_contig(uint32_t n) {
+    if (n == 0 || n > PMM_MAX_4K_FRAMES) {
+        return -1;
+    }
+    for (uint32_t i = 0; i + n <= PMM_MAX_4K_FRAMES; i++) {
+        uint32_t j;
+        for (j = 0; j < n; j++) {
+            if (!pmm_frame_free(i + j)) {
+                break;
+            }
+        }
+        if (j == n) {
+            for (j = 0; j < n; j++) {
+                pmm_set_used(i + j);
+            }
+            return (int32_t)i;
+        }
+    }
+    return -1;
+}
+
+static void pmm_free_range_frames(uint32_t start_f, uint32_t n) {
+    for (uint32_t j = 0; j < n; j++) {
+        pmm_set_free(start_f + j);
+    }
+}
+
+void physmem_init(void) {
+    memset(pmm_bitmap, 0xFF, sizeof(pmm_bitmap));
+
+    struct mmap_free_ctx ctx = {0};
+    multiboot2_foreach_mmap(mmap_unreserve_cb, &ctx);
+
+    if (!ctx.did_free) {
+        SystemInfo* inf = multiboot2_get_info();
+        if (inf->mem_upper > 0) {
+            uint64_t from = 1024U * 1024U;
+            uint64_t to = from + (uint64_t)inf->mem_upper * 1024U;
+            if (to > (1ULL << 30)) {
+                to = 1ULL << 30;
+            }
+            pmm_give_free_range(from, to - from);
+        }
+    }
+
+    /* Reserve low 1 MiB: IVT, BDA, etc. (also avoids handing out 0 / NULL frames). */
+    pmm_mark_range_used(0, 0x100000u);
+
+    /* LMA: physical span [__kernel_lma_start, __kernel_lma_end). */
+    pmm_mark_range_used(
+        (uint64_t)(uintptr_t)__kernel_lma_start,
+        (uint64_t)(uintptr_t)__kernel_lma_end - (uint64_t)(uintptr_t)__kernel_lma_start
+    );
+
+    if (multiboot2_info_ptr != 0) {
+        const uint8_t* m = (const uint8_t*)(uintptr_t)multiboot2_info_ptr;
+        uint32_t sz = *(const uint32_t*)m;
+        pmm_mark_range_used(multiboot2_info_ptr, (uint64_t)sz);
+    }
+
+    pmm_ready = true;
+    {
+        uint32_t fr = pmm_count_free();
+        mem_stats.reserved_pages = 0;
+        mem_stats.total_pages = PMM_MAX_4K_FRAMES;
+        mem_stats.free_pages = fr;
+        mem_stats.used_pages = PMM_MAX_4K_FRAMES - fr;
+        mem_stats.total_bytes = (uint64_t)PMM_MAX_4K_FRAMES * PAGE_SIZE;
+        mem_stats.free_bytes = (uint64_t)fr * PAGE_SIZE;
+        mem_stats.used_bytes = mem_stats.total_bytes - mem_stats.free_bytes;
+        normal_pool.total_size = mem_stats.free_bytes;
+        normal_pool.free_size = mem_stats.free_bytes;
+        normal_pool.allocated_size = 0;
+    }
+}
+
+static void format_memory_size(uint64_t bytes, char* buffer, size_t bufsz) {
+    (void)bufsz;
+    if (bytes >= 1024 * 1024 * 1024) {
+        uint64_t g = bytes / (1024 * 1024 * 1024);
+        int_to_str((int)g, buffer);
+    } else if (bytes >= 1024 * 1024) {
+        uint64_t m = bytes / (1024 * 1024);
+        int_to_str((int)m, buffer);
+    } else if (bytes >= 1024) {
+        uint64_t k = bytes / 1024;
+        int_to_str((int)k, buffer);
+    } else {
+        int_to_str((int)bytes, buffer);
+    }
+}
+
+void memory_init(void) {
+    memory_block_index = 0;
+    normal_pool = (memory_pool){0};
+    physmem_init();
+    vmm_init();
+    console_println_color("Physical memory: bitmap pmm, 1 GiB identity-mapped", CONSOLE_SUCCESS_COLOR);
+    console_println_color("Virtual: 4K map (PML4 walk), invlpg + load_cr3; asm identity map unchanged", CONSOLE_INFO_COLOR);
+}
+
 void* kmalloc(size_t size, uint32_t flags) {
     if (size == 0) {
         return NULL;
     }
-    
-    // Align size to page boundary
     size = align_size(size, PAGE_SIZE);
-    
-    // Choose appropriate zone based on flags
-    MemoryZone zone = ZONE_NORMAL;
+    MemoryZone z = ZONE_NORMAL;
     if (flags & MEM_ALLOC_DMA) {
-        zone = ZONE_DMA;
+        z = ZONE_DMA;
     } else if (flags & MEM_ALLOC_HIGHMEM) {
-        zone = ZONE_HIGHMEM;
+        z = ZONE_HIGHMEM;
     }
-    
-    // Allocate from appropriate zone
-    void* ptr = zone_alloc(zone, size, flags);
-    
-    if (ptr && (flags & MEM_ALLOC_ZERO)) {
-        memory_zero(ptr, size);
+    void* p = zone_alloc(z, size, flags);
+    if (p && (flags & MEM_ALLOC_ZERO)) {
+        memory_zero(p, size);
     }
-    
-    return ptr;
+    return p;
 }
 
-// Find the memory block for a given pointer
-static mem_block* find_block_for_ptr(void* ptr) {
+static mem_block* find_block(void* ptr) {
     if (!ptr) {
         return NULL;
     }
-    
-    // Search through all allocated blocks to find the one matching this pointer
     for (uint32_t i = 0; i < memory_block_index; i++) {
-        mem_block* block = &memory_blocks[i];
-        if (block->base == ptr && !block->is_free) {
-            return block;
+        if (memory_blocks[i].base == ptr && !memory_blocks[i].is_free) {
+            return &memory_blocks[i];
         }
     }
-    
     return NULL;
 }
 
-// Free memory
 void kfree(void* ptr) {
-    if (!ptr) {
+    if (!ptr || !pmm_ready) {
         return;
     }
-    
-    // Find the block for this pointer
-    mem_block* block = find_block_for_ptr(ptr);
-    
-    if (!block) {
-        // Pointer not found in allocated blocks - invalid pointer!
-        // In a real kernel, this would be a security violation
-        // For now, silently ignore (could log error in production)
+    mem_block* b = find_block(ptr);
+    if (!b || b->is_free) {
         return;
     }
-    
-    if (block->is_free) {
-        // Double-free detected - security issue
-        return;
+    size_t npg = (b->size + PAGE_SIZE - 1) / PAGE_SIZE;
+    uint32_t f0 = (uint32_t)((uintptr_t)ptr / PAGE_SIZE);
+    pmm_free_range_frames(f0, (uint32_t)npg);
+    b->is_free = true;
+    if (mem_stats.used_bytes >= b->size) {
+        mem_stats.used_bytes -= b->size;
     }
-    
-    // Mark as free
-    block->is_free = true;
-    
-    // Update pool statistics (find which pool this belongs to)
-    // For simplicity, assume normal pool
-    normal_pool.free_size += block->size;
-    normal_pool.allocated_size -= block->size;
-    normal_pool.free_blocks++;
-    normal_pool.total_blocks--;
-    
-    // Update global statistics
-    mem_stats.free_bytes += block->size;
-    mem_stats.used_bytes -= block->size;
+    if (mem_stats.total_bytes > mem_stats.used_bytes) {
+        mem_stats.free_bytes = mem_stats.total_bytes - mem_stats.used_bytes;
+    }
+    mem_stats.free_pages = pmm_count_free();
+    mem_stats.used_pages = PMM_MAX_4K_FRAMES - mem_stats.free_pages;
 }
 
-// Check if a pointer is a valid allocation
 bool is_valid_allocation(void* ptr) {
-    if (!ptr) {
-        return false;
-    }
-    
-    mem_block* block = find_block_for_ptr(ptr);
-    return (block != NULL && !block->is_free);
+    mem_block* b = find_block(ptr);
+    return b != NULL && !b->is_free;
 }
 
-// Reallocate memory
 void* krealloc(void* ptr, size_t size) {
     if (!ptr) {
         return kmalloc(size, MEM_ALLOC_NORMAL);
     }
-    
     if (size == 0) {
         kfree(ptr);
         return NULL;
     }
-    
-    // Simplified realloc - in real system would try to extend in place
-    void* new_ptr = kmalloc(size, MEM_ALLOC_NORMAL);
-    if (new_ptr) {
-        // Copy old data (simplified - would need to track old size)
-        memory_copy(new_ptr, ptr, size);
+    void* n = kmalloc(size, MEM_ALLOC_NORMAL);
+    if (n) {
+        memory_copy(n, ptr, size);
         kfree(ptr);
     }
-    
-    return new_ptr;
+    return n;
 }
 
-// Allocate and zero memory
-void* kcalloc(size_t count, size_t size) {
-    size_t total_size = count * size;
-    return kmalloc(total_size, MEM_ALLOC_ZERO);
+void* kcalloc(size_t c, size_t s) {
+    return kmalloc(c * s, MEM_ALLOC_ZERO);
 }
 
-// Allocate pages
-void* alloc_pages(size_t num_pages, uint32_t flags) {
-    size_t size = num_pages * PAGE_SIZE;
-    return kmalloc(size, flags);
+void* alloc_pages(size_t num_pages, uint32_t f) {
+    if (num_pages == 0) {
+        return NULL;
+    }
+    return kmalloc(num_pages * PAGE_SIZE, f);
 }
 
-// Free pages
-void free_pages(void* ptr, size_t num_pages) {
-    (void)num_pages;  // Suppress unused parameter warning
-    kfree(ptr);
+void free_pages(void* p, size_t n) {
+    (void)n;
+    kfree(p);
 }
 
-// Check if page is allocated
 bool is_page_allocated(void* ptr) {
-    // Simplified - in real system would check page tables
-    return ptr != NULL;
+    if (!ptr || !pmm_ready) {
+        return false;
+    }
+    uint32_t f = (uint32_t)((uintptr_t)ptr / PAGE_SIZE);
+    if (f >= PMM_MAX_4K_FRAMES) {
+        return false;
+    }
+    return (pmm_bitmap[f >> 3U] & (1U << (f & 7U))) != 0;
 }
 
-// Convert page number to virtual address
 void* page_to_virt(uint64_t page) {
     return (void*)(page * PAGE_SIZE);
 }
 
-// Convert virtual address to page number
-uint64_t virt_to_page(void* ptr) {
-    return ((uintptr_t)ptr) >> PAGE_SHIFT;
+uint64_t virt_to_page(void* p) {
+    return ((uintptr_t)p) >> PAGE_SHIFT;
 }
 
-// Get memory statistics
 KernelMemoryStats* memory_get_stats(void) {
+    if (pmm_ready) {
+        mem_stats.free_pages = pmm_count_free();
+        mem_stats.used_pages = PMM_MAX_4K_FRAMES - mem_stats.free_pages;
+        mem_stats.free_bytes = (uint64_t)mem_stats.free_pages * PAGE_SIZE;
+        mem_stats.used_bytes = (uint64_t)mem_stats.used_pages * PAGE_SIZE;
+    }
     return &mem_stats;
 }
 
-// Print memory statistics
 void kernel_memory_print_stats(void) {
+    char buffer[64];
     console_newline();
     console_println_color("=== MEMORY STATISTICS ===", CONSOLE_HEADER_COLOR);
     console_draw_separator(console_state.cursor_y, CONSOLE_FG_COLOR);
-    
-    char buffer[64];
-    
-    // Total memory
-    console_print_color("Total Memory: ", CONSOLE_INFO_COLOR);
-    format_memory_size(mem_stats.total_bytes, buffer, sizeof(buffer));
+    format_memory_size(mem_stats.total_bytes, buffer, sizeof buffer);
+    console_print_color("Total: ", CONSOLE_INFO_COLOR);
     console_println_color(buffer, CONSOLE_FG_COLOR);
-    
-    // Free memory
-    console_print_color("Free Memory: ", CONSOLE_INFO_COLOR);
-    format_memory_size(mem_stats.free_bytes, buffer, sizeof(buffer));
+    format_memory_size(mem_stats.free_bytes, buffer, sizeof buffer);
+    console_print_color("Free:  ", CONSOLE_INFO_COLOR);
     console_println_color(buffer, CONSOLE_SUCCESS_COLOR);
-    
-    // Used memory
-    console_print_color("Used Memory: ", CONSOLE_INFO_COLOR);
-    format_memory_size(mem_stats.used_bytes, buffer, sizeof(buffer));
-    console_println_color(buffer, CONSOLE_WARNING_COLOR);
-    
-    // Pages
-    console_print_color("Total Pages: ", CONSOLE_INFO_COLOR);
-    int_to_str(mem_stats.total_pages, buffer);
+    int_to_str((int)mem_stats.free_pages, buffer);
+    console_print_color("Free 4K pages: ", CONSOLE_INFO_COLOR);
     console_println_color(buffer, CONSOLE_FG_COLOR);
-    
-    console_print_color("Free Pages: ", CONSOLE_INFO_COLOR);
-    int_to_str(mem_stats.free_pages, buffer);
-    console_println_color(buffer, CONSOLE_SUCCESS_COLOR);
-    
     console_draw_separator(console_state.cursor_y, CONSOLE_FG_COLOR);
 }
 
-// Allocate from specific zone
 void* zone_alloc(MemoryZone zone, size_t size, uint32_t flags) {
-    (void)flags;  // Suppress unused parameter warning
-    memory_pool* pool;
-    
-    switch (zone) {
-        case ZONE_DMA:
-            pool = &dma_pool;
-            break;
-        case ZONE_NORMAL:
-            pool = &normal_pool;
-            break;
-        case ZONE_HIGHMEM:
-            pool = &highmem_pool;
-            break;
-        default:
-            return NULL;
-    }
-    
-    if (pool->free_size < size) {
-        return NULL;  // Not enough memory
-    }
-    
-    // Simplified allocation - in real system would use proper allocator
-    if (memory_block_index >= MAX_MEMORY_BLOCKS) {
+    (void)flags;
+    (void)zone;
+    if (!pmm_ready || size == 0) {
         return NULL;
     }
-    
-    mem_block* block = &memory_blocks[memory_block_index++];
-    block->base = (void*)(uintptr_t)(0x1000000 + memory_block_index * PAGE_SIZE);  // Simplified address
-    block->size = size;
-    block->is_free = false;
-    block->next = NULL;
-    block->prev = NULL;
-    
-    pool->allocated_size += size;
-    pool->free_size -= size;
-    pool->total_blocks++;
-    pool->free_blocks--;
-    
-    mem_stats.used_bytes += size;
-    mem_stats.free_bytes -= size;
-    
-    return block->base;
+    uint32_t npg = (uint32_t)((size + PAGE_SIZE - 1) / PAGE_SIZE);
+    if (npg == 0) {
+        return NULL;
+    }
+    int32_t st = pmm_alloc_contig(npg);
+    if (st < 0) {
+        return NULL;
+    }
+    if (memory_block_index >= MAX_MEMORY_BLOCKS) {
+        pmm_free_range_frames((uint32_t)st, npg);
+        return NULL;
+    }
+    void* base = (void*)(uintptr_t)((uint32_t)st * PAGE_SIZE);
+    mem_block* b = &memory_blocks[memory_block_index++];
+    b->base = base;
+    b->size = (size_t)npg * PAGE_SIZE;
+    b->is_free = false;
+    mem_stats.used_bytes += b->size;
+    mem_stats.free_bytes = mem_stats.total_bytes - mem_stats.used_bytes;
+    mem_stats.free_pages = pmm_count_free();
+    mem_stats.used_pages = PMM_MAX_4K_FRAMES - mem_stats.free_pages;
+    return base;
 }
 
-// Free from specific zone
-void zone_free(MemoryZone zone, void* ptr, size_t size) {
-    (void)zone;   // Suppress unused parameter warning
-    (void)ptr;    // Suppress unused parameter warning
-    // Simplified - would need to find and free the block
-    mem_stats.free_bytes += size;
-    mem_stats.used_bytes -= size;
+void zone_free(MemoryZone z, void* p, size_t s) {
+    (void)z;
+    (void)s;
+    kfree(p);
 }
 
-// Align size to boundary
-size_t align_size(size_t size, size_t alignment) {
-    return (size + alignment - 1) & ~(alignment - 1);
+size_t align_size(size_t s, size_t a) {
+    return (s + a - 1) & ~(a - 1);
 }
 
-// Check if pointer is aligned
-bool is_aligned(void* ptr, size_t alignment) {
-    return ((uintptr_t)ptr & (alignment - 1)) == 0;
+bool is_aligned(void* p, size_t a) {
+    return ((uintptr_t)p & (a - 1)) == 0;
 }
 
-// Zero memory
-void memory_zero(void* ptr, size_t size) {
-    if (!ptr) return;
-    
-    uint8_t* byte_ptr = (uint8_t*)ptr;
-    for (size_t i = 0; i < size; i++) {
-        byte_ptr[i] = 0;
+void memory_zero(void* p, size_t n) {
+    if (!p) {
+        return;
+    }
+    uint8_t* b = (uint8_t*)p;
+    for (size_t i = 0; i < n; i++) {
+        b[i] = 0;
     }
 }
 
-// Copy memory
-void memory_copy(void* dest, const void* src, size_t size) {
-    if (!dest || !src) return;
-    
-    uint8_t* dest_ptr = (uint8_t*)dest;
-    const uint8_t* src_ptr = (const uint8_t*)src;
-    
-    for (size_t i = 0; i < size; i++) {
-        dest_ptr[i] = src_ptr[i];
+void memory_copy(void* d, const void* s, size_t n) {
+    if (!d || !s) {
+        return;
+    }
+    uint8_t* a = (uint8_t*)d;
+    const uint8_t* c = (const uint8_t*)s;
+    for (size_t i = 0; i < n; i++) {
+        a[i] = c[i];
     }
 }
 
-// Debug print memory state
 void memory_debug_print(void) {
-    char buffer[64];
-    console_println_color("Memory Debug Info:", CONSOLE_INFO_COLOR);
-    console_println_color("Normal Pool:", CONSOLE_INFO_COLOR);
-    console_print_color("  Total Size: ", CONSOLE_FG_COLOR);
-    int_to_str(normal_pool.total_size, buffer);
-    console_println_color(buffer, CONSOLE_FG_COLOR);
-    
-    console_print_color("  Free Size: ", CONSOLE_FG_COLOR);
-    int_to_str(normal_pool.free_size, buffer);
-    console_println_color(buffer, CONSOLE_FG_COLOR);
-    
-    console_print_color("  Allocated Size: ", CONSOLE_FG_COLOR);
-    int_to_str(normal_pool.allocated_size, buffer);
-    console_println_color(buffer, CONSOLE_FG_COLOR);
+    char b[32];
+    console_println_color("PMM bitmap, first 1 GiB identity", CONSOLE_INFO_COLOR);
+    int_to_str((int)pmm_count_free(), b);
+    console_print_color("Free 4K frames: ", CONSOLE_INFO_COLOR);
+    console_println_color(b, CONSOLE_FG_COLOR);
 }
 
-// Check memory integrity
 bool memory_check_integrity(void) {
-    // Simplified integrity check
-    return mem_stats.total_bytes == (mem_stats.free_bytes + mem_stats.used_bytes);
+    return mem_stats.total_bytes == mem_stats.free_bytes + mem_stats.used_bytes;
 }

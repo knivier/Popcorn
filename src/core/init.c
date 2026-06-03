@@ -36,6 +36,10 @@ extern ConsoleState console_state;
 static const int total_init_steps = 9;
 
 void init_boot_screen(void) {
+    multiboot2_parse();
+
+    /* IDT before any task runs with IF=1 (see setup_task_context rflags) or context_save's sti. */
+    idt_init();
 
     console_init();
 
@@ -284,15 +288,18 @@ void init_show_modules(void) {
 void init_wait_for_enter(void) {
     console_set_cursor(0, 22);
     console_println_color("", CONSOLE_FG_COLOR);
-    console_println_color("Press ENTER to continue to console...", BOOT_SUBTITLE_COLOR);
+    console_println_color("Press ENTER to continue to console (auto-continue)...", BOOT_SUBTITLE_COLOR);
 
-    extern char read_port(unsigned short port);
+    extern unsigned char read_port(unsigned short port);
 
     #define KEYBOARD_STATUS_PORT 0x64
     #define KEYBOARD_DATA_PORT 0x60
     #define ENTER_KEY_CODE 0x1C
 
-    while (1) {
+    /* Some emulators/hosts do not deliver keyboard input at this stage reliably.
+       Avoid hard-locking boot: poll briefly, then continue automatically. */
+    const uint64_t max_polls = 20000000ULL;
+    for (uint64_t polls = 0; polls < max_polls; polls++) {
         unsigned char status = read_port(KEYBOARD_STATUS_PORT);
         if (status & 0x01) {
             char keycode = read_port(KEYBOARD_DATA_PORT);
@@ -308,17 +315,17 @@ void init_transition_to_console(void) {
     console_draw_header("Popcorn Kernel v0.5");
     console_println_color("Welcome to Popcorn Kernel!", CONSOLE_SUCCESS_COLOR);
     console_newline();
-    multiboot2_parse();
-
     if (multiboot2_info_ptr == 0) {
         console_println_color("Warning: No Multiboot2 info received", CONSOLE_WARNING_COLOR);
     }
 
-    idt_init();
+    /* Enable keyboard IRQs for interactive console input. */
     kb_init();
-
+    /*
+     * Re-enable PIT scheduling. scheduler.c has bootstrap guards to avoid switching while
+     * CPU still executes kmain on boot stack before first real task run.
+     */
     timer_set_tick_handler(scheduler_tick);
-
     timer_enable();
 
     console_draw_prompt_with_path(get_current_directory());

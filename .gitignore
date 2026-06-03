@@ -1,4 +1,8 @@
 obj/
+src/obj/root-leftovers/
+src/dbg/
+src/*.o
+src/qemu-*.log
 buildbase/
 .idea/
 .vscode/

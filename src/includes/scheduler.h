@@ -4,6 +4,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "vmm.h"
 
 // Task states
 typedef enum {
@@ -93,6 +94,9 @@ typedef struct task_struct {
     // Linked list pointers
     struct task_struct* next;
     struct task_struct* prev;
+
+    /* Per-task translation root; default is boot kernel PML4 (identity map). */
+    AddressSpace address_space;
 } TaskStruct;
 
 // Scheduler state
@@ -123,6 +127,8 @@ TaskStruct* scheduler_create_task_with_pid(void (*function)(void), void* data, T
 
 // Task management
 void task_init(TaskStruct* task, void (*function)(void), void* data, TaskPriority priority);
+void task_set_address_space(TaskStruct* task, uint64_t pml4_phys);
+uint64_t scheduler_kernel_pml4_phys(void);
 void task_switch(TaskStruct* from, TaskStruct* to);
 void task_exit(void);
 void setup_task_context(TaskStruct* task);

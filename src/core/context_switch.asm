@@ -1,29 +1,33 @@
 ; src/core/context_switch.asm
-; x86-64 context switching assembly functions for Popcorn kernel
+; x86-64 context switching (Popcorn kernel)
+;
+; RDI = CPUContext* (System V). context_save: save caller; context_restore: iretq
+; to a stack with {RIP,CS,RFLAGS} for ring-0. C stacks that only have a return
+; address are repaired by writing that frame 24 bytes below the saved RSP.
 
-; Global symbols
+section .bss
+align 8
+context_save_ptr: resq 1
+context_save_r10_tmp: resq 1 ; popped r10 before reloading context ptr into r10
+context_restore_iret_rsp: resq 1
+
+section .text
 global context_save
 global context_restore
 global context_switch_to_task
-
-; External symbols
 extern scheduler_get_current_task
 
-; Context save function
-; Saves current CPU state to the provided context structure
-; C signature: void context_save(CPUContext* context)
+; void context_save(CPUContext* c)
 context_save:
-    ; Get the context pointer from RDI (first argument)
-    mov rax, rdi
+    mov [rel context_save_ptr], rdi
+    mov r11, rdi
+    mov [r11 + 112], rax
 
-    ; Disable interrupts during context save
     cli
-
-    ; Save current stack pointer BEFORE pushing registers
     mov rbx, rsp
-    mov [rax + 128], rbx  ; Save RSP
+    mov r11, [rel context_save_ptr]
+    mov [r11 + 128], rbx
 
-    ; Save general purpose registers (in reverse order to match push order)
     push rbp
     push rbx
     push rcx
@@ -39,7 +43,6 @@ context_save:
     push r14
     push r15
 
-    ; Restore the registers we just pushed (except RSP which we saved)
     pop r15
     pop r14
     pop r13
@@ -55,110 +58,97 @@ context_save:
     pop rbx
     pop rbp
 
-    ; Save the remaining registers
-    mov [rax + 0], r15
-    mov [rax + 8], r14
-    mov [rax + 16], r13
-    mov [rax + 24], r12
-    mov [rax + 32], r11
-    mov [rax + 40], r10
-    mov [rax + 48], r9
-    mov [rax + 56], r8
-    mov [rax + 64], rdi
-    mov [rax + 72], rsi
-    mov [rax + 80], rbp
-    mov [rax + 88], rdx
-    mov [rax + 96], rcx
-    mov [rax + 104], rbx
-    mov [rax + 112], rax
+    ; r10 = restored callee r10. Next line would reload context* into r10 — that
+    ; destroyed the true r10 and [r10+40] was written with the pointer (bogus iretq RIP).
+    mov [rel context_save_r10_tmp], r10
+    mov r10, [rel context_save_ptr]
+    mov [r10 + 0], r15
+    mov [r10 + 8], r14
+    mov [r10 + 16], r13
+    mov [r10 + 24], r12
+    mov [r10 + 32], r11
+    mov r11, [rel context_save_r10_tmp]
+    mov [r10 + 40], r11
+    mov [r10 + 48], r9
+    mov [r10 + 56], r8
+    mov [r10 + 64], rdi
+    mov [r10 + 72], rsi
+    mov [r10 + 80], rbp
+    mov [r10 + 88], rdx
+    mov [r10 + 96], rcx
+    mov [r10 + 104], rbx
 
-    ; Save control registers
-    ; The return address is at [rsp] after all our pushes
-    mov rbx, [rsp]  ; Get return address from stack
-    mov [rax + 120], rbx  ; Save RIP
+    mov rbx, [rsp]
+    mov [r10 + 120], rbx
 
-    ; Save RFLAGS
     pushfq
     pop rbx
-    mov [rax + 136], rbx  ; Save RFLAGS
+    mov [r10 + 136], rbx
 
-    ; Save segment registers
     mov bx, cs
-    mov [rax + 144], bx
+    mov [r10 + 144], bx
     mov bx, ss
-    mov [rax + 152], bx
+    mov [r10 + 152], bx
     mov bx, ds
-    mov [rax + 160], bx
+    mov [r10 + 160], bx
     mov bx, es
-    mov [rax + 168], bx
+    mov [r10 + 168], bx
     mov bx, fs
-    mov [rax + 176], bx
+    mov [r10 + 176], bx
     mov bx, gs
-    mov [rax + 184], bx
+    mov [r10 + 184], bx
 
-    ; Save FPU/SSE state (simplified - just mark as present)
-    mov qword [rax + 192], 0x1  ; Mark FPU state as present
-
-    ; Re-enable interrupts
-    sti
-
+    mov qword [r10 + 192], 0x1
     ret
 
-; Context restore function
-; Restores CPU state from the provided context structure
-; C signature: void context_restore(CPUContext* context)
+; void context_restore(CPUContext* c)
 context_restore:
-    ; Get the context pointer from RDI (first argument)
-    mov rax, rdi
-
-    ; Disable interrupts during context restore
+    mov r13, rdi
     cli
 
-    ; Restore segment registers first (data segments)
-    mov bx, [rax + 160]  ; DS
+    mov bx, [r13 + 160]
     mov ds, bx
-    mov bx, [rax + 168]  ; ES
+    mov bx, [r13 + 168]
     mov es, bx
-    mov bx, [rax + 176]  ; FS
+    mov bx, [r13 + 176]
     mov fs, bx
-    mov bx, [rax + 184]  ; GS
+    mov bx, [r13 + 184]
     mov gs, bx
 
-    ; Restore general purpose registers first
-    mov r15, [rax + 0]
-    mov r14, [rax + 8]
-    mov r13, [rax + 16]
-    mov r12, [rax + 24]
-    mov r11, [rax + 32]
-    mov r10, [rax + 40]
-    mov r9, [rax + 48]
-    mov r8, [rax + 56]
-    mov rdi, [rax + 64]
-    mov rsi, [rax + 72]
-    mov rbp, [rax + 80]
-    mov rdx, [rax + 88]
-    mov rcx, [rax + 96]
-    mov rbx, [rax + 104]
+    ; Ring-0 iretq: 3 qwords at RSP = {RIP,CS,RFLAGS}. C stacks may lack CS/RFLAGS
+    ; at RSP+8/16, and [RSP+8]==0x8 can be a false positive. Always build the frame
+    ; at (saved RSP) - 24 from fields in the context struct.
+    mov r8, [r13 + 128]
+    sub r8, 24
+    mov r9, [r13 + 120]
+    mov [r8], r9
+    mov qword [r8 + 8], 0x8
+    mov r9, [r13 + 136]
+    mov [r8 + 16], r9
+    mov qword [rel context_restore_iret_rsp], r8
 
-    ; Restore RAX
-    mov rax, [rax + 112]
-
-    ; Switch to the task's stack (which has pre-filled iretq frame)
-    mov rsp, [rax + 128]  ; RSP points to iretq frame
-
-    ; Execute iretq to switch to the task
+.gpr:
+    mov r14, r13
+    mov r15, [r14 + 0]
+    mov r12, [r14 + 24]
+    mov r11, [r14 + 32]
+    mov r10, [r14 + 40]
+    mov r9, [r14 + 48]
+    mov r8, [r14 + 56]
+    mov rdi, [r14 + 64]
+    mov rsi, [r14 + 72]
+    mov rbp, [r14 + 80]
+    mov rdx, [r14 + 88]
+    mov rcx, [r14 + 96]
+    mov rbx, [r14 + 104]
+    mov rax, [r14 + 112]
+    mov r13, [r14 + 16]
+    mov r14, [r14 + 8]
+    mov rsp, [rel context_restore_iret_rsp]
     iretq
 
-; Context switch to specific task
-; Switches to the provided task, saving current context
-; C signature: void context_switch_to_task(TaskStruct* task)
+; void context_switch_to_task(TaskStruct* t)
+; TaskStruct.context offset must match src/includes/scheduler.h (see _Static_assert in scheduler.c).
 context_switch_to_task:
-    ; Get the new task pointer from RDI (first argument)
-    mov rax, rdi
-
-    ; Restore new task's context (offset 88 is context field in TaskStruct)
-    mov rdi, rax
-    add rdi, 88  ; Offset to context field in TaskStruct
-    
-    ; Jump directly to context_restore to avoid call/return issues
+    add rdi, 72
     jmp context_restore

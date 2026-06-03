@@ -12,6 +12,7 @@
 #include "../includes/init.h"
 #include "../includes/syscall.h"
 #include "../includes/utils.h"
+#include "../includes/keyboard_queue.h"
 #include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -37,16 +38,15 @@
 #define PAGE_UP_CODE 0x49
 #define PAGE_DOWN_CODE 0x51
 #define TAB_KEY_CODE 0x0F
+/* PS/2 set 1: next scancode is extended (e.g. arrow keys = E0 48) */
+#define KEYBOARD_EXT_PREFIX 0xE0
 
 extern unsigned char keyboard_map[128];
 extern void keyboard_handler(void);
 extern void timer_handler(void);
+extern void default_cpu_exception(void);
 extern char read_port(unsigned short port);
 extern void write_port(unsigned short port, unsigned char data);
-
-/* Forward declaration for IDT_ptr structure */
-struct IDT_ptr;
-extern void load_idt(struct IDT_ptr *idt_ptr);
 
 /* Command history */
 #define HISTORY_SIZE 50
@@ -92,46 +92,137 @@ struct IDT_entry {
 
 struct IDT_entry IDT[IDT_SIZE];
 
-/* IDT descriptor for LIDT instruction */
-struct IDT_ptr {
-    unsigned short limit;
-    unsigned long base;
+/*
+ * PS/2 scancode queue: IRQ1 pushes; kmain / halt / Dolphin pop (SPSC).
+ *
+ * If no key is queued, wait with HLT so IRQ1 wakeups continue to work even when
+ * PIT preemption is disabled during scheduler debugging.
+ *
+ * If IF is held clear for a long time (e.g. cli in context switch), keyboard IRQs
+ * are only delayed; latency can spike. Keep those windows short.
+ */
+#define KEY_QUEUE_CAP 256
+static volatile unsigned char key_queue[KEY_QUEUE_CAP];
+static volatile uint32_t key_queue_head;
+static volatile uint32_t key_queue_tail;
+
+static void key_queue_push(unsigned char scancode)
+{
+    uint32_t tail = key_queue_tail;
+    uint32_t next = (tail + 1U) % KEY_QUEUE_CAP;
+    uint32_t head = key_queue_head;
+    if (next == head) {
+        return; /* full: drop */
+    }
+    key_queue[tail] = scancode;
+    key_queue_tail = next;
+}
+
+bool key_queue_pop(uint8_t* out)
+{
+    if (!out) {
+        return false;
+    }
+    uint32_t head = key_queue_head;
+    if (head == key_queue_tail) {
+        return false;
+    }
+    *out = key_queue[head];
+    key_queue_head = (head + 1U) % KEY_QUEUE_CAP;
+    return true;
+}
+
+/* Boot .bss: initial kernel stack (asm); RSP0 for TSS. */
+extern char stack_top;
+
+static void idt_set_gate(uint8_t vector, uint64_t handler, uint8_t type_attr, uint8_t ist) {
+    IDT[vector].offset_low = (uint16_t)(handler & 0xFFFFU);
+    IDT[vector].selector = KERNEL_CODE_SEGMENT_OFFSET;
+    IDT[vector].ist = (unsigned char)(ist & 0x7U);
+    IDT[vector].type_attr = type_attr;
+    IDT[vector].offset_mid = (uint16_t)((handler >> 16) & 0xFFFFU);
+    IDT[vector].offset_high = (uint32_t)((handler >> 32) & 0xFFFFFFFFU);
+    IDT[vector].reserved = 0;
+}
+
+struct GDT_ptr {
+    uint16_t limit;
+    uint64_t base;
 } __attribute__((packed));
+
+/* 64-bit TSS, IST1 = #PF, IST2 = #DF. TSS is a 16-byte GDT entry; it must be 16-byte aligned
+   in the GDT (Intel SDM, IA-32e: misaligned 16B system descriptor + LTR = #GP → triple-fault/reset). */
+#define GDT_TSS_SEL 0x20u /* GDT index 4 after null+code+data+pad — offset 0x20 from GDT base */
+static void tss_ist_lgdt_ltr(void) {
+    static uint8_t tss[104] __attribute__((aligned(16)));
+    static uint8_t ist_pf[4096] __attribute__((aligned(16)));
+    static uint8_t ist_df[4096] __attribute__((aligned(16)));
+    /* 6*8: null, code, data, 8B pad, TSS (16B). Pad puts TSS at offset 0x20 (16B-aligned). */
+    static uint64_t gdt6[6] __attribute__((aligned(32)));
+
+    for (size_t i = 0; i < sizeof tss; i++) {
+        tss[i] = 0;
+    }
+    const uint32_t tss_size = 104U;
+    /* x86-64 TSS: RSP0@4, IST1@0x24, IST2@0x2C; I/O map base@0x66 — must be > limit or no I/O map */
+    *(uint64_t*)(void*)(tss + 0x4) = (uint64_t)(uintptr_t)&stack_top;
+    *(uint64_t*)(void*)(tss + 0x24) = (uint64_t)(uintptr_t)(ist_pf + sizeof ist_pf);
+    *(uint64_t*)(void*)(tss + 0x2c) = (uint64_t)(uintptr_t)(ist_df + sizeof ist_df);
+    *(uint16_t*)(void*)(tss + 0x66) = (uint16_t)tss_size; /* 0x68: no I/O perm bitmap (104 bytes) */
+
+    const uint64_t tss_b = (uint64_t)(uintptr_t)tss;
+    const uint32_t lim = tss_size - 1U;
+
+    gdt6[0] = 0;
+    gdt6[1] = 0x00209A0000000000ULL; /* match kernel.asm long-mode code */
+    gdt6[2] = 0x0000920000000000ULL; /* data */
+    gdt6[3] = 0;                     /* 8B padding: next slot at offset 0x20 */
+    {
+        uint8_t* d = (uint8_t*)&gdt6[4];
+        d[0] = (uint8_t)(lim & 0xFFU);
+        d[1] = (uint8_t)((lim >> 8) & 0xFFU);
+        d[2] = (uint8_t)(tss_b & 0xFFU);
+        d[3] = (uint8_t)((tss_b >> 8) & 0xFFU);
+        d[4] = (uint8_t)((tss_b >> 16) & 0xFFU);
+        d[5] = 0x89U; /* 64-bit TSS (available), P=1 */
+        d[6] = (uint8_t)((lim >> 16) & 0x0FU);
+        d[7] = (uint8_t)((tss_b >> 24) & 0xFFU);
+        *(uint32_t*)(void*)(d + 8) = (uint32_t)(tss_b >> 32);
+        *(uint32_t*)(void*)(d + 12) = 0U;
+    }
+
+    struct GDT_ptr gp;
+    gp.limit = (uint16_t)(6U * 8U - 1U);
+    gp.base = (uint64_t)(uintptr_t)gdt6;
+    __asm__ volatile("lgdt %0" : : "m"(gp) : "memory");
+    /* ltr is r/m16. gas turns `ltr %ax`/`ltrw %ax` into 0f 00 d8 (ltr %eax); in long mode use 0x66 prefix. */
+    __asm__ volatile(
+        "movw %0, %%ax\n\t"
+        ".byte 0x66, 0x0f, 0x00, 0xd8"
+        : : "i"((int)GDT_TSS_SEL) : "ax", "memory");
+}
 
 void idt_init(void)
 {
-    struct IDT_ptr idt_ptr;
+    tss_ist_lgdt_ltr();
 
-    /* populate IDT entry of keyboard's interrupt */
+    uint64_t def = (uint64_t)(uintptr_t)default_cpu_exception;
+    for (uint8_t n = 0; n < 32U; n++) {
+        idt_set_gate(n, def, INTERRUPT_GATE, 0U);
+    }
+    /* #PF, #DF: use IST1 / IST2 so delivery works if current RSP is unusable. */
+    idt_set_gate(0x0e, def, INTERRUPT_GATE, 1U);
+    idt_set_gate(0x08, def, INTERRUPT_GATE, 2U);
+
     uint64_t keyboard_address = (uint64_t)(uintptr_t)keyboard_handler;
-    IDT[0x21].offset_low = keyboard_address & 0xFFFF;
-    IDT[0x21].selector = KERNEL_CODE_SEGMENT_OFFSET;
-    IDT[0x21].ist = 0;                   /* no IST */
-    IDT[0x21].type_attr = INTERRUPT_GATE;
-    IDT[0x21].offset_mid = (keyboard_address >> 16) & 0xFFFF;
-    IDT[0x21].offset_high = (keyboard_address >> 32) & 0xFFFFFFFF;
-    IDT[0x21].reserved = 0;
+    idt_set_gate(0x21, keyboard_address, INTERRUPT_GATE, 0U);
 
-    /* populate IDT entry of timer's interrupt */
     uint64_t timer_address = (uint64_t)(uintptr_t)timer_handler;
-    IDT[0x20].offset_low = timer_address & 0xFFFF;
-    IDT[0x20].selector = KERNEL_CODE_SEGMENT_OFFSET;
-    IDT[0x20].ist = 0;                   /* no IST */
-    IDT[0x20].type_attr = INTERRUPT_GATE;
-    IDT[0x20].offset_mid = (timer_address >> 16) & 0xFFFF;
-    IDT[0x20].offset_high = (timer_address >> 32) & 0xFFFFFFFF;
-    IDT[0x20].reserved = 0;
+    idt_set_gate(0x20, timer_address, INTERRUPT_GATE, 0U);
 
-    /* populate IDT entry of system call interrupt (0x80) */
     extern void syscall_handler_asm(void);
     uint64_t syscall_address = (uint64_t)(uintptr_t)syscall_handler_asm;
-    IDT[0x80].offset_low = syscall_address & 0xFFFF;
-    IDT[0x80].selector = KERNEL_CODE_SEGMENT_OFFSET;
-    IDT[0x80].ist = 0;                   /* no IST */
-    IDT[0x80].type_attr = 0xEE;          /* User-accessible interrupt gate */
-    IDT[0x80].offset_mid = (syscall_address >> 16) & 0xFFFF;
-    IDT[0x80].offset_high = (syscall_address >> 32) & 0xFFFFFFFF;
-    IDT[0x80].reserved = 0;
+    idt_set_gate(0x80, syscall_address, 0xEEU, 0U);
 
     /*     Ports
     *    PIC1    PIC2
@@ -164,11 +255,18 @@ void idt_init(void)
     write_port(0x21 , 0xff);
     write_port(0xA1 , 0xff);
 
-    /* fill the IDT descriptor */
-    idt_ptr.limit = (sizeof(struct IDT_entry) * IDT_SIZE) - 1;
-    idt_ptr.base = (unsigned long)(uintptr_t)IDT;
-
-    load_idt(&idt_ptr);
+    /* 64-bit: lidt must see a contiguous 2+8 byte block; avoid RDI/ABI issues by using "m". */
+    {
+        struct {
+            uint16_t limit;
+            uint64_t base;
+        } __attribute__((packed)) idt_desc = {
+            (uint16_t)(sizeof(struct IDT_entry) * IDT_SIZE - 1U),
+            (uint64_t)(uintptr_t)IDT,
+        };
+        __asm__ volatile("lidt %0" : : "m"(idt_desc) : "memory");
+    }
+    __asm__ volatile("sti" ::: "memory");
 }
 
 void kb_init(void)
@@ -312,11 +410,13 @@ void autocomplete_command(char *buffer, unsigned int *index) {
 }
 
 void keyboard_handler_main(void) {
-    /* write EOI - End of Interrupt */
+    unsigned char status = read_port(KEYBOARD_STATUS_PORT);
+    if (status & 0x01) {
+        unsigned char keycode = read_port(KEYBOARD_DATA_PORT);
+        key_queue_push(keycode);
+    }
+    /* Master PIC: End of interrupt */
     write_port(0x20, 0x20);
-    
-    /* The actual keyboard input is handled in the main loop */
-    /* This function just acknowledges the interrupt */
 }
 
 extern const PopModule spinner_module;
@@ -450,9 +550,8 @@ void execute_command(const char *command) {
     } else if (strcmp(command, "halt") == 0) {
         console_print_warning("System halted. Press Enter to continue...");
         while (1) {
-            unsigned char status = read_port(KEYBOARD_STATUS_PORT);
-            if (status & 0x01) {
-                char keycode = read_port(KEYBOARD_DATA_PORT);
+            unsigned char keycode;
+            if (key_queue_pop(&keycode)) {
                 if (keycode == ENTER_KEY_CODE) {
                     console_clear();
                     console_draw_header("Popcorn Kernel v0.5");
@@ -461,6 +560,7 @@ void execute_command(const char *command) {
                 }
             }
             halt_module.pop_function(current_loc);
+            scheduler_yield();
         }
     } else if (strcmp(command, "stop") == 0) {
         console_print_warning("Shutting down...");
@@ -995,115 +1095,104 @@ void kmain(void) {
     char temp_buffer[256] = {0};
     unsigned int input_index = 0;
     int history_index = -1;
-    
-    // Main kernel loop - now interrupt-driven
+    /* PS/2 set 1: 0xE0 byte prefixes extended scancode; break = make | 0x80. */
+    static bool kbd_expect_e0 = false;
+
+    // Main kernel loop: keyboard IRQ buffers scancodes; we dequeue here.
     while (1) {
-        // Handle keyboard input
-        unsigned char status;
-        char keycode;
-        status = read_port(KEYBOARD_STATUS_PORT);
-        
-        if (status & 0x01) {
-            keycode = read_port(KEYBOARD_DATA_PORT);
-            if (keycode < 0)
-                continue;
-            
-            // If Dolphin editor is active, route all input to it
-            if (dolphin_is_active()) {
-                dolphin_handle_key(keycode);
-                continue;
+        unsigned char keycode;
+        if (!key_queue_pop(&keycode)) {
+            __asm__ volatile("sti; hlt" ::: "memory");
+            continue;
+        }
+
+        if (kbd_expect_e0) {
+            kbd_expect_e0 = false;
+            if (keycode & 0x80) {
+                continue; /* extended key release, e.g. 0xC8 */
             }
-            
-            if (keycode == ENTER_KEY_CODE) {
+            /* extended make: 0x48/50/4B/4D/49/51 — same values as our arrow/page defs */
+        } else if (keycode == KEYBOARD_EXT_PREFIX) {
+            kbd_expect_e0 = true;
+            continue;
+        } else if (keycode & 0x80) {
+            continue; /* key release: do not pass to map or as text */
+        }
+
+        if (dolphin_is_active()) {
+            dolphin_handle_key(keycode);
+            continue;
+        }
+
+        if (keycode == ENTER_KEY_CODE) {
+            input_buffer[input_index] = '\0';
+            add_to_history(input_buffer);  // Add to history
+            console_newline();
+            execute_command(input_buffer);
+            input_index = 0;
+            history_index = -1;  // Reset history browsing
+            memset(input_buffer, 0, sizeof(input_buffer));
+            memset(temp_buffer, 0, sizeof(temp_buffer));
+            console_newline();
+            console_draw_prompt_with_path(get_current_directory());
+        } else if (keycode == BACKSPACE_KEY_CODE) {
+            if (input_index > 0) {
+                input_index--;
                 input_buffer[input_index] = '\0';
-                add_to_history(input_buffer);  // Add to history
-                console_newline();
-                execute_command(input_buffer);
-                input_index = 0;
-                history_index = -1;  // Reset history browsing
-                memset(input_buffer, 0, sizeof(input_buffer));
-                memset(temp_buffer, 0, sizeof(temp_buffer));
-                console_newline();
-                console_draw_prompt_with_path(get_current_directory());
-            } else if (keycode == BACKSPACE_KEY_CODE) {
-                // Handle backspace: remove from buffer and screen
-                if (input_index > 0) {
+                console_backspace();
+            }
+        } else if (keycode == TAB_KEY_CODE) {
+            autocomplete_command(input_buffer, &input_index);
+        } else if (keycode == UP_ARROW_CODE) {
+            if (history_count > 0) {
+                if (history_index == -1) {
+                    strcpy_simple(temp_buffer, input_buffer);
+                    history_index = history_count;
+                }
+                if (history_index > 0) {
+                    history_index--;
+                    const char *cmd = get_history_command(history_index);
+                    if (cmd) {
+                        while (input_index > 0) {
+                            input_index--;
+                            console_backspace();
+                        }
+                        strcpy_simple(input_buffer, cmd);
+                        input_index = strlen_simple(input_buffer);
+                        console_print(input_buffer);
+                    }
+                }
+            }
+        } else if (keycode == DOWN_ARROW_CODE) {
+            if (history_index != -1) {
+                history_index++;
+                while (input_index > 0) {
                     input_index--;
-                    input_buffer[input_index] = '\0';
                     console_backspace();
                 }
-            } else if (keycode == TAB_KEY_CODE) {
-                // Autocomplete
-                autocomplete_command(input_buffer, &input_index);
-            } else if (keycode == UP_ARROW_CODE) {
-                // Navigate history up (older commands)
-                if (history_count > 0) {
-                    // Save current input if starting to browse
-                    if (history_index == -1) {
-                        strcpy_simple(temp_buffer, input_buffer);
-                        history_index = history_count;
-                    }
-                    
-                    if (history_index > 0) {
-                        history_index--;
-                        const char *cmd = get_history_command(history_index);
-                        if (cmd) {
-                            // Clear current line
-                            while (input_index > 0) {
-                                input_index--;
-                                console_backspace();
-                            }
-                            // Display history command
-                            strcpy_simple(input_buffer, cmd);
-                            input_index = strlen_simple(input_buffer);
-                            console_print(input_buffer);
-                        }
-                    }
-                }
-            } else if (keycode == DOWN_ARROW_CODE) {
-                // Navigate history down (newer commands)
-                if (history_index != -1) {
-                    history_index++;
-                    
-                    // Clear current line
-                    while (input_index > 0) {
-                        input_index--;
-                        console_backspace();
-                    }
-                    
-                    if (history_index >= (int)history_count) {
-                        // Restore original input
-                        strcpy_simple(input_buffer, temp_buffer);
-                        history_index = -1;
-                    } else {
-                        // Display history command
-                        const char *cmd = get_history_command(history_index);
-                        if (cmd) {
-                            strcpy_simple(input_buffer, cmd);
-                        }
-                    }
-                    
-                    input_index = strlen_simple(input_buffer);
-                    console_print(input_buffer);
-                }
-            } else if (keycode == PAGE_UP_CODE) {
-                // Scroll up in history
-                console_scroll_up();
-            } else if (keycode == PAGE_DOWN_CODE) {
-                // Scroll down in history
-                console_scroll_down();
-            } else if (input_index < sizeof(input_buffer) - 1) {
-                char ch = keyboard_map[(unsigned char)keycode];
-                if (ch != 0) {  // Only add printable characters
-                    input_buffer[input_index++] = ch;
-                    console_putchar(ch);
-                    // Reset history browsing when typing
+                if (history_index >= (int)history_count) {
+                    strcpy_simple(input_buffer, temp_buffer);
                     history_index = -1;
+                } else {
+                    const char *cmd = get_history_command(history_index);
+                    if (cmd) {
+                        strcpy_simple(input_buffer, cmd);
+                    }
                 }
+                input_index = strlen_simple(input_buffer);
+                console_print(input_buffer);
+            }
+        } else if (keycode == PAGE_UP_CODE) {
+            console_scroll_up();
+        } else if (keycode == PAGE_DOWN_CODE) {
+            console_scroll_down();
+        } else if (input_index < sizeof(input_buffer) - 1 && keycode < 128) {
+            char ch = keyboard_map[keycode];
+            if (ch != 0) {
+                input_buffer[input_index++] = ch;
+                console_putchar(ch);
+                history_index = -1;
             }
         }
-        
-        // Yield CPU to scheduler
-        scheduler_yield();
     }
 }

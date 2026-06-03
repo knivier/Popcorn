@@ -1,6 +1,8 @@
 // src/pops/dolphin_pop.c - Dolphin Text Editor
 #include "../includes/dolphin_pop.h"
 #include "../includes/console.h"
+#include "../includes/keyboard_queue.h"
+#include "../includes/scheduler.h"
 #include "../includes/utils.h"
 #include <stddef.h>
 #include <stdbool.h>
@@ -12,11 +14,6 @@ extern bool delete_file(const char* name);
 
 // External console state
 extern ConsoleState console_state;
-
-// External keyboard functions
-extern char read_port(unsigned short port);
-#define KEYBOARD_STATUS_PORT 0x64
-#define KEYBOARD_DATA_PORT 0x60
 
 // Keyboard scancodes
 #define KEY_ENTER 0x1C
@@ -448,6 +445,11 @@ void dolphin_render(void) {
 // Handle keyboard input in editor mode
 void dolphin_handle_key(unsigned char keycode) {
     extern unsigned char keyboard_map[128];
+
+    /* PS/2 break codes have bit 7 set; kmain normally strips. Safety if not. */
+    if (keycode & 0x80) {
+        return;
+    }
     
     // Arrow key navigation
     if (keycode == KEY_UP_ARROW) {
@@ -514,83 +516,93 @@ void dolphin_handle_key(unsigned char keycode) {
         unsigned int cmd_index = 0;
         bool in_command = true;
         
-        // Wait for ESC key to be released first
+        // Wait for ESC key to be released (break scan code) — same bytes as IRQ path
         while (true) {
-            unsigned char status = read_port(KEYBOARD_STATUS_PORT);
-            if (status & 0x01) {
-                unsigned char release_key = read_port(KEYBOARD_DATA_PORT);
-                if (release_key == KEY_ESC_RELEASE) break;
+            unsigned char release_key;
+            if (key_queue_pop(&release_key)) {
+                if (release_key == KEY_ESC_RELEASE) {
+                    break;
+                }
+            } else {
+                __asm__ volatile("sti; hlt" ::: "memory");
             }
         }
         
         while (in_command) {
-            unsigned char status = read_port(KEYBOARD_STATUS_PORT);
-            if (status & 0x01) {
-                unsigned char cmd_key = read_port(KEYBOARD_DATA_PORT);
+            unsigned char cmd_key;
+            if (!key_queue_pop(&cmd_key)) {
+                __asm__ volatile("sti; hlt" ::: "memory");
+                continue;
+            }
+            
+            // Ignore key releases (high bit set)
+            if (cmd_key & 0x80) {
+                continue;
+            }
+            
+            if (cmd_key == KEY_ENTER) {
+                cmd_buffer[cmd_index] = '\0';
                 
-                // Ignore key releases (high bit set)
-                if (cmd_key & 0x80) continue;
+                console_set_cursor(0, 22);
+                console_print("Executing: [");
+                console_print(cmd_buffer);
+                console_print("]");
                 
-                if (cmd_key == KEY_ENTER) {
-                    cmd_buffer[cmd_index] = '\0';
-                    
-                    console_set_cursor(0, 22);
-                    console_print("Executing: [");
-                    console_print(cmd_buffer);
-                    console_print("]");
-                    
-                    // Parse command
-                    if (cmd_buffer[0] == 'q' && cmd_buffer[1] == '\0') {  // q - quit
-                        if (!editor.modified) {
-                            dolphin_close();
-                            return;  // Exit function completely
-                        } else {
-                            console_set_cursor(0, 21);
-                            console_print_warning("Unsaved changes! Use 'q!' to force or 'wq' to save & quit");
-                            return;  // Exit without re-rendering
-                        }
-                    } else if ((cmd_buffer[0] == 'q' && cmd_buffer[1] == '!') || 
-                               (cmd_buffer[0] == 'q' && cmd_buffer[1] == 'u' && cmd_buffer[2] == 'i' && cmd_buffer[3] == 't')) {  // q! - force quit
-                        editor.active = false;
-                        console_clear();
-                        console_draw_header("Popcorn Kernel v0.5");
-                        console_println_color("Dolphin closed (changes discarded)", CONSOLE_WARNING_COLOR);
-                        console_newline();
-                        extern const char* get_current_directory(void);
-                        extern void console_draw_prompt_with_path(const char* path);
-                        console_draw_prompt_with_path(get_current_directory());
-                        return;  // Exit completely
-                    } else if (cmd_buffer[0] == 'w' && cmd_buffer[1] == '\0') {  // w - write/save
-                        dolphin_save();
-                        return;  // Exit and re-render will happen on next key
-                    } else if ((cmd_buffer[0] == 'w' && cmd_buffer[1] == 'q' && cmd_buffer[2] == '\0') || 
-                               (cmd_buffer[0] == 'x' && cmd_buffer[1] == '\0')) {  // wq or x - save and quit
-                        dolphin_save();
-                        if (!editor.modified) {  // Only quit if save succeeded
-                            dolphin_close();
-                        }
-                        return;  // Exit completely
-                    } else if (cmd_buffer[0] == '\0') {  // Empty - just re-render
-                        dolphin_render();
-                        return;
-                    } else {
-                        // Unknown command
-                        console_set_cursor(0, 21);
-                        console_print_error("Unknown cmd. Use: w (save), q (quit), wq (save & quit), q! (force)");
+                if (cmd_buffer[0] == 'q' && cmd_buffer[1] == '\0') {  // q - quit
+                    if (!editor.modified) {
+                        dolphin_close();
                         return;
                     }
-                } else if (cmd_key == KEY_ESC) {
+                    console_set_cursor(0, 21);
+                    console_print_warning("Unsaved changes! Use 'q!' to force or 'wq' to save & quit");
+                    return;
+                }
+                if ((cmd_buffer[0] == 'q' && cmd_buffer[1] == '!') || 
+                    (cmd_buffer[0] == 'q' && cmd_buffer[1] == 'u' && cmd_buffer[2] == 'i' && cmd_buffer[3] == 't')) {
+                    editor.active = false;
+                    console_clear();
+                    console_draw_header("Popcorn Kernel v0.5");
+                    console_println_color("Dolphin closed (changes discarded)", CONSOLE_WARNING_COLOR);
+                    console_newline();
+                    extern const char* get_current_directory(void);
+                    extern void console_draw_prompt_with_path(const char* path);
+                    console_draw_prompt_with_path(get_current_directory());
+                    return;
+                }
+                if (cmd_buffer[0] == 'w' && cmd_buffer[1] == '\0') {
+                    dolphin_save();
+                    return;
+                }
+                if ((cmd_buffer[0] == 'w' && cmd_buffer[1] == 'q' && cmd_buffer[2] == '\0') || 
+                    (cmd_buffer[0] == 'x' && cmd_buffer[1] == '\0')) {
+                    dolphin_save();
+                    if (!editor.modified) {
+                        dolphin_close();
+                    }
+                    return;
+                }
+                if (cmd_buffer[0] == '\0') {
                     dolphin_render();
-                    return;  // Exit command mode
-                } else if (cmd_key == KEY_BACKSPACE && cmd_index > 0) {
-                    cmd_index--;
-                    console_backspace();
-                } else {
-                    char ch = keyboard_map[cmd_key];
-                    if (ch != 0 && cmd_index < 63) {
-                        cmd_buffer[cmd_index++] = ch;
-                        console_putchar(ch);
-                    }
+                    return;
+                }
+                console_set_cursor(0, 21);
+                console_print_error("Unknown cmd. Use: w (save), q (quit), wq (save & quit), q! (force)");
+                return;
+            }
+            if (cmd_key == KEY_ESC) {
+                dolphin_render();
+                return;
+            }
+            if (cmd_key == KEY_BACKSPACE && cmd_index > 0) {
+                cmd_index--;
+                console_backspace();
+                continue;
+            }
+            {
+                char ch = keyboard_map[cmd_key];
+                if (ch != 0 && cmd_index < 63) {
+                    cmd_buffer[cmd_index++] = ch;
+                    console_putchar(ch);
                 }
             }
         }

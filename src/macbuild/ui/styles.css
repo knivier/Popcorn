@@ -18,7 +18,10 @@
 }
 
 * { box-sizing: border-box; }
-html, body { height: 100%; }
+html, body {
+  height: 100%;
+  min-height: 100%;
+}
 body {
   margin: 0;
   color: var(--txt);
@@ -26,10 +29,11 @@ body {
   background: radial-gradient(1200px 700px at 20% 10%, rgba(124,108,255,0.20), transparent 55%),
               radial-gradient(900px 600px at 85% 20%, rgba(93,240,255,0.12), transparent 55%),
               linear-gradient(180deg, var(--bg0), var(--bg1));
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
-.bg { position: relative; height: 100%; }
+.bg { position: relative; height: 100%; min-height: 100%; }
 .noise {
   pointer-events: none;
   position: absolute; inset: 0;
@@ -38,7 +42,7 @@ body {
   opacity: .35;
 }
 
-.chrome { position: relative; height: 100%; padding: 22px; }
+.chrome { position: relative; height: 100%; min-height: 100%; padding: 22px; }
 .glass {
   background: var(--glass);
   border: 1px solid var(--stroke);
@@ -80,10 +84,13 @@ body {
   display: grid;
   grid-template-columns: 360px 1fr;
   gap: 18px;
+  min-height: 0;
   height: calc(100% - 88px);
+  max-height: calc(100% - 88px);
 }
 
 .panel {
+  min-height: 0;
   padding: 16px;
   border-radius: var(--radius);
   background: linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.03));
@@ -157,8 +164,9 @@ body {
 .kv .k { color: rgba(255,255,255,.55); }
 .kv .v { color: rgba(255,255,255,.80); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
 
-.terminal { display: grid; grid-template-rows: auto 1fr auto; }
+.terminal { min-height: 0; display: grid; grid-template-rows: auto 1fr auto; }
 .term {
+  min-height: 0;
   border-radius: var(--radius2);
   border: 1px solid rgba(255,255,255,.10);
   background: rgba(0,0,0,.25);
@@ -166,6 +174,8 @@ body {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   overflow: auto;
   white-space: pre-wrap;
+  /* Scroll position when content is scrollable; keeps wheel/trackpad on the log, not the window */
+  overscroll-behavior: contain;
 }
 .term-footer { margin-top: 10px; display: flex; justify-content: space-between; }
 .hint { color: rgba(255,255,255,.45); font-size: 12px; }
