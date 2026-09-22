@@ -263,7 +263,7 @@ int64_t sys_fork(syscall_context_t* ctx) {
     child_task->ppid = current_task->pid;
     
     // Copy the parent's context to child
-    child_task->context = current_task->context;
+    memory_copy(&child_task->context, &current_task->context, sizeof(child_task->context));
     
     // Child gets PID 0 in return value, parent gets child's PID
     uint32_t child_pid = child_task->pid;
@@ -326,7 +326,6 @@ int64_t sys_wait(syscall_context_t* ctx) {
 int64_t sys_malloc(syscall_context_t* ctx) {
     size_t size = (size_t)ctx->rdi;
     
-    // Validate size: prevent zero-size allocation and check for overflow
     if (size == 0 || size > (1024 * 1024 * 1024)) {  // Max 1GB
         return SYSCALL_EINVAL;
     }
