@@ -68,6 +68,7 @@ class KernelBuilder:
             ("pops/halt_pop.c", "halt_pop.o"),
             ("pops/filesystem_pop.c", "filesystem_pop.o"),
             ("core/multiboot2.c", "multiboot2.o"),
+            ("core/uefi_input.c", "uefi_input.o"),
             ("pops/sysinfo_pop.c", "sysinfo_pop.o"),
             ("pops/memory_pop.c", "memory_pop.o"),
             ("pops/cpu_pop.c", "cpu_pop.o"),
