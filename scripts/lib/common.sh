@@ -2,13 +2,17 @@
 [[ -n "${POPCORN_BUILD_COMMON:-}" ]] && return 0
 POPCORN_BUILD_COMMON=1
 
+: "${POPCORN_ROOT:?POPCORN_ROOT must be set before sourcing lib/common.sh}"
 : "${POPCORN_SRC:?POPCORN_SRC must be set before sourcing lib/common.sh}"
-POPCORN_BUILD="${POPCORN_BUILD:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+: "${POPCORN_TARGET:?POPCORN_TARGET must be set before sourcing lib/common.sh}"
+POPCORN_SCRIPTS="${POPCORN_SCRIPTS:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
-OBJ_DIR="${OBJ_DIR:-obj}"
-BUILD_BASE="${BUILD_BASE:-buildbase}"
-BUILD_LOG="${BUILD_LOG:-$BUILD_BASE/build.log}"
-CONFIG_FILE="${CONFIG_FILE:-$BUILD_BASE/.build_config}"
+OBJ_DIR="${OBJ_DIR:-$POPCORN_TARGET/obj}"
+BUILD_BASE="${BUILD_BASE:-$POPCORN_TARGET}"
+BUILD_LOG="${BUILD_LOG:-$POPCORN_TARGET/build.log}"
+CONFIG_FILE="${CONFIG_FILE:-$POPCORN_TARGET/.build_config}"
+# Unix domain sockets fail on /mnt/c; keep runtime sockets on a native Linux fs.
+RUNTIME_DIR="${RUNTIME_DIR:-/tmp/popcorn-qemu}"
 HOST_OS="${HOST_OS:-$(uname -s | tr '[:upper:]' '[:lower:]')}"
 
 GREEN=$'\033[0;32m'
@@ -17,7 +21,7 @@ YELLOW=$'\033[1;33m'
 BLUE=$'\033[0;34m'
 NC=$'\033[0m'
 
-mkdir -p "$BUILD_BASE"
+mkdir -p "$POPCORN_TARGET" "$OBJ_DIR" "$RUNTIME_DIR"
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -28,12 +32,13 @@ log() {
   local timestamp
   timestamp="$(date '+%Y-%m-%d %H:%M:%S')"
   printf '[%s] [%s] %s\n' "$timestamp" "$level" "$message" >>"$BUILD_LOG" 2>/dev/null || true
+  # Always print to stderr so $(...) command substitutions never swallow logs into argv.
   case "$level" in
-    INFO) printf '%s%s%s\n' "$BLUE" "$message" "$NC" ;;
-    SUCCESS) printf '%s%s%s\n' "$GREEN" "$message" "$NC" ;;
-    WARNING) printf '%s%s%s\n' "$YELLOW" "$message" "$NC" ;;
-    ERROR) printf '%s%s%s\n' "$RED" "$message" "$NC" ;;
-    *) printf '%s\n' "$message" ;;
+    INFO) printf '%s%s%s\n' "$BLUE" "$message" "$NC" >&2 ;;
+    SUCCESS) printf '%s%s%s\n' "$GREEN" "$message" "$NC" >&2 ;;
+    WARNING) printf '%s%s%s\n' "$YELLOW" "$message" "$NC" >&2 ;;
+    ERROR) printf '%s%s%s\n' "$RED" "$message" "$NC" >&2 ;;
+    *) printf '%s\n' "$message" >&2 ;;
   esac
 }
 
@@ -51,7 +56,7 @@ load_config() {
 }
 
 save_config() {
-  mkdir -p "$BUILD_BASE"
+  mkdir -p "$POPCORN_TARGET"
   {
     printf 'QEMU_MEMORY=%q\n' "${QEMU_MEMORY:-256}"
     printf 'QEMU_CORES=%q\n' "${QEMU_CORES:-1}"
@@ -64,7 +69,9 @@ find_edk_code() {
     /opt/homebrew/share/qemu/edk2-x86_64-code.fd \
     /opt/homebrew/Cellar/qemu/*/share/qemu/edk2-x86_64-code.fd \
     /usr/share/qemu/edk2-x86_64-code.fd \
-    /usr/share/edk2/x64/OVMF_CODE.fd; do
+    /usr/share/edk2/x64/OVMF_CODE.fd \
+    /usr/share/edk2/ovmf/OVMF_CODE.fd \
+    /usr/share/OVMF/OVMF_CODE.fd; do
     if [[ -f "$p" ]]; then
       printf '%s' "$p"
       return 0
@@ -74,10 +81,20 @@ find_edk_code() {
 }
 
 ensure_ovmf_vars() {
-  local vars="${1:-$BUILD_BASE/ovmf_vars.fd}"
+  local vars="${1:-$POPCORN_TARGET/ovmf_vars.fd}"
   mkdir -p "$(dirname "$vars")"
   if [[ ! -f "$vars" ]]; then
-    dd if=/dev/zero of="$vars" bs=1m count=4 status=none
+    local template=""
+    for template in \
+      /usr/share/edk2/ovmf/OVMF_VARS.fd \
+      /usr/share/OVMF/OVMF_VARS.fd \
+      /usr/share/edk2/x64/OVMF_VARS.fd; do
+      if [[ -f "$template" ]]; then
+        cp "$template" "$vars"
+        return 0
+      fi
+    done
+    dd if=/dev/zero of="$vars" bs=1M count=4 status=none
   fi
 }
 
@@ -89,9 +106,9 @@ qemu_kill_all() {
 uefi_stage_layout() {
   local stage="$1"
   mkdir -p "$stage/EFI/BOOT" "$stage/boot"
-  cp "$POPCORN_SRC/BOOTX64.EFI" "$stage/EFI/BOOT/BOOTX64.EFI"
-  cp "$POPCORN_SRC/kernel" "$stage/boot/kernel"
-  cp "$POPCORN_SRC/kernel" "$stage/EFI/BOOT/kernel"
+  cp "$UEFI_OUT" "$stage/EFI/BOOT/BOOTX64.EFI"
+  cp "$KERNEL_OUT" "$stage/boot/kernel"
+  cp "$KERNEL_OUT" "$stage/EFI/BOOT/kernel"
 }
 
 # Write a FAT32 image from a staged directory tree.

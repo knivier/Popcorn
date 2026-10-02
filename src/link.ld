@@ -43,16 +43,25 @@ SECTIONS
   . = KERNEL_VMA_BASE + boot_lma_end;
   .text : AT(boot_lma_end) {
     *(.text)
+    *(.text.*)
+    /* clang -mcmodel=large */
+    *(.ltext)
+    *(.ltext.*)
   } :text
   __text_vend = .;
   . = ALIGN(0x10);
   .rodata : {
     *(.rodata)
     *(.rodata.*)
+    *(.lrodata)
+    *(.lrodata.*)
   } :rdata2
   . = ALIGN(0x10);
   .data : {
     *(.data)
+    *(.data.*)
+    *(.ldata)
+    *(.ldata.*)
   } :dataw
   . = ALIGN(0x10);
   /* .lbss must live in the same phdr as .bss (one RW PT_LOAD, correct p_offset). */

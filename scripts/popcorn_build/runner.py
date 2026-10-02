@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .log import LogBuffer
+from .paths import CORE_SH, ROOT_DIR, TARGET_DIR
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,22 @@ def run_streamed(
     return RunResult(ok=(rc == 0), returncode=rc)
 
 
+def run_core(action: str, logs: LogBuffer, *, via_wsl: bool = False) -> RunResult:
+    """Invoke scripts/core.sh <action>. On Windows, pass via_wsl=True."""
+    TARGET_DIR.mkdir(parents=True, exist_ok=True)
+    if via_wsl:
+        # Convert Windows path to /mnt/<drive>/... for WSL.
+        root = ROOT_DIR.resolve()
+        drive = root.drive.rstrip(":").lower()
+        posix = "/mnt/" + drive + root.as_posix()[2:]
+        cmd = ["wsl", "bash", f"{posix}/scripts/core.sh", action]
+        cwd = Path.cwd()
+    else:
+        cmd = ["bash", str(CORE_SH), action]
+        cwd = ROOT_DIR
+    return run_streamed(cmd=cmd, cwd=cwd, env=None, logs=logs)
+
+
 def rm_rf(path: Path) -> None:
     if not path.exists():
         return
@@ -61,4 +78,3 @@ def write_text(path: Path, text: str) -> None:
 
 def list_exists(paths: Iterable[Path]) -> list[Path]:
     return [p for p in paths if p.exists()]
-

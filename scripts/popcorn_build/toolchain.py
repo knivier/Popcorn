@@ -18,7 +18,6 @@ def have(cmd: str) -> bool:
 
 
 def detect_mkrescue() -> str | None:
-    # Prefer BIOS-capable mkrescue for SeaBIOS/QEMU default.
     for candidate in (
         "grub2-mkrescue",
         "grub-mkrescue",
@@ -32,9 +31,17 @@ def detect_mkrescue() -> str | None:
 
 def detect_toolchain() -> Toolchain | None:
     if not have("nasm") or not have("qemu-system-x86_64"):
+        # On Windows native, tools live in WSL — still return a placeholder.
+        if have("wsl"):
+            return Toolchain(
+                cc="clang",
+                ld="ld.lld",
+                nasm="nasm",
+                qemu="qemu-system-x86_64",
+                mkrescue=None,
+            )
         return None
 
-    # Strongly prefer a real cross toolchain (this matches your “working previously” behavior).
     if have("x86_64-elf-gcc") and have("x86_64-elf-ld"):
         return Toolchain(
             cc="x86_64-elf-gcc",
@@ -44,7 +51,6 @@ def detect_toolchain() -> Toolchain | None:
             mkrescue=detect_mkrescue(),
         )
 
-    # Optional fallback (kept for portability), but macOS users should install the cross toolchain.
     if have("clang") and have("ld.lld"):
         return Toolchain(
             cc="clang",
@@ -55,4 +61,3 @@ def detect_toolchain() -> Toolchain | None:
         )
 
     return None
-

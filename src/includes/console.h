@@ -9,6 +9,10 @@
 #define VGA_HEIGHT 25
 #define VGA_MEMORY_SIZE (VGA_WIDTH * VGA_HEIGHT * 2)
 #define VGA_MEMORY_ADDRESS 0xB8000
+/* Last two rows are reserved (heartbeat + status); shell scrolls above them. */
+#define CONSOLE_STATUS_ROW (VGA_HEIGHT - 1u)
+#define CONSOLE_HEARTBEAT_ROW (VGA_HEIGHT - 2u)
+#define CONSOLE_SCROLL_ROWS (VGA_HEIGHT - 2u)
 
 // Color definitions (VGA text mode)
 #define COLOR_BLACK         0x00

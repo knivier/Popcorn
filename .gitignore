@@ -1,4 +1,7 @@
-# Build artifacts
+# Build outputs (all artifacts land here)
+target/
+
+# Legacy leftover paths (pre-scripts/ refactor)
 src/obj/
 src/kernel
 src/popcorn.iso
@@ -12,12 +15,10 @@ src/uefi_usb/
 src/isodir/
 src/buildbase/
 buildbase/
+src/build/
 
-# Object files and leftovers
+# Object / log leftovers
 src/*.o
-src/obj/root-leftovers/
-
-# Logs
 *.log
 build_log.txt
 src/build_errors.log
@@ -36,5 +37,5 @@ v17/
 CoPilotIndices/
 VSWorkspaceState.json
 
-# Debug scratch space
+# Debug scratch
 src/dbg/

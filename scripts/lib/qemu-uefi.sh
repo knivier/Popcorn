@@ -1,23 +1,76 @@
 [[ -n "${POPCORN_BUILD_QEMU_UEFI:-}" ]] && return 0
 POPCORN_BUILD_QEMU_UEFI=1
 
-: "${POPCORN_SRC:?}"
+: "${POPCORN_TARGET:?}"
 # shellcheck source=common.sh
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+# shellcheck source=kernel.sh
+source "$(dirname "${BASH_SOURCE[0]}")/kernel.sh"
+# shellcheck source=img-uefi.sh
+source "$(dirname "${BASH_SOURCE[0]}")/img-uefi.sh"
 
-UEFI_IMG="${UEFI_IMG:-popcorn-uefi.img}"
-OVMF_VARS="${OVMF_VARS:-$BUILD_BASE/ovmf_vars.fd}"
+UEFI_IMG="${UEFI_IMG:-$POPCORN_TARGET/popcorn-uefi.img}"
+OVMF_VARS="${OVMF_VARS:-$POPCORN_TARGET/ovmf_vars.fd}"
+
+# Video for UEFI/GOP: std VGA often leaves a blank GTK window while the kernel
+# correctly paints OVMF's GOP buffer. virtio-vga (or ramfb) is what QEMU shows.
+qemu_uefi_video_args() {
+  # 1280x800 matches 80x25 @ 8x16 glyphs at 2x (640x400 → 1280x800).
+  local res="${POPCORN_QEMU_RES:-1280x800}"
+  local xres="${res%x*}"
+  local yres="${res#*x}"
+  if qemu-system-x86_64 -device help 2>&1 | grep -q 'name "virtio-vga"'; then
+    printf '%s\n' -vga none -device "virtio-vga,xres=${xres},yres=${yres}"
+  elif qemu-system-x86_64 -device help 2>&1 | grep -q 'name "ramfb"'; then
+    printf '%s\n' -vga none -device ramfb
+  else
+    printf '%s\n' -vga std
+  fi
+}
+
+qemu_uefi_display_args() {
+  local mode="${POPCORN_QEMU_DISPLAY:-auto}"
+  case "$mode" in
+    vnc)
+      log INFO "VNC: connect a viewer to 127.0.0.1:5900 (display :0) — optional, not required"
+      printf '%s\n' -display none -vnc "127.0.0.1:0,to=9"
+      ;;
+    gtk)
+      export DISPLAY="${DISPLAY:-:0}"
+      unset WAYLAND_DISPLAY
+      printf '%s\n' -display gtk,gl=off
+      ;;
+    sdl) printf '%s\n' -display sdl ;;
+    none) printf '%s\n' -display none ;;
+    cocoa) printf '%s\n' -display cocoa ;;
+    auto|*)
+      if [[ "$HOST_OS" == "darwin" ]]; then
+        printf '%s\n' -display cocoa
+      elif [[ -n "${WSL_DISTRO_NAME:-}" || -n "${WSL_INTEROP:-}" ]]; then
+        # WSLg GTK windows are often blank/unclickable ("COPY MODE" ghost icons).
+        # Default to VNC on WSL so any Windows VNC viewer can attach reliably.
+        log INFO "WSL: using VNC on 127.0.0.1:5900 — open TightVNC / RealVNC / TigerVNC"
+        log INFO "  (override with POPCORN_QEMU_DISPLAY=gtk if WSLg windows work for you)"
+        printf '%s\n' -display none -vnc "127.0.0.1:0,to=9"
+      else
+        printf '%s\n' -display gtk,gl=off
+      fi
+      ;;
+  esac
+}
 
 qemu_uefi_usb_args() {
   local code="$1"
   local extra=("${@:2}")
+  # shellcheck disable=SC2046
   qemu-system-x86_64 \
     -machine q35 -m 1024 -cpu max \
     -drive "if=pflash,format=raw,readonly=on,file=$code" \
     -drive "if=pflash,format=raw,file=$OVMF_VARS" \
-    -drive "if=none,id=usbstick,format=raw,file=$POPCORN_SRC/$UEFI_IMG" \
+    -drive "if=none,id=usbstick,format=raw,file=$UEFI_IMG" \
     -device qemu-xhci,id=xhci \
     -device usb-storage,bus=xhci.0,drive=usbstick \
+    $(qemu_uefi_video_args) \
     "${extra[@]}"
 }
 
@@ -26,7 +79,7 @@ qemu_uefi_test_stability() {
   code="$(find_edk_code || true)"
   [[ -n "$code" ]] || { echo "FAIL: edk2-x86_64-code.fd not found" >&2; exit 1; }
 
-  dbg="$BUILD_BASE/uefi-stability.log"
+  dbg="$POPCORN_TARGET/uefi-stability.log"
   ensure_ovmf_vars "$OVMF_VARS"
   rm -f "$dbg"
   qemu_kill_all
@@ -39,7 +92,7 @@ qemu_uefi_test_stability() {
   local s
   for s in 5 10 15 20 25 30; do
     sleep 5
-    if ! pgrep -x qemu-system-x86_64 >/dev/null; then
+    if ! pgrep -f qemu-system-x86_64 >/dev/null; then
       echo "FAIL: QEMU exited before ${s}s (guest shutdown/reset)"
       echo "debugcon: $(cat "$dbg" 2>/dev/null || true)"
       return 1
@@ -60,12 +113,12 @@ qemu_uefi_test_alive() {
   code="$(find_edk_code || true)"
   [[ -n "$code" ]] || die "edk2-x86_64-code.fd not found"
 
-  mon="$BUILD_BASE/qemu-uefi-usb-mon.sock"
-  debug="$BUILD_BASE/uefi-debugcon.log"
-  out_dir="$BUILD_BASE/alive-dumps"
+  mon="$RUNTIME_DIR/qemu-uefi-usb-mon.sock"
+  debug="$POPCORN_TARGET/uefi-debugcon.log"
+  out_dir="$POPCORN_TARGET/alive-dumps"
 
   ensure_ovmf_vars "$OVMF_VARS"
-  mkdir -p "$out_dir"
+  mkdir -p "$out_dir" "$RUNTIME_DIR"
   rm -f "$mon" "$debug"
   find "$out_dir" -maxdepth 1 -name 't*.ppm' -delete 2>/dev/null || true
   qemu_kill_all
@@ -95,18 +148,20 @@ qemu_uefi_test_alive() {
   dump_screen t30
   qemu_kill_all
 
-  python3 - <<'PY'
+  TARGET_DIR="$POPCORN_TARGET" python3 - <<'PY'
+import os
 import re
 import sys
 from pathlib import Path
 
-out_dir = Path("buildbase/alive-dumps")
+target = Path(os.environ["TARGET_DIR"])
+out_dir = target / "alive-dumps"
 ppm_files = sorted(out_dir.glob("t*.ppm"))
 if len(ppm_files) < 2:
     print("FAIL: missing screendumps")
     sys.exit(1)
 
-dbg = Path("buildbase/uefi-debugcon.log")
+dbg = target / "uefi-debugcon.log"
 if dbg.exists():
     tail = dbg.read_text(errors="replace")
     print("debugcon:", tail[:24] + ("..." if len(tail) > 24 else ""))
@@ -180,7 +235,7 @@ qemu_uefi_test_debugcon() {
   code="$(find_edk_code || true)"
   [[ -n "$code" ]] || die "edk2-x86_64-code.fd not found"
 
-  dbg="$BUILD_BASE/uefi-smoke-debugcon.log"
+  dbg="$POPCORN_TARGET/uefi-smoke-debugcon.log"
   ensure_ovmf_vars "$OVMF_VARS"
   rm -f "$dbg"
   qemu_kill_all
@@ -217,16 +272,22 @@ qemu_uefi_run_interactive() {
   local code
   code="$(find_edk_code || true)"
   [[ -n "$code" ]] || die "edk2-x86_64-code.fd not found"
-  [[ -f "$POPCORN_SRC/$UEFI_IMG" ]] || die "Missing $UEFI_IMG — run: ./build/core.sh img"
+  [[ -f "$UEFI_IMG" ]] || die "Missing $UEFI_IMG — run: ./scripts/core.sh img"
 
   ensure_ovmf_vars "$OVMF_VARS"
   log INFO "QEMU UEFI USB boot (interactive window)"
+  log INFO "Video: virtio-vga/ramfb (GOP). Serial boot tags still print here."
+
+  # shellcheck disable=SC2046
   exec qemu-system-x86_64 \
     -machine q35 -m 1024 -cpu max \
     -drive "if=pflash,format=raw,readonly=on,file=$code" \
     -drive "if=pflash,format=raw,file=$OVMF_VARS" \
-    -drive "if=none,id=usbstick,format=raw,file=$POPCORN_SRC/$UEFI_IMG" \
+    -drive "if=none,id=usbstick,format=raw,file=$UEFI_IMG" \
     -device qemu-xhci,id=xhci \
     -device usb-storage,bus=xhci.0,drive=usbstick \
+    $(qemu_uefi_video_args) \
+    $(qemu_uefi_display_args) \
+    -serial stdio \
     -no-reboot
 }

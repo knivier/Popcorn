@@ -1155,6 +1155,7 @@ void kmain(void) {
                         }
                         if (input_index < sizeof(input_buffer) - 1) {
                             input_buffer[input_index++] = (char)keycode;
+                            console_set_color(CONSOLE_BG_COLOR | COLOR_WHITE);
                             console_putchar((char)keycode);
                             history_index = -1;
                         }
@@ -1166,9 +1167,8 @@ void kmain(void) {
         }
 
         if (!from_queue && !key_queue_pop(&keycode)) {
-            if (!uefi_input_available()) {
-                keyboard_poll_ps2();
-            }
+            /* Always poll PS/2 after ExitBootServices; firmware ConIn is dead then. */
+            keyboard_poll_ps2();
             if (!key_queue_pop(&keycode)) {
                 /* UEFI/QEMU: sti+hlt hangs on latent IRQ; polled PIT keeps time alive. */
                 if (timer_is_poll_mode()) {
@@ -1207,8 +1207,11 @@ void kmain(void) {
             history_index = -1;  // Reset history browsing
             memset(input_buffer, 0, sizeof(input_buffer));
             memset(temp_buffer, 0, sizeof(temp_buffer));
+            console_set_color(CONSOLE_BG_COLOR | COLOR_WHITE);
             console_newline();
             console_draw_prompt_with_path(get_current_directory());
+            console_print_status_bar();
+            console_set_color(CONSOLE_BG_COLOR | COLOR_WHITE);
         } else if (keycode == BACKSPACE_KEY_CODE) {
             if (input_index > 0) {
                 input_index--;
@@ -1264,6 +1267,7 @@ void kmain(void) {
             char ch = keyboard_map[keycode];
             if (ch != 0) {
                 input_buffer[input_index++] = ch;
+                console_set_color(CONSOLE_BG_COLOR | COLOR_WHITE);
                 console_putchar(ch);
                 history_index = -1;
             }

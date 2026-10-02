@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# macOS entry: CLI commands delegate to core.sh; `menu` keeps the dialog UI.
+# Generic Linux entry (Debian/Ubuntu/Arch/...): CLI → core.sh; bare run → dialog.
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-POPCORN_BUILD="$SCRIPT_DIR"
-POPCORN_SRC="$(cd "$SCRIPT_DIR/.." && pwd)"
+POPCORN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+POPCORN_SRC="$POPCORN_ROOT/src"
+POPCORN_TARGET="$POPCORN_ROOT/target"
+POPCORN_SCRIPTS="$SCRIPT_DIR"
+export POPCORN_ROOT POPCORN_SRC POPCORN_TARGET POPCORN_SCRIPTS
 
 _core_commands="build uefi img iso iso-uefi all run run-uefi test-uefi test-uefi-stability clean logs help --help -h"
 for c in $_core_commands; do
@@ -13,11 +16,10 @@ for c in $_core_commands; do
   fi
 done
 
-cd "$POPCORN_SRC"
 # shellcheck source=lib/common.sh
-source "$POPCORN_BUILD/lib/common.sh"
+source "$SCRIPT_DIR/lib/common.sh"
 # shellcheck source=lib/kernel.sh
-source "$POPCORN_BUILD/lib/kernel.sh"
+source "$SCRIPT_DIR/lib/kernel.sh"
 
 check_kernel_dependencies
 load_config
@@ -60,7 +62,7 @@ main_menu() {
 
   while true; do
     local choice=""
-    choice="$(dialog --title "Popcorn Build System" \
+    choice="$(dialog --title "Popcorn Build System (Linux)" \
       --menu "Choose an operation:" 20 72 11 \
       1 "Build Kernel" \
       2 "Build Kernel + Legacy ISO" \
@@ -82,7 +84,7 @@ main_menu() {
       3) create_legacy_iso
          dialog --title "Success" --msgbox "ISO created: $ISO_OUT" 8 50 || true ;;
       4) "$SCRIPT_DIR/core.sh" all
-         dialog --title "Success" --msgbox "UEFI image: popcorn-uefi.img" 8 50 || true ;;
+         dialog --title "Success" --msgbox "UEFI image: $POPCORN_TARGET/popcorn-uefi.img" 8 55 || true ;;
       5) "$SCRIPT_DIR/core.sh" test-uefi
          dialog --title "UEFI tests" --msgbox "See terminal output for PASS/FAIL." 8 50 || true ;;
       6) clear; run_legacy_qemu ;;

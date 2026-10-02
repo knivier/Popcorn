@@ -2,28 +2,27 @@
 """
 Popcorn macOS GUI builder (WebView edition).
 
-Run from anywhere:
-  python3 src/build/gui-macos.py
+Run: python3 scripts/gui-macos.py
 """
-
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 from threading import Lock, Thread
 
-BUILD_DIR = Path(__file__).resolve().parent
-SRC_DIR = BUILD_DIR.parent
-sys.path.insert(0, str(BUILD_DIR))
+SCRIPTS_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPTS_DIR))
+
+from popcorn_build.paths import SRC_DIR, TARGET_DIR
 
 
 def _read_ui() -> str:
-    ui_dir = BUILD_DIR / "popcorn_build" / "ui"
-    html = (ui_dir / "index.html").read_text()
-    css = (ui_dir / "styles.css").read_text()
-    js = (ui_dir / "app.js").read_text()
+    ui_dir = SCRIPTS_DIR / "popcorn_build" / "ui"
+    html = (ui_dir / "index.html").read_text(encoding="utf-8")
+    css = (ui_dir / "styles.css").read_text(encoding="utf-8")
+    js = (ui_dir / "app.js").read_text(encoding="utf-8")
     html = html.replace('<link rel="stylesheet" href="styles.css" />', f"<style>{css}</style>")
-    html = html.replace("<script src=\"app.js\"></script>", f"<script>{js}</script>")
+    html = html.replace('<script src="app.js"></script>', f"<script>{js}</script>")
     return html
 
 
@@ -33,7 +32,7 @@ def main() -> int:
         return 2
 
     try:
-        import webview  # pywebview
+        import webview
     except Exception:
         print("Missing dependency: pywebview")
         print("Install: pip3 install pywebview")
@@ -46,7 +45,6 @@ def main() -> int:
     from popcorn_build.toolchain import Toolchain, detect_mkrescue, detect_toolchain, have
 
     logs = LogBuffer()
-
     state_lock = Lock()
     busy = False
     status = "Ready"
@@ -67,12 +65,11 @@ def main() -> int:
             mkrescue=detect_mkrescue(),
         )
 
-    # macOS BIOS boot (SeaBIOS): prefer i686-elf-grub-mkrescue when available.
     if tc.mkrescue == "x86_64-elf-grub-mkrescue" and have("i686-elf-grub-mkrescue"):
         tc = Toolchain(cc=tc.cc, ld=tc.ld, nasm=tc.nasm, qemu=tc.qemu, mkrescue="i686-elf-grub-mkrescue")
 
-    builder = KernelBuilder(src_dir=SRC_DIR, toolchain=tc, logs=logs)
-    iso = IsoBuilder(src_dir=SRC_DIR, toolchain=tc, logs=logs)
+    builder = KernelBuilder(toolchain=tc, logs=logs)
+    iso = IsoBuilder(toolchain=tc, logs=logs)
     qemu = QemuRunner(logs=logs)
 
     def set_state(level: str, msg: str) -> None:
@@ -109,6 +106,7 @@ def main() -> int:
                     "qemu_running": qemu.running(),
                     "toolchain": f"{tc.cc} + {tc.ld}",
                     "mkrescue": tc.mkrescue or "",
+                    "target": str(TARGET_DIR),
                 }
 
         def poll_logs(self, since_idx: int):
@@ -136,19 +134,19 @@ def main() -> int:
                     return
                 if action == "iso":
                     logs.add("INFO", "ISO started")
-                    out = builder.build()
-                    iso.create(out.kernel)
+                    builder.build()
+                    iso.create()
                     set_state("OK", "ISO complete")
                     return
                 if action == "run":
                     logs.add("INFO", "QEMU run started")
-                    iso_path = SRC_DIR / "popcorn.iso"
+                    iso_path = TARGET_DIR / "popcorn.iso"
                     if not iso_path.exists():
-                        raise RuntimeError("popcorn.iso not found (create ISO first)")
+                        raise RuntimeError("popcorn.iso not found in target/ (create ISO first)")
                     qemu.run_iso(
                         qemu_bin=tc.qemu,
                         iso_path=iso_path,
-                        cfg=QemuConfig(memory_mb=512, cores=2, boot_from_cd=True),
+                        cfg=QemuConfig(memory_mb=512, cores=2, boot_from_cd=True, display="cocoa"),
                     )
                     if qemu.running():
                         set_state("OK", "QEMU running")
@@ -158,15 +156,12 @@ def main() -> int:
 
                 logs.add("INFO", "Recomp started")
                 builder.clean()
-                out = builder.build()
-                iso_path = iso.create(out.kernel)
-
-                # QEMU “bigger” request: for text-mode kernels, the content is still 80x25,
-                # but we can at least allocate more space and force CD boot reliably.
+                builder.build()
+                iso_path = iso.create()
                 qemu.run_iso(
                     qemu_bin=tc.qemu,
                     iso_path=iso_path,
-                    cfg=QemuConfig(memory_mb=512, cores=2, boot_from_cd=True),
+                    cfg=QemuConfig(memory_mb=512, cores=2, boot_from_cd=True, display="cocoa"),
                 )
                 if qemu.running():
                     set_state("OK", "QEMU running")
@@ -206,4 +201,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

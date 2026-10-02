@@ -18,7 +18,7 @@ Popcorn is a modular x86-64 kernel framework for learning operating system devel
 
 | Area | Status | Verified in |
 |------|--------|-------------|
-| Boot (GRUB + UEFI) | Done | `src/core/kernel.asm`, `src/uefi/bootx64.c`, `src/build/core.sh` |
+| Boot (GRUB + UEFI) | Done | `src/core/kernel.asm`, `src/uefi/bootx64.c`, `scripts/core.sh` |
 | Console / shell UX | Done (C, not a driver) | `src/core/console.c`, `src/core/kernel.c` |
 | PMM + kmalloc | Done (prototype) | `src/core/memory.c` |
 | VMM (4-level paging) | Partial | `src/core/vmm.c` — no 2 MiB PDE split |
@@ -58,11 +58,12 @@ Verified present in tree.
 ### Boot and build
 
 - [x] x86-64 long-mode entry with identity map and high-half kernel (`src/core/kernel.asm`, `src/link.ld`)
-- [x] GRUB Multiboot2 legacy ISO path (`src/build/lib/kernel.sh`)
-- [x] Native UEFI loader (`src/uefi/bootx64.c` → `BOOTX64.EFI`)
+- [x] GRUB Multiboot2 legacy ISO path (`scripts/lib/kernel.sh`)
+- [x] Native UEFI loader (`src/uefi/bootx64.c` → `target/BOOTX64.EFI`)
 - [x] Multiboot2 / UEFI handoff parsing (`src/core/multiboot2.c`)
-- [x] Unified build system: shell scripts + Python builder (`src/build/core.sh`, `src/build/popcorn_build/`)
-- [x] QEMU UEFI smoke and stability tests (`src/build/lib/qemu-uefi.sh`)
+- [x] Unified build system: shell scripts + Python builder (`scripts/core.sh`, `scripts/popcorn_build/`)
+- [x] QEMU UEFI smoke and stability tests (`scripts/lib/qemu-uefi.sh`)
+- [x] All artifacts under `target/`; platform GUIs: macOS / Fedora / Linux / Windows(WSL)
 - [x] Boot splash and staged initialization (`src/core/init.c`)
 - [x] GOP framebuffer text on no-CSM machines (`src/core/console.c` `console_fb_*`, `src/includes/boot_fb.h`)
 - [x] UEFI firmware keyboard fallback (`src/core/uefi_input.c`)
@@ -103,8 +104,7 @@ Verified **not** done. These are the gate into v0.7, not a separate multi-month 
 - [ ] Stop forcing poll-only time in `kmain`: `init.c` enables IRQ PIT on the GRUB path, then `kernel.c` always calls `timer_enable_poll()`
 - [ ] One task/stack allocator — `scheduler_create_task` and `scheduler_create_task_with_pid` each have a **separate** `static TaskStruct task_pool[32]`
 - [ ] Scheduler bootstrap: `bootstrap_on_kmain_stack` still skips ticks until idle has run
-- [ ] CI: GitHub Actions running `./build/core.sh build` + `test-uefi`
-- [ ] Align `readme.md` with `gui-fd.py` / `gui-macos.py` (it still names `gui-tk.py`)
+- [ ] CI: GitHub Actions running `./scripts/core.sh build` + `test-uefi`
 
 **Exit criteria:** `#PF` prints a useful serial dump in QEMU; GRUB path can use IRQ time; CI green.
 
@@ -142,7 +142,7 @@ Do **not** build the driver network on the current syscall stubs (`sys_open` alw
 
 ### 3.1 Rust build (do first)
 
-Crate: `src/rust/popcorn_kernel` (workspace) producing `libpopcorn_kernel.a`, linked by `src/build/lib/kernel.sh` and `src/build/popcorn_build/builder.py`.
+Crate: `src/rust/popcorn_kernel` (workspace) producing `libpopcorn_kernel.a`, linked by `scripts/lib/kernel.sh` and `scripts/popcorn_build/builder.py`.
 
 ```
 src/rust/

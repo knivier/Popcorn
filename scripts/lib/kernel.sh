@@ -2,12 +2,14 @@
 POPCORN_BUILD_KERNEL=1
 
 : "${POPCORN_SRC:?}"
+: "${POPCORN_TARGET:?}"
 # shellcheck source=common.sh
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 TARGET_TRIPLE="x86_64-unknown-elf"
-KERNEL_OUT="${KERNEL_OUT:-kernel}"
-ISO_OUT="${ISO_OUT:-popcorn.iso}"
+KERNEL_OUT="${KERNEL_OUT:-$POPCORN_TARGET/kernel}"
+ISO_OUT="${ISO_OUT:-$POPCORN_TARGET/popcorn.iso}"
+ISO_STAGING="${ISO_STAGING:-$POPCORN_TARGET/isodir}"
 QEMU_MEMORY="${QEMU_MEMORY:-256}"
 QEMU_CORES="${QEMU_CORES:-1}"
 
@@ -86,17 +88,17 @@ ensure_elf_toolchain() {
 
 compile_asm() {
   log INFO "Assembling $1"
-  nasm -f elf64 "$1" -o "$2" >>"$BUILD_LOG" 2>&1 || die "nasm failed for $1"
+  nasm -f elf64 "$POPCORN_SRC/$1" -o "$2" >>"$BUILD_LOG" 2>&1 || die "nasm failed for $1"
 }
 
 compile_c() {
   log INFO "Compiling $1"
   if [[ "${CC:-}" == "x86_64-elf-gcc" ]]; then
-    "$CC" -m64 -c "$1" -o "$2" -Wall -Wextra -ffreestanding -fno-stack-protector \
+    "$CC" -m64 -c "$POPCORN_SRC/$1" -o "$2" -Wall -Wextra -ffreestanding -fno-stack-protector \
       -mcmodel=large -mno-red-zone >>"$BUILD_LOG" 2>&1 || die "C compile failed for $1"
     return 0
   fi
-  "$CC" -target "$TARGET_TRIPLE" -m64 -c "$1" -o "$2" \
+  "$CC" -target "$TARGET_TRIPLE" -m64 -c "$POPCORN_SRC/$1" -o "$2" \
     -Wall -Wextra -ffreestanding -fno-stack-protector -mcmodel=large -mno-red-zone \
     >>"$BUILD_LOG" 2>&1 || die "C compile failed for $1"
 }
@@ -107,7 +109,7 @@ link_kernel() {
   "$LD" -m elf_x86_64 -T "$POPCORN_SRC/link.ld" -o "$KERNEL_OUT" "$@" >>"$BUILD_LOG" 2>&1 \
     || die "Link failed"
   [[ -f "$KERNEL_OUT" ]] || die "Kernel output missing: $KERNEL_OUT"
-  log SUCCESS "Kernel built: $POPCORN_SRC/$KERNEL_OUT"
+  log SUCCESS "Kernel built: $KERNEL_OUT"
 }
 
 build_kernel() {
@@ -158,7 +160,7 @@ build_kernel() {
 }
 
 create_legacy_iso() {
-  [[ -f "$KERNEL_OUT" ]] || die "Kernel not found ($KERNEL_OUT). Run: ./build/core.sh build"
+  [[ -f "$KERNEL_OUT" ]] || die "Kernel not found ($KERNEL_OUT). Run: ./scripts/core.sh build"
   local grub_mkrescue
   grub_mkrescue="$(find_grub_mkrescue || true)"
   if [[ -z "$grub_mkrescue" && "$HOST_OS" == "darwin" ]]; then
@@ -173,10 +175,10 @@ create_legacy_iso() {
   [[ -n "$grub_mkrescue" ]] || die "grub-mkrescue not found."
 
   log INFO "Creating legacy ISO via $grub_mkrescue"
-  rm -rf isodir
-  mkdir -p isodir/boot/grub
-  cp "$KERNEL_OUT" isodir/boot/kernel
-  cat > isodir/boot/grub/grub.cfg <<'EOF'
+  rm -rf "$ISO_STAGING"
+  mkdir -p "$ISO_STAGING/boot/grub"
+  cp "$KERNEL_OUT" "$ISO_STAGING/boot/kernel"
+  cat > "$ISO_STAGING/boot/grub/grub.cfg" <<'EOF'
 insmod all_video
 insmod efi_gop
 set gfxmode=1024x768x32
@@ -188,10 +190,10 @@ menuentry "Popcorn Kernel x64" {
     boot
 }
 EOF
-  "$grub_mkrescue" -o "$ISO_OUT" isodir >>"$BUILD_LOG" 2>&1 || die "ISO creation failed"
-  rm -rf isodir
+  "$grub_mkrescue" -o "$ISO_OUT" "$ISO_STAGING" >>"$BUILD_LOG" 2>&1 || die "ISO creation failed"
+  rm -rf "$ISO_STAGING"
   [[ -f "$ISO_OUT" ]] || die "ISO output missing: $ISO_OUT"
-  log SUCCESS "ISO created: $POPCORN_SRC/$ISO_OUT"
+  log SUCCESS "ISO created: $ISO_OUT"
 }
 
 run_legacy_qemu() {
@@ -210,14 +212,9 @@ show_logs() {
 }
 
 clean_build_artifacts() {
-  log INFO "Cleaning build artifacts..."
-  rm -rf "$OBJ_DIR" "$KERNEL_OUT" "$ISO_OUT" isodir isodir-uefi isodir-uefi-fat 2>/dev/null || true
-  rm -f "$POPCORN_SRC/BOOTX64.EFI" \
-    "$POPCORN_SRC/popcorn-uefi.img" \
-    "$POPCORN_SRC/popcorn-uefi.iso" \
-    "$POPCORN_SRC/efi_part.img" 2>/dev/null || true
-  rm -rf "$POPCORN_SRC/uefi_usb" 2>/dev/null || true
-  rm -f "$BUILD_LOG" 2>/dev/null || true
+  log INFO "Cleaning build artifacts under $POPCORN_TARGET ..."
+  rm -rf "$POPCORN_TARGET"
+  mkdir -p "$POPCORN_TARGET" "$OBJ_DIR" "$RUNTIME_DIR"
   : >"$BUILD_LOG" 2>/dev/null || true
   log SUCCESS "Clean complete"
 }

@@ -39,4 +39,3 @@ class LogBuffer:
         with self._lock:
             self._events = []
             self._next_idx = 0
-
