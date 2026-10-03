@@ -12,9 +12,7 @@
 extern char __kernel_start[];
 extern char __text_vend[];
 
-_Static_assert(
-    offsetof(TaskStruct, context) == 72,
-    "context_switch_to_task: update add rdi, N in context_switch.asm to match offsetof(TaskStruct, context)");
+_Static_assert(offsetof(TaskStruct, context) == 72, "TaskStruct.context offset");
 _Static_assert(offsetof(CPUContext, r15) == 0, "asm context_save: update offsets");
 _Static_assert(offsetof(CPUContext, rax) == 112, "asm context_save: update offsets");
 _Static_assert(offsetof(CPUContext, rip) == 120, "asm context_save: mov [r10+120]");
@@ -166,6 +164,32 @@ void scheduler_sleep_ms(uint32_t ms) {
     t->state = TASK_STATE_SLEEPING;
     t->wait_next = NULL;
     scheduler_schedule();
+}
+
+bool scheduler_park(TaskStruct* t, WaitQueue* wq) {
+    if (!t || !wq) {
+        return false;
+    }
+    ready_remove(t);
+    t->state = TASK_STATE_BLOCKED;
+    t->wait_next = wq->head;
+    wq->head = t;
+    return true;
+}
+
+bool scheduler_arm_sleep(TaskStruct* t, uint64_t sleep_until_tick) {
+    if (!t) {
+        return false;
+    }
+    ready_remove(t);
+    t->sleep_until_tick = sleep_until_tick;
+    t->state = TASK_STATE_SLEEPING;
+    t->wait_next = NULL;
+    return true;
+}
+
+void scheduler_service_sleepers(void) {
+    wake_expired_sleepers();
 }
 
 // External functions
@@ -496,13 +520,27 @@ void scheduler_schedule(void) {
         }
     }
 
-    // If no ready task, use idle task (or current task if it's the idle task)
+    /* If still unset (e.g. idle queue empty while NORMAL tasks exist), scan all queues. */
     if (!next_task) {
-        // If current task is idle or no other tasks, just return
-        if (scheduler.current_task && scheduler.current_task->pid == 0) {
-            return;
+        for (int priority = PRIORITY_REALTIME; priority >= PRIORITY_IDLE; priority--) {
+            TaskStruct* cand = scheduler.ready_queue[priority];
+            while (cand) {
+                if (cand->state == TASK_STATE_READY || cand->state == TASK_STATE_RUNNING) {
+                    if (cand != scheduler.current_task || scheduler.total_tasks <= 1) {
+                        next_task = cand;
+                        break;
+                    }
+                }
+                cand = cand->next;
+            }
+            if (next_task && next_task != scheduler.current_task) {
+                break;
+            }
         }
-        next_task = scheduler.current_task;  // Keep running current task
+    }
+
+    if (!next_task) {
+        next_task = scheduler.current_task;
     }
     
     // Fallback: if no current task, find the idle task
@@ -837,39 +875,18 @@ void task_switch(TaskStruct* from, TaskStruct* to) {
     __asm__ volatile("sti");
 }
 
-// Task exit
-void task_exit(void) {
-    TaskStruct* current = scheduler_get_current_task();
-    if (current) {
-        current->state = TASK_STATE_ZOMBIE;
-    }
-}
-
 // Idle task - runs when no other tasks are ready
 void idle_task(void) {
     idle_cpu_has_run = true;
     while (1) {
-        /* UEFI poll path: sti;hlt can hang on latent IRQ — pause and let timer_poll run. */
+        /* UEFI poll path: sti;hlt can hang on latent IRQ. Must timer_poll here or
+         * sleepers/wait-queue wakes never advance when only idle is runnable. */
         if (timer_is_poll_mode()) {
+            timer_poll();
             __asm__ volatile("pause");
         } else {
             __asm__ volatile("sti; hlt" ::: "memory");
         }
-    }
-}
-
-// Test task function to demonstrate context switching
-void test_task_function(void) {
-    static int counter = 0;
-
-    while (1) {
-        counter++;
-
-        if (counter % 10 == 0) {
-            scheduler_yield();
-        }
-
-        for (volatile int i = 0; i < 10; i++);
     }
 }
 

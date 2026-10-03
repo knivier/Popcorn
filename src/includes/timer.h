@@ -32,8 +32,6 @@ uint64_t timer_get_uptime_ms(void);
 void timer_set_tick_handler(void (*handler)(void));
 
 // Utility functions
-void timer_delay_ms(uint32_t ms);
-uint64_t timer_ticks_to_ms(uint64_t ticks);
 uint64_t timer_ms_to_ticks(uint64_t ms);
 
 #endif // TIMER_H

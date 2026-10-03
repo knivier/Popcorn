@@ -16,7 +16,7 @@
 #include "../includes/utils.h"
 #include "../includes/keyboard_queue.h"
 #include "../includes/irq.h"
-#include "../includes/device.h"
+#include "../includes/phase2_selftest.h"
 #include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -53,8 +53,6 @@ extern void exc_double_fault(void);
 extern void exc_general_protection(void);
 extern void exc_page_fault(void);
 void keyboard_handler_main(void);
-extern void exc_general_protection(void);
-extern void exc_page_fault(void);
 extern char read_port(unsigned short port);
 extern void write_port(unsigned short port, unsigned char data);
 
@@ -299,30 +297,11 @@ void kb_init(void)
     irq_enable(1);
 }
 
-/* Waiters blocked in sys_read on console; woken from IRQ1. */
-static WaitQueue g_console_read_wq;
-
-WaitQueue* console_read_waitqueue(void) {
-    return &g_console_read_wq;
-}
-
 void keyboard_poll_ps2(void) {
     unsigned char status = read_port(KEYBOARD_STATUS_PORT);
     if (status & 0x01) {
         key_queue_push(read_port(KEYBOARD_DATA_PORT));
     }
-}
-
-void kprint(const char *str) {
-    console_print(str);
-}
-
-void kprint_newline(void) {
-    console_newline();
-}
-
-void clear_screen(void) {
-    console_clear();
 }
 
 void printTerm(const char *str, unsigned char color) {
@@ -453,7 +432,6 @@ void keyboard_handler_main(void) {
     if (status & 0x01) {
         unsigned char keycode = read_port(KEYBOARD_DATA_PORT);
         key_queue_push(keycode);
-        scheduler_wake_all(&g_console_read_wq);
     }
     /* Master PIC: End of interrupt */
     write_port(0x20, 0x20);
@@ -1160,6 +1138,8 @@ void kmain(void) {
     }
     scheduler_end_bootstrap();
     boot_serial_putc('M');
+    /* Phase 2 exit criteria: ioctl→device + sleep/wait-queue wake (serial I/B/S/2). */
+    phase2_selftest();
 
 #ifdef POPCORN_TEST_PF
     /* CI: force a page fault after IDT is live; expect #PF dump on COM1/debugcon.

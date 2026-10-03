@@ -48,6 +48,5 @@ extern void console_set_cursor(unsigned int x, unsigned int y);
 extern void console_print_color(const char* str, unsigned char color);
 extern void console_println_color(const char* str, unsigned char color);
 extern void console_draw_separator(unsigned int y, unsigned char color);
-extern void timer_delay_ms(uint32_t ms);
 
 #endif // INIT_H

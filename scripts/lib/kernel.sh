@@ -184,6 +184,7 @@ build_kernel() {
   compile_c "core/exception.c" "$OBJ_DIR/exception.o"
   compile_c "core/irq.c" "$OBJ_DIR/irq.o"
   compile_c "core/device.c" "$OBJ_DIR/device.o"
+  compile_c "core/phase2_selftest.c" "$OBJ_DIR/phase2_selftest.o"
   compile_c "core/memory.c" "$OBJ_DIR/memory.o"
   compile_c "core/vmm.c" "$OBJ_DIR/vmm.o"
   compile_c "core/init.c" "$OBJ_DIR/init.o"
@@ -197,7 +198,7 @@ build_kernel() {
     "$OBJ_DIR/uefi_input.o" "$OBJ_DIR/sysinfo_pop.o" "$OBJ_DIR/memory_pop.o"
     "$OBJ_DIR/cpu_pop.o" "$OBJ_DIR/dolphin_pop.o" "$OBJ_DIR/timer.o"
     "$OBJ_DIR/scheduler.o" "$OBJ_DIR/exception.o" "$OBJ_DIR/irq.o" "$OBJ_DIR/device.o"
-    "$OBJ_DIR/memory.o" "$OBJ_DIR/vmm.o"
+    "$OBJ_DIR/phase2_selftest.o" "$OBJ_DIR/memory.o" "$OBJ_DIR/vmm.o"
     "$OBJ_DIR/init.o" "$OBJ_DIR/syscall.o"
   )
   for obj in "${objs[@]}"; do
@@ -285,7 +286,11 @@ qemu_legacy_smoke() {
     return 1
     ;;
   esac
-  echo "PASS: GRUB ISO reached kmain"
+  case "$body" in *I*) ;; *) echo "FAIL: GRUB missing Phase2 I (ioctl)"; return 1 ;; esac
+  case "$body" in *B*) ;; *) echo "FAIL: GRUB missing Phase2 B (wait-queue)"; return 1 ;; esac
+  case "$body" in *S*) ;; *) echo "FAIL: GRUB missing Phase2 S (sleep)"; return 1 ;; esac
+  case "$body" in *2*) ;; *) echo "FAIL: GRUB missing Phase2 2"; return 1 ;; esac
+  echo "PASS: GRUB ISO reached kmain (+ Phase2)"
 }
 
 show_logs() {

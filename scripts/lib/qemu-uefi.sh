@@ -287,6 +287,10 @@ qemu_uefi_test_debugcon() {
   case "$body" in *R*) ;; *) die "expected R (UEFI RAM / MBI parsed)" ;; esac
   case "$body" in *r*) ;; *) die "expected r (rust_init / Rust active)" ;; esac
   case "$body" in *M*) ;; *) die "expected M (kmain loop entered)" ;; esac
+  case "$body" in *I*) ;; *) die "expected I (Phase2 ioctl→device)" ;; esac
+  case "$body" in *B*) ;; *) die "expected B (Phase2 wait-queue wake)" ;; esac
+  case "$body" in *S*) ;; *) die "expected S (Phase2 sleep wake)" ;; esac
+  case "$body" in *2*) ;; *) die "expected 2 (Phase2 self-test passed)" ;; esac
   echo "PASS: debugcon boot trace"
 }
 

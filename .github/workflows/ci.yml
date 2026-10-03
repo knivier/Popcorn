@@ -24,8 +24,7 @@ jobs:
           source "$HOME/.cargo/env"
           rustup target add x86_64-unknown-none
 
-      - name: Build kernel + UEFI image
-        run: ./scripts/core.sh all
-
-      - name: UEFI + GRUB ISO QEMU smoke
+      # test-uefi rebuilds via build_all_uefi (kernel + EFI + img), then runs
+      # UEFI smoke, #PF dump, and GRUB ISO (+ Phase2 I/B/S/2 tags).
+      - name: Build + UEFI/GRUB/#PF QEMU smoke
         run: ./scripts/core.sh test-uefi

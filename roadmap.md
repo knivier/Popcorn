@@ -8,9 +8,9 @@ Popcorn is a modular x86-64 kernel framework for learning operating system devel
 
 **Current target:** v0.7 — Rust driver network, screen output as drivers, first Rust pops.
 
-**Verified:** 23 Sep 2026 against `src/` (no `src/drivers/`, no `.rs` / `Cargo.toml`, no `.github/` CI). Last kernel commit at verification: `daf7f32`.
+**Verified:** 3 Oct 2026 — Phase 1 coding gates + Phase 2 must-haves green in QEMU (`test-uefi`: `#PF` dump, GRUB+UEFI smoke, debugcon `I/B/S/2`). Process leftovers: pre-release marking, real-hardware boot.
 
-**Roadmap scope:** Finish the v0.5 leftovers that block drivers, stand up a Rust crate that links into the existing kernel, move screen writing and pops onto that crate, then land first-class char/fb/block drivers. VFS, userspace, and a real NIC stack stay in Phase 5.
+**Roadmap scope:** Phase 1–2 coding gates done. Next is Phase 3: stand up the Rust driver network, move screen writing and pops onto that crate, then land first-class char/fb/block drivers. VFS, userspace, and a real NIC stack stay in Phase 5.
 
 ---
 
@@ -22,14 +22,15 @@ Popcorn is a modular x86-64 kernel framework for learning operating system devel
 | Console / shell UX | Done (C, not a driver) | `src/core/console.c`, `src/core/kernel.c` |
 | PMM + kmalloc | Done (prototype) | `src/core/memory.c` |
 | VMM (4-level paging) | Partial | `src/core/vmm.c` — no 2 MiB PDE split |
-| Scheduler + context switch | Partial | `src/core/scheduler.c` — static pools, bootstrap guard |
-| Syscalls (21 registered) | Partial (teaching stubs) | `src/core/syscall.c` — `open` returns fd 3, `sleep` prints |
+| Scheduler + context switch | Partial | `src/core/scheduler.c` — wait queues, sleep, bootstrap guard |
+| Syscalls (21 registered) | Partial | `src/core/syscall.c` — fd/`dev_*` for open/read/write/ioctl; sleep/yield real |
 | In-memory filesystem (pop) | Done (not kernel VFS) | `src/pops/filesystem_pop.c` |
 | Pop modules | Done in C (9 registered) | `src/core/pop_module.c`, `src/core/init.c` |
-| Driver framework | Not started | no `src/drivers/`, no `driver_register` |
-| Rust crate | Not started | no `.rs` files |
+| Device table (pre-drivers) | Done (C) | `src/core/device.c` — console/null; Phase 3 moves to Rust |
+| IRQ table | Done (C) | `src/core/irq.c` — `irq_register` / enable / disable |
+| Rust crate | Probe only | `src/rust/popcorn_kernel` — `rust_init` prints `Rust active` |
 | Block / PCI / storage | Not started | — |
-| CI | Not started | no `.github/workflows` |
+| CI | Done | `.github/workflows/ci.yml` — build + `test-uefi` |
 
 ---
 
@@ -93,18 +94,18 @@ These work as direct port I/O or firmware calls. v0.7 moves them into the Rust d
 
 ---
 
-## Phase 1 — v0.5 leftovers (still open)
+## Phase 1 — v0.5 leftovers
 
-Verified **not** done. These are the gate into v0.7, not a separate multi-month freeze. Land them in C (or the first Rust crate) **before** binding real devices.
+Coding gate items are done (QEMU + CI). Remaining are release/process and hardware soak.
 
 - [ ] Mark releases pre-release until v0.7 exit criteria
 - [x] Keep `test-uefi` green on GRUB ISO and UEFI img
 - [ ] Boot on real hardware (T440p / Ventoy USB, Secure Boot off)
-- [x] Diagnosable CPU exceptions — `#PF`, `#GP`, `#DF` dump CR2 / error / RIP on COM1, then halt. Today `default_cpu_exception` in `src/core/kernel.asm` is `cli; hlt` with IST already wired for `#PF`/`#DF` but no dump
-- [x] Stop forcing poll-only time in `kmain`: `init.c` enables IRQ PIT on the GRUB path, then `kernel.c` always calls `timer_enable_poll()`
-- [x] One task/stack allocator — `scheduler_create_task` and `scheduler_create_task_with_pid` each have a **separate** `static TaskStruct task_pool[32]`
-- [x] Scheduler bootstrap: `bootstrap_on_kmain_stack` still skips ticks until idle has run
-- [x] CI: GitHub Actions running `./scripts/core.sh build` + `test-uefi`
+- [x] Diagnosable CPU exceptions — `#PF`, `#GP`, `#DF` dump CR2 / error / RIP on COM1, then halt
+- [x] Stop forcing poll-only time in `kmain` (UEFI poll; GRUB IRQ PIT)
+- [x] One task/stack allocator — shared `g_task_pool[32]`
+- [x] Scheduler bootstrap: `scheduler_end_bootstrap()` clears tick skip
+- [x] CI: GitHub Actions running `./scripts/core.sh test-uefi` (builds + UEFI/GRUB/#PF smoke)
 
 **Exit criteria:** `#PF` prints a useful serial dump in QEMU; GRUB path can use IRQ time; CI green.
 
@@ -134,11 +135,13 @@ Do **not** build the driver network until this subset is in place. Finish below;
 
 **Exit criteria for the v0.7 subset:** a kernel thread can block on an IRQ wake; `ioctl` reaches a registered device.
 
+**Verified in QEMU:** boot `phase2_selftest()` emits debugcon `I` (`SYS_IOCTL`/`OPEN`/`WRITE` → fd → console/null), `B` (wait-queue park/`wake_all`), `S` (sleep-deadline via `wake_expired_sleepers`), `2` (all passed). UEFI + GRUB smoke assert these tags.
+
 ---
 
 ## Phase 3 — v0.7: Rust crate, driver network, screen, pops
 
-**This is the current focus.** Goal: new hardware and new pops are Rust files that register themselves. No new raw port I/O in `src/core/`. Screen cells go through drivers.
+**Current focus (Phase 1–2 coding gates cleared).** Goal: new hardware and new pops are Rust files that register themselves. No new raw port I/O in `src/core/`. Screen cells go through drivers.
 
 ### 3.1 Rust build (do first)
 

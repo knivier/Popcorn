@@ -1,6 +1,5 @@
 #include "../includes/device.h"
 #include "../includes/console.h"
-#include "../includes/utils.h"
 #include <stddef.h>
 
 static Device g_devices[MAX_DEVICES];
@@ -45,7 +44,7 @@ static int64_t console_read(Device* dev, void* buf, size_t count) {
     (void)dev;
     (void)buf;
     (void)count;
-    /* Non-blocking empty for now; blocking reads use wait queues in syscall. */
+    /* Non-blocking empty; blocking reads not wired yet. */
     return 0;
 }
 
