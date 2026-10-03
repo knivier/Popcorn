@@ -194,29 +194,15 @@ void scheduler_service_sleepers(void) {
 
 // External functions
 extern uint64_t timer_get_ticks(void);
-extern unsigned char read_port(unsigned short port);
-extern void write_port(unsigned short port, unsigned char data);
+extern void boot_serial_putc(char c);
 
 // Stack management constants
 #define TASK_STACK_SIZE (16 * 1024)  // 16KB per task stack
 #define STACK_ALIGNMENT 16           // 16-byte alignment for x86-64
 
-// Serial port for debugging (COM1)
-#define SERIAL_PORT 0x3F8
-
-static void serial_putc(char c) {
-    /* Bound wait — bare COM1 with no backend must not wedge boot. */
-    for (int i = 0; i < 100000; i++) {
-        if (read_port(SERIAL_PORT + 5) & 0x20) {
-            break;
-        }
-    }
-    write_port(SERIAL_PORT, c);
-}
-
 static void serial_print(const char* str) {
-    while (*str) {
-        serial_putc(*str++);
+    while (str && *str) {
+        boot_serial_putc(*str++);
     }
 }
 

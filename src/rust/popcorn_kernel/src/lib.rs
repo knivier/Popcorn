@@ -232,3 +232,34 @@ pub extern "C" fn rust_screen_fill_panel() {
 pub extern "C" fn rust_screen_invalidate() {
     drivers::screen_invalidate();
 }
+
+#[no_mangle]
+pub extern "C" fn rust_kbd_poll() {
+    drivers::kbd::poll();
+}
+
+#[no_mangle]
+pub extern "C" fn rust_kbd_irq() {
+    drivers::kbd::irq();
+}
+
+#[no_mangle]
+pub extern "C" fn rust_kbd_pop(out: *mut u8) -> i32 {
+    if out.is_null() {
+        return 0;
+    }
+    match drivers::kbd::pop() {
+        Some(b) => {
+            unsafe {
+                *out = b;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_serial_putc(c: u8) {
+    drivers::backends::serial::putc(c);
+}

@@ -261,7 +261,7 @@ void execute_command(const char *command) {
         console_print_color("  drive list", CONSOLE_PROMPT_COLOR);
         console_println(" - List drives (ready/idle)");
         console_print_color("  init_drive <name>", CONSOLE_PROMPT_COLOR);
-        console_println(" - Start a drive (null, zero, ttyS0, tty0, fb0, mem, cpu, clock)");
+        console_println(" - Start a drive (null, zero, ttyS0, kbd, tty0, fb0, mem, cpu, clock)");
         console_print_color("  drive info <name>", CONSOLE_PROMPT_COLOR);
         console_println(" - Drive status");
         console_print_color("  drive cmd <name> <cmd>", CONSOLE_PROMPT_COLOR);

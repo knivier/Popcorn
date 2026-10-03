@@ -112,18 +112,15 @@ void kmain(void) {
             }
         }
 
-        if (!from_queue && !key_queue_pop(&keycode)) {
-            /* Always poll PS/2 after ExitBootServices; firmware ConIn is dead then. */
-            keyboard_poll_ps2();
-            if (!key_queue_pop(&keycode)) {
-                /* UEFI/QEMU: sti+hlt hangs on latent IRQ; polled PIT keeps time alive. */
-                if (timer_is_poll_mode()) {
-                    __asm__ volatile("pause");
-                } else {
-                    __asm__ volatile("sti; hlt" ::: "memory");
-                }
-                continue;
+        /* Scancodes via /dev/kbd device ops (Rust drive). */
+        if (!from_queue && !kbd_read_scancode(&keycode)) {
+            /* UEFI/QEMU: sti+hlt hangs on latent IRQ; polled PIT keeps time alive. */
+            if (timer_is_poll_mode()) {
+                __asm__ volatile("pause");
+            } else {
+                __asm__ volatile("sti; hlt" ::: "memory");
             }
+            continue;
         }
 
         if (kbd_expect_e0) {

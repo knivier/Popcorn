@@ -6,8 +6,13 @@
 
 /* Hardware drives (Rust): start them, talk to them, list /dev nodes. */
 
-/* Boot: start builtins (null, zero, serial, screen, mem, cpu, clock). */
+/* Boot: start builtins (null, zero, serial, kbd, screen, mem, cpu, clock). */
 void init_drives(void);
+
+/* Keyboard trampoline targets (implemented in Rust kbd drive). */
+void rust_kbd_poll(void);
+void rust_kbd_irq(void);
+int rust_kbd_pop(uint8_t* out);
 
 /* Start one drive by name (e.g. "null", "ttyS0", "tty0"). Returns 0 on success. */
 int init_drive(const char* name);

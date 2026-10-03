@@ -4,7 +4,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use super::backends::{clock, cpuinfo, fb, meminfo, null, serial, vga, zero};
+use super::backends::{clock, cpuinfo, fb, kbd, meminfo, null, serial, vga, zero};
+use super::bus::pci;
 
 extern "C" {
     fn device_register_rust(name: *const u8);
@@ -52,6 +53,13 @@ fn catalog() -> Vec<DriveEntry> {
             kind: DriveKind::Char,
             ready: false,
             dev_name: "ttyS0",
+        },
+        DriveEntry {
+            name: "kbd",
+            title: "keyboard",
+            kind: DriveKind::Char,
+            ready: false,
+            dev_name: "kbd",
         },
         DriveEntry {
             name: "tty0",
@@ -116,6 +124,7 @@ fn probe(name: &str) -> Result<(), &'static str> {
         "null" => null::probe(),
         "zero" => zero::probe(),
         "ttyS0" => serial::probe(),
+        "kbd" => kbd::probe(),
         "tty0" => vga::probe(),
         "fb0" => fb::probe(),
         "mem" => meminfo::probe(),
@@ -135,6 +144,7 @@ pub fn init_drives() {
     let _ = init_drive("null");
     let _ = init_drive("zero");
     let _ = init_drive("ttyS0");
+    let _ = init_drive("kbd");
     let _ = init_drive("mem");
     let _ = init_drive("cpu");
     let _ = init_drive("clock");
@@ -146,6 +156,8 @@ pub fn init_drives() {
     } else {
         let _ = init_drive("tty0");
     }
+
+    pci::scan_bus0_print();
 }
 
 /// Start one drive by name and publish its /dev node.
@@ -222,10 +234,11 @@ pub fn drive_cmd(target: &str, cmd: &str, buf: &mut [u8]) -> usize {
         if !ready {
             let _ = init_drive(name);
         }
-        match name {
+            match name {
             "mem" => meminfo::cmd(cmd),
             "cpu" => cpuinfo::cmd(cmd),
             "clock" => clock::cmd(cmd),
+            "kbd" => kbd::cmd(cmd),
             _ if cmd == "status" || cmd == "info" => {
                 let mut s = String::from(name);
                 s.push(' ');
@@ -251,6 +264,7 @@ pub fn device_read(name: &str, buf: &mut [u8]) -> i64 {
         "null" => null::read(buf),
         "zero" => zero::read(buf),
         "ttyS0" => serial::read(buf),
+        "kbd" => kbd::read(buf),
         "tty0" => vga::read(buf),
         "fb0" => fb::read(buf),
         "meminfo" => meminfo::read(buf),
@@ -265,6 +279,7 @@ pub fn device_write(name: &str, buf: &[u8]) -> i64 {
         "null" => null::write(buf),
         "zero" => zero::write(buf),
         "ttyS0" => serial::write(buf),
+        "kbd" => kbd::write(buf),
         "tty0" => vga::write(buf),
         "fb0" => fb::write(buf),
         "meminfo" => meminfo::write(buf),
@@ -279,6 +294,7 @@ pub fn device_ioctl(name: &str, request: u64, argp: *mut u8) -> i64 {
         "null" => null::ioctl(request, argp),
         "zero" => zero::ioctl(request, argp),
         "ttyS0" => serial::ioctl(request, argp),
+        "kbd" => kbd::ioctl(request, argp),
         "tty0" => vga::ioctl(request, argp),
         "fb0" => fb::ioctl(request, argp),
         "meminfo" => meminfo::ioctl(request, argp),

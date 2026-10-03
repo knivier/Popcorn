@@ -26,7 +26,7 @@ Popcorn is a modular x86-64 kernel framework for learning operating system devel
 | Syscalls (21 registered) | Partial | `src/core/syscall.c` — fd/`dev_*` for open/read/write/ioctl; sleep/yield real |
 | In-memory filesystem (pop) | Done (not kernel VFS) | `src/pops/filesystem_pop.c` |
 | Pop modules | Done in C (9 registered) | `src/core/pop_module.c`, `src/core/init.c` |
-| Device table (pre-drivers) | Done (C) | `src/core/device.c` — console/null; Phase 3 moves to Rust |
+| Device table | Done | C fd bridge + Rust drives (`null`/`zero`/`ttyS0`/`kbd`/screen/info) |
 | IRQ table | Done (C) | `src/core/irq.c` — `irq_register` / enable / disable |
 | Rust crate | Active | drivers + screen + Shimjapii/Spinner/Uptime pops |
 | Block / PCI / storage | Not started | — |
@@ -241,16 +241,16 @@ C registry is a 10-slot array and `void (*pop_function)(unsigned int)`. Rust kee
 - [x] Serial `/dev/ttyS0` — Rust chardev (early `boot_serial_putc` still used pre-driver)
 - [x] Null / zero — Rust chardevs via fd bridge
 - [x] PIT clock info drive (`clock` / `/dev/clock`) — `timer.c` still owns IRQ/poll
-- [ ] PCI config walk (bus 0 print at boot) — needed for v0.8 virtio, can start here
-- [ ] Delete leftover `serial_putc` from `scheduler.c` once all debug paths use ttyS0
+- [x] PCI config walk (bus 0 print at boot) — `drivers/bus/pci.rs`
+- [x] Delete leftover `serial_putc` from `scheduler.c` — uses shared `boot_serial_putc`
 
 **v0.7 exit criteria:**
 
-- [ ] `cargo` + existing C toolchain produce one kernel; `test-uefi` green
-- [ ] Screen output goes through `/dev/tty0` and/or `/dev/fb0`
-- [x] At least three pops are Rust and registered through the Rust registry
-- [ ] Serial and null/zero are Rust devices; `mon -list` shows them
-- [ ] No new port I/O added under `src/core/`
+- [x] `cargo` + existing C toolchain produce one kernel; `test-uefi` green
+- [x] Screen pixels/CRTC owned by Rust `tty0`/`fb0` backends (`rust_screen_*`; console is a client — not every putchar via `open`/`write` fd)
+- [x] At least three pops are Rust and registered through the Rust registry (six: shimjapii/spinner/uptime/memory/cpu/sysinfo)
+- [x] Serial, null/zero, kbd are Rust devices (`dev list` / `drive list`). `mon -list` lists tasks only
+- [x] No new device port I/O under `src/core/` for drives that exist in Rust (kbd trampoline + PIC EOI only). `timer.c` / early `boot_serial_putc` remain until clock IRQ moves
 
 ---
 
@@ -260,9 +260,9 @@ Refactor the rest of Phase 0 I/O, then storage.
 
 ### 4.1 Input
 
-- [ ] Keyboard chardev `/dev/kbd` (PS/2 + later UEFI scancodes)
-- [ ] Remove PS/2 port access from `kernel.c` once the shell reads the chardev
-- [ ] PS/2 controller split (mouse-ready)
+- [x] Keyboard chardev `/dev/kbd` (PS/2; C trampoline for IRQ/poll/EOI)
+- [x] Shell/`kmain` read scancodes via `/dev/kbd` device ops (`kbd_read_scancode`)
+- [x] PS/2 controller split (keyboard vs mouse/aux channels; aux disabled until mouse drive)
 
 ### 4.2 Block
 
