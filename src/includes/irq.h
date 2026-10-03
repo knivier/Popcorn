@@ -20,7 +20,7 @@ void irq_disable(uint8_t irq);
 /* Asm IRQ stubs call this with the ISA IRQ number. */
 void irq_dispatch(uint8_t irq);
 
-/* Used by irq_register to install gates (implemented in kernel.c). */
+/* Used by irq_register to install gates (implemented in idt.c). */
 void idt_set_gate(uint8_t vector, uint64_t handler, uint8_t type_attr, uint8_t ist);
 
 #endif /* IRQ_H */

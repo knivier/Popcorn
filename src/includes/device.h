@@ -32,6 +32,7 @@ typedef struct FileDesc {
 
 void device_init(void);
 Device* device_register(const char* name, const DeviceOps* ops, void* priv);
+void device_register_rust(const char* name);
 Device* device_find(const char* name);
 
 /* Per-task fd helpers (table lives on TaskStruct). */

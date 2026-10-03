@@ -286,6 +286,7 @@ qemu_uefi_test_debugcon() {
   case "$body" in *icd*KL*) ;; *) die "expected boot trace icd..KL" ;; esac
   case "$body" in *R*) ;; *) die "expected R (UEFI RAM / MBI parsed)" ;; esac
   case "$body" in *r*) ;; *) die "expected r (rust_init / Rust active)" ;; esac
+  case "$body" in *a*) ;; *) die "expected a (Rust GlobalAlloc / kmalloc)" ;; esac
   case "$body" in *M*) ;; *) die "expected M (kmain loop entered)" ;; esac
   case "$body" in *I*) ;; *) die "expected I (Phase2 ioctl→device)" ;; esac
   case "$body" in *B*) ;; *) die "expected B (Phase2 wait-queue wake)" ;; esac
@@ -321,8 +322,9 @@ qemu_uefi_test_pf() {
     -daemonize
 
   local waited=0
+  # Wait for the full dump — '#PF' alone races the kill before CR2= is written.
   while [[ $waited -lt 45 ]]; do
-    if grep -q '#PF' "$dbg" 2>/dev/null || grep -q '#PF' "$serial" 2>/dev/null; then
+    if grep -q 'CR2=' "$dbg" 2>/dev/null || grep -q 'CR2=' "$serial" 2>/dev/null; then
       break
     fi
     if ! pgrep -f qemu-system-x86_64 >/dev/null; then

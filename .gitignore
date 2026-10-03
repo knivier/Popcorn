@@ -39,3 +39,5 @@ VSWorkspaceState.json
 
 # Debug scratch
 src/dbg/
+scripts/gen_kernel_map.py
+docs/kernel-map.png

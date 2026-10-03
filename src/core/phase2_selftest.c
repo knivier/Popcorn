@@ -95,4 +95,7 @@ void phase2_selftest(void) {
     }
     boot_serial_putc('S');
     boot_serial_putc('2');
+
+    /* Leave blocked — never schedule this stub (full switch still fragile). */
+    (void)scheduler_park(parked, &wq);
 }

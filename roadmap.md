@@ -141,7 +141,7 @@ Do **not** build the driver network until this subset is in place. Finish below;
 
 ## Phase 3 — v0.7: Rust crate, driver network, screen, pops
 
-**Current focus (Phase 1–2 coding gates cleared).** Goal: new hardware and new pops are Rust files that register themselves. No new raw port I/O in `src/core/`. Screen cells go through drivers.
+**Current focus.** `kernel.c` is thin (`kmain`); IDT/kbd/shell live in their own C files. Rust drive network starts `null`/`zero`/`ttyS0`/`tty0`/`fb0` at boot (`init_drive`); shell `drive`/`init_drive`/`dev` commands. Display (VGA CRTC + GOP font blit) is the Rust screen drive — `console.c` only calls `rust_screen_*`.
 
 ### 3.1 Rust build (do first)
 
@@ -175,24 +175,22 @@ src/rust/
 
 - [x] `#![no_std]`, `x86_64-unknown-none` (or custom), `panic=abort` (halt loop for now; COM1 dump later)
 - [x] `cargo build` produces a staticlib; `ld` pulls it with existing `link.ld`
-- [ ] No alloc until a `kmalloc`/`kfree` allocator shim exists (`GlobalAlloc`)
+- [x] `GlobalAlloc` shim → C `kmalloc`/`kfree` (`alloc_shim.rs`); `Box` probe emits debugcon `a`
+- [x] Link fix: nightly `build-std` (`core`/`alloc`/`compiler_builtins`) with `-C code-model=large`; link full `libpopcorn_kernel.a` (prebuilt sysroot uses `R_X86_64_32`, unusable in high-half)
 - [x] `rust_init()` called from `init.c` after IDT/PIC, before C pop registration — prints `Rust active`
 - [x] rustc added to `core.sh` dependency check (and documented for Fedora / macOS / Debian)
-
 
 ### 3.2 Driver network (Rust)
 
 A small, explicit device model — not a Linux clone. “Driver network” here means the registry + class graph + IRQ routing, **not** an Ethernet stack (that is Phase 5).
 
-- [ ] `Device` — name, bus, class, bound driver, `priv`
-- [ ] `Driver` — name, `probe` / `remove`, match table
-- [ ] `device_register` / `device_unregister` / `driver_register`
-- [ ] Classes: **char** (byte stream), **block** (sectors), **fb** (mode info + blit / cell write)
-- [ ] Kernel API: `dev_open` / `dev_close` / `dev_read` / `dev_write` / `dev_ioctl`
-- [ ] `/dev/...` nodes opened by `SYS_OPEN`
-- [ ] `ioctl` namespaces in `src/includes/ioctl.h` (C header, used from Rust via `abi`)
+- [x] Drive catalog + `init_drive` / probe (`drivers/registry.rs`); boot starts builtins from `rust_init` / `init_drives`
+- [x] `/dev` nodes via `device_register_rust` → C fd/`SYS_*` bridge
+- [x] Char backends: `null`, `zero`, `ttyS0`; screen: `tty0` (VGA), `fb0` (GOP present ioctl)
+- [x] Shell: `drv list|load|info|cmd`, `dev list`
+- [ ] Classes formalized: **block** + richer fb blit still open
+- [ ] `ioctl` namespaces in `src/includes/ioctl.h`
 - [ ] IRQ: `irq_register(irq, handler, dev_id)` — PIC backend first; IOAPIC later
-- [ ] `mon -list` / `dev -list` prints the Rust device list
 
 **Exit criteria:** adding a device is a Rust `Driver` + `probe` — no edits to the `kernel.c` shell loop.
 
@@ -206,11 +204,11 @@ Today every `console_putchar` eventually writes either VGA memory at `0xB8000` (
 | `console_fb_init` / `console_fb_sync_cell` | `/dev/fb0` GOP handoff | mode info, blit, present |
 | `console_putchar` / `console_print*` | console core (C or thin Rust) | talks to tty0 **or** fb0, never ports |
 
-- [ ] VGA text driver (`src/rust/.../backends/vga.rs`) — CRTC + `0xB8000`
-- [ ] Framebuffer driver (`backends/fb.rs`) — GOP tag from `boot_fb.h` / Multiboot2
-- [ ] `console_init` opens the active backend; `console_present` is `dev_ioctl(FB_PRESENT)` or a tty flush
-- [ ] Halt pop and any `console_get_buffer()` poke go through the same device (no raw `vidptr` after migration)
-- [ ] Shell, status bar, scrollback keep working on both GRUB (VGA) and UEFI (fb)
+- [x] VGA text driver (`backends/vga.rs`) — CRTC cursor + cell write; console uses `rust_screen_set_cursor`
+- [x] Framebuffer driver (`backends/fb.rs`) — GOP font blit + dirty present owned in Rust
+- [x] Full cell blit path owned by display drive (`screen.rs` / `fb.rs`); console UX calls `rust_screen_*`
+- [ ] Halt pop / `console_get_buffer()` fully via device (no raw `vidptr`) — buffer is Rust cells for now
+- [x] Shell, status bar, scrollback still work on GRUB (VGA) and UEFI (fb) — smoke green
 
 **Exit criteria:** `console.c` contains no `write_port(0x3D4/0x3D5)` and no GOP pixel loops; those live in Rust drivers.
 
@@ -236,10 +234,11 @@ Convert **small, console-only** pops first. They already save/restore `console_s
 
 ### 3.5 First char / clock drivers (same crate)
 
-- [ ] Serial `/dev/ttyS0` — delete `serial_putc` from `scheduler.c`
-- [ ] Null / zero — exercise `dev_read` / `dev_write`
+- [x] Serial `/dev/ttyS0` — Rust chardev (early `boot_serial_putc` still used pre-driver)
+- [x] Null / zero — Rust chardevs via fd bridge
 - [ ] PIT clock provider — `timer.c` becomes a thin C trampoline or goes away
 - [ ] PCI config walk (bus 0 print at boot) — needed for v0.8 virtio, can start here
+- [ ] Delete leftover `serial_putc` from `scheduler.c` once all debug paths use ttyS0
 
 **v0.7 exit criteria:**
 
