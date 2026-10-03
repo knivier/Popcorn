@@ -6,11 +6,7 @@
 #include "../includes/pop_module.h"
 #include "../includes/multiboot2.h"
 #include "../includes/uefi_input.h"
-#include "../includes/sysinfo_pop.h"
-#include "../includes/memory_pop.h"
-#include "../includes/cpu_pop.h"
 #include "../includes/dolphin_pop.h"
-#include "../includes/spinner_pop.h"
 #include "../includes/syscall.h"
 #include "../includes/device.h"
 #include "../includes/rust_abi.h"
@@ -284,25 +280,14 @@ void init_show_syscall_info(void) {
 void init_show_modules(void) {
     init_draw_progress_bar(5, total_init_steps, "Loading Kernel Modules");
 
-    extern const PopModule spinner_module;
-    extern const PopModule uptime_module;
-    extern const PopModule halt_module;
+    extern void rust_pops_register(void);
     extern const PopModule filesystem_module;
-    extern const PopModule sysinfo_module;
-    extern const PopModule memory_module;
-    extern const PopModule cpu_module;
     extern const PopModule dolphin_module;
-    extern const PopModule shimjapii_module;
 
-    register_pop_module(&spinner_module);
-    register_pop_module(&uptime_module);
+    /* Rust: shimjapii/spinner/uptime/memory/cpu/sysinfo. FS stays in-memory C. */
+    rust_pops_register();
     register_pop_module(&filesystem_module);
-    register_pop_module(&sysinfo_module);
-    register_pop_module(&memory_module);
-    register_pop_module(&cpu_module);
     register_pop_module(&dolphin_module);
-    register_pop_module(&halt_module);
-    register_pop_module(&shimjapii_module);
 
     console_set_cursor(0, 18);
     console_print_color("  ✓ Kernel Modules Loaded", BOOT_SUCCESS_COLOR);
@@ -310,7 +295,7 @@ void init_show_modules(void) {
 
     console_set_cursor(0, 19);
     console_print_color("    Modules: ", BOOT_INFO_COLOR);
-    console_println_color("9 Pop Modules Registered", BOOT_SUCCESS_COLOR);
+    console_println_color("8 Pop Modules Registered", BOOT_SUCCESS_COLOR);
 
     console_set_cursor(0, 20);
     console_print_color("    Features: ", BOOT_INFO_COLOR);

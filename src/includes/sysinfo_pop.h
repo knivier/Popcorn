@@ -1,4 +1,4 @@
-// src/includes/sysinfo_pop.h
+// src/includes/sysinfo_pop.h — Rust pop aggregating mem/cpu/clock drives
 #ifndef SYSINFO_POP_H
 #define SYSINFO_POP_H
 

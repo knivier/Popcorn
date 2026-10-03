@@ -1,7 +1,6 @@
 #include "../includes/shell.h"
 #include "../includes/console.h"
 #include "../includes/pop_module.h"
-#include "../includes/spinner_pop.h"
 #include "../includes/sysinfo_pop.h"
 #include "../includes/memory_pop.h"
 #include "../includes/cpu_pop.h"
@@ -27,13 +26,7 @@ extern ConsoleState console_state;
 extern unsigned int current_loc;
 extern void write_port(unsigned short port, unsigned char data);
 
-extern const PopModule spinner_module;
-extern const PopModule uptime_module;
-extern const PopModule halt_module;
 extern const PopModule filesystem_module;
-extern const PopModule sysinfo_module;
-extern const PopModule memory_module;
-extern const PopModule cpu_module;
 extern const PopModule dolphin_module;
 
 bool write_file(const char* name, const char* content);
@@ -102,7 +95,7 @@ const char* get_history_command(int offset) {
 
 /* List of all commands for autocomplete */
 static const char* available_commands[] = {
-    "help", "halp", "hang", "clear", "uptime", "halt", "stop", "fault",
+    "help", "halp", "clear", "uptime", "stop",
     "write", "read", "delete", "rm", "mkdir", "go", "back",
     "ls", "search", "cp", "listsys", "sysinfo",
     "mem", "mem -map", "mem -use", "mem -stats", "mem -info", "mem -debug",
@@ -190,17 +183,11 @@ void execute_command(const char *command) {
         console_println_color("Available Commands:", CONSOLE_HEADER_COLOR);
         console_draw_separator(console_state.cursor_y, CONSOLE_FG_COLOR);
         
-        console_print_color("  hang", CONSOLE_PROMPT_COLOR);
-        console_println(" - Hangs the system in a loop");
-        
         console_print_color("  clear", CONSOLE_PROMPT_COLOR);
         console_println(" - Clears the screen");
         
         console_print_color("  uptime", CONSOLE_PROMPT_COLOR);
         console_println(" - Prints the system uptime");
-        
-        console_print_color("  halt", CONSOLE_PROMPT_COLOR);
-        console_println(" - Halts the system");
         
         console_print_color("  write <filename> <content>", CONSOLE_PROMPT_COLOR);
         console_println(" - Writes content to a file");
@@ -270,18 +257,15 @@ void execute_command(const char *command) {
         console_print_color("  stop", CONSOLE_PROMPT_COLOR);
         console_println(" - Shuts down the system");
 
-        console_print_color("  fault", CONSOLE_PROMPT_COLOR);
-        console_println(" - Trigger #PF (serial dump + halt)");
-
         console_println_color("Drive Commands:", CONSOLE_INFO_COLOR);
         console_print_color("  drive list", CONSOLE_PROMPT_COLOR);
         console_println(" - List drives (ready/idle)");
         console_print_color("  init_drive <name>", CONSOLE_PROMPT_COLOR);
-        console_println(" - Start a drive (null/trash, zero/zeros, ttyS0/serial, tty0/text, fb0/picture)");
+        console_println(" - Start a drive (null, zero, ttyS0, tty0, fb0, mem, cpu, clock)");
         console_print_color("  drive info <name>", CONSOLE_PROMPT_COLOR);
         console_println(" - Drive status");
         console_print_color("  drive cmd <name> <cmd>", CONSOLE_PROMPT_COLOR);
-        console_println(" - Run a drive command (status|info|init)");
+        console_println(" - Drive cmd: status|info|init; mem:stats|usage; cpu:info|hz; clock:ticks|uptime");
         console_print_color("  dev list", CONSOLE_PROMPT_COLOR);
         console_println(" - List /dev nodes from ready drives");
 
@@ -298,17 +282,6 @@ void execute_command(const char *command) {
     } else if (strcmp(command, "wrap off") == 0) {
         console_set_wrap(false);
         console_print_success("wrap off");
-    } else if (strcmp(command, "fault") == 0) {
-        console_println_color("Triggering page fault...", CONSOLE_WARNING_COLOR);
-        /* Unmapped canonical VA (PML4[1]); dumps #PF + CR2 on COM1 then halts. */
-        *(volatile uint32_t*)(uintptr_t)(1ULL << 39) = 0x41414141u;
-    } else if (strcmp(command, "hang") == 0) {
-        console_print_warning("System hanging...");
-        spinner_pop_func(current_loc);
-        uptime_module.pop_function(current_loc + 16);
-        while (1) {
-            console_print_color("Hanging...", CONSOLE_ERROR_COLOR);
-        }
     } else if (strcmp(command, "clear") == 0) {
         console_clear();
         console_draw_header("Popcorn Kernel v0.5");
@@ -326,21 +299,6 @@ void execute_command(const char *command) {
         int_to_str(ticks_per_second, buffer);
         console_print_color("Estimated seconds: ", CONSOLE_INFO_COLOR);
         console_println_color(buffer, CONSOLE_FG_COLOR);
-    } else if (strcmp(command, "halt") == 0) {
-        console_print_warning("System halted. Press Enter to continue...");
-        while (1) {
-            unsigned char keycode;
-            if (key_queue_pop(&keycode)) {
-                if (keycode == ENTER_KEY_CODE) {
-                    console_clear();
-                    console_draw_header("Popcorn Kernel v0.5");
-                    console_print_success("System resumed!");
-                    break;
-                }
-            }
-            halt_module.pop_function(current_loc);
-            scheduler_yield();
-        }
     } else if (strcmp(command, "stop") == 0) {
         console_print_warning("Shutting down...");
         write_port(0x64, 0xFE);  // Send reset command to keyboard controller

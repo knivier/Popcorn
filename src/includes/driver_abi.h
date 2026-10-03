@@ -6,7 +6,7 @@
 
 /* Hardware drives (Rust): start them, talk to them, list /dev nodes. */
 
-/* Boot: start the built-in set (null, zero, serial, screen). */
+/* Boot: start builtins (null, zero, serial, screen, mem, cpu, clock). */
 void init_drives(void);
 
 /* Start one drive by name (e.g. "null", "ttyS0", "tty0"). Returns 0 on success. */

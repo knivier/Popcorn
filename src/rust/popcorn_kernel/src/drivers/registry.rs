@@ -4,7 +4,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use super::backends::{fb, null, serial, vga, zero};
+use super::backends::{clock, cpuinfo, fb, meminfo, null, serial, vga, zero};
 
 extern "C" {
     fn device_register_rust(name: *const u8);
@@ -15,6 +15,7 @@ extern "C" {
 pub enum DriveKind {
     Char,
     Screen,
+    Info,
 }
 
 pub struct DriveEntry {
@@ -66,6 +67,27 @@ fn catalog() -> Vec<DriveEntry> {
             ready: false,
             dev_name: "fb0",
         },
+        DriveEntry {
+            name: "mem",
+            title: "memory",
+            kind: DriveKind::Info,
+            ready: false,
+            dev_name: "meminfo",
+        },
+        DriveEntry {
+            name: "cpu",
+            title: "processor",
+            kind: DriveKind::Info,
+            ready: false,
+            dev_name: "cpu",
+        },
+        DriveEntry {
+            name: "clock",
+            title: "pit",
+            kind: DriveKind::Info,
+            ready: false,
+            dev_name: "clock",
+        },
     ]
 }
 
@@ -96,6 +118,9 @@ fn probe(name: &str) -> Result<(), &'static str> {
         "ttyS0" => serial::probe(),
         "tty0" => vga::probe(),
         "fb0" => fb::probe(),
+        "mem" => meminfo::probe(),
+        "cpu" => cpuinfo::probe(),
+        "clock" => clock::probe(),
         _ => Err("unknown drive"),
     }
 }
@@ -110,6 +135,9 @@ pub fn init_drives() {
     let _ = init_drive("null");
     let _ = init_drive("zero");
     let _ = init_drive("ttyS0");
+    let _ = init_drive("mem");
+    let _ = init_drive("cpu");
+    let _ = init_drive("clock");
 
     let use_fb = unsafe { console_fb_active() != 0 };
     if use_fb {
@@ -163,29 +191,57 @@ pub fn list_devices(buf: &mut [u8]) -> usize {
 }
 
 pub fn drive_cmd(target: &str, cmd: &str, buf: &mut [u8]) -> usize {
-    let t = table();
-    let d = t
-        .iter()
-        .find(|d| d.name == target || d.dev_name == target || d.title == target);
-    let reply = match (d, cmd) {
-        (None, _) => String::from("error: unknown target"),
-        (Some(d), "status") | (Some(d), "info") => {
-            let mut s = String::from(d.name);
-            s.push(' ');
-            s.push_str(if d.ready { "ready" } else { "idle" });
-            s.push_str(" node=/dev/");
-            s.push_str(d.dev_name);
-            s
+    let (name, title, dev_name, ready, kind) = {
+        let t = table();
+        match t
+            .iter()
+            .find(|d| d.name == target || d.dev_name == target || d.title == target)
+        {
+            None => {
+                return write_cstr("error: unknown target", buf);
+            }
+            Some(d) => (d.name, d.title, d.dev_name, d.ready, d.kind),
         }
-        (Some(d), "init") | (Some(d), "load") => match init_drive(d.name) {
+    };
+
+    let reply = if cmd == "init" || cmd == "load" {
+        match init_drive(name) {
             Ok(()) => String::from("ok"),
             Err(e) => {
                 let mut s = String::from("error: ");
                 s.push_str(e);
                 s
             }
-        },
-        (Some(_), _) => String::from("error: unknown cmd (status|info|init)"),
+        }
+    } else if !ready && (cmd == "status" || cmd == "info") && kind != DriveKind::Info {
+        let mut s = String::from(name);
+        s.push_str(" idle node=/dev/");
+        s.push_str(dev_name);
+        s
+    } else {
+        if !ready {
+            let _ = init_drive(name);
+        }
+        match name {
+            "mem" => meminfo::cmd(cmd),
+            "cpu" => cpuinfo::cmd(cmd),
+            "clock" => clock::cmd(cmd),
+            _ if cmd == "status" || cmd == "info" => {
+                let mut s = String::from(name);
+                s.push(' ');
+                let now_ready = table()
+                    .iter()
+                    .find(|d| d.name == name)
+                    .map(|d| d.ready)
+                    .unwrap_or(false);
+                s.push_str(if now_ready { "ready" } else { "idle" });
+                s.push_str(" node=/dev/");
+                s.push_str(dev_name);
+                let _ = title;
+                s
+            }
+            _ => String::from("error: unknown cmd (status|info|init)"),
+        }
     };
     write_cstr(&reply, buf)
 }
@@ -197,6 +253,9 @@ pub fn device_read(name: &str, buf: &mut [u8]) -> i64 {
         "ttyS0" => serial::read(buf),
         "tty0" => vga::read(buf),
         "fb0" => fb::read(buf),
+        "meminfo" => meminfo::read(buf),
+        "cpu" => cpuinfo::read(buf),
+        "clock" => clock::read(buf),
         _ => -2,
     }
 }
@@ -208,6 +267,9 @@ pub fn device_write(name: &str, buf: &[u8]) -> i64 {
         "ttyS0" => serial::write(buf),
         "tty0" => vga::write(buf),
         "fb0" => fb::write(buf),
+        "meminfo" => meminfo::write(buf),
+        "cpu" => cpuinfo::write(buf),
+        "clock" => clock::write(buf),
         _ => -2,
     }
 }
@@ -219,6 +281,9 @@ pub fn device_ioctl(name: &str, request: u64, argp: *mut u8) -> i64 {
         "ttyS0" => serial::ioctl(request, argp),
         "tty0" => vga::ioctl(request, argp),
         "fb0" => fb::ioctl(request, argp),
+        "meminfo" => meminfo::ioctl(request, argp),
+        "cpu" => cpuinfo::ioctl(request, argp),
+        "clock" => clock::ioctl(request, argp),
         _ => -2,
     }
 }

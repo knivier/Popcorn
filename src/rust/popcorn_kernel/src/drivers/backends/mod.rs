@@ -5,3 +5,6 @@ pub mod vga;
 pub mod fb;
 pub mod font8x16;
 pub mod screen;
+pub mod meminfo;
+pub mod cpuinfo;
+pub mod clock;

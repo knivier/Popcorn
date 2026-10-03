@@ -3,7 +3,9 @@
 extern crate alloc;
 
 mod alloc_shim;
+mod console_ffi;
 mod drivers;
+mod pops;
 
 use alloc::boxed::Box;
 use core::ffi::c_char;

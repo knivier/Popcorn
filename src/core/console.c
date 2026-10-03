@@ -177,6 +177,10 @@ void console_set_color(unsigned char color) {
     console_state.current_color = color;
 }
 
+unsigned char console_get_color(void) {
+    return console_state.current_color;
+}
+
 // Set cursor position
 void console_set_cursor(unsigned int x, unsigned int y) {
     if (x >= console_cols()) x = console_cols() - 1;
@@ -187,6 +191,15 @@ void console_set_cursor(unsigned int x, unsigned int y) {
     current_loc = (y * console_cols() + x) * 2;
     
     update_hardware_cursor(x, y);
+}
+
+void console_get_cursor(unsigned int* x, unsigned int* y) {
+    if (x) {
+        *x = console_state.cursor_x;
+    }
+    if (y) {
+        *y = console_state.cursor_y;
+    }
 }
 
 // Put a single character at current cursor position

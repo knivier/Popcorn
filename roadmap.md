@@ -28,7 +28,7 @@ Popcorn is a modular x86-64 kernel framework for learning operating system devel
 | Pop modules | Done in C (9 registered) | `src/core/pop_module.c`, `src/core/init.c` |
 | Device table (pre-drivers) | Done (C) | `src/core/device.c` — console/null; Phase 3 moves to Rust |
 | IRQ table | Done (C) | `src/core/irq.c` — `irq_register` / enable / disable |
-| Rust crate | Probe only | `src/rust/popcorn_kernel` — `rust_init` prints `Rust active` |
+| Rust crate | Active | drivers + screen + Shimjapii/Spinner/Uptime pops |
 | Block / PCI / storage | Not started | — |
 | CI | Done | `.github/workflows/ci.yml` — build + `test-uefi` |
 
@@ -72,7 +72,7 @@ Verified present in tree.
 ### Console, pops, internals
 
 - [x] VGA text + GOP shadow buffer, scrollback, history, tab completion
-- [x] Pop registry (`src/core/pop_module.c`, max 10) — Shimjapii, Spinner, Uptime, Halt, Filesystem, Sysinfo, Memory, CPU, Dolphin
+- [x] Pop registry (`src/core/pop_module.c`, max 10) — Shimjapii, Spinner, Uptime, Filesystem, Sysinfo, Memory, CPU, Dolphin
 - [x] Bitmap PMM + kmalloc; `vmm_init` from `memory_init`; 4-level map/unmap; `vmm_map_kernel_region`
 - [x] IDT, PIC remap, PIT, PS/2 IRQ1, INT `0x80` (DPL 3 gate `0xEE`)
 - [x] Preemptive scheduler skeleton with real `iretq` (`src/core/context_switch.asm`)
@@ -188,8 +188,9 @@ A small, explicit device model — not a Linux clone. “Driver network” here 
 - [x] `/dev` nodes via `device_register_rust` → C fd/`SYS_*` bridge
 - [x] Char backends: `null`, `zero`, `ttyS0`; screen: `tty0` (VGA), `fb0` (GOP present ioctl)
 - [x] Shell: `drv list|load|info|cmd`, `dev list`
+- [x] Info drives: `mem`, `cpu`, `clock` (PIT uptime); block I/O deferred (FS stays RAM)
+- [x] `ioctl` namespaces in `src/includes/ioctl.h` (mem/cpu/clock)
 - [ ] Classes formalized: **block** + richer fb blit still open
-- [ ] `ioctl` namespaces in `src/includes/ioctl.h`
 - [ ] IRQ: `irq_register(irq, handler, dev_id)` — PIC backend first; IOAPIC later
 
 **Exit criteria:** adding a device is a Rust `Driver` + `probe` — no edits to the `kernel.c` shell loop.
@@ -207,8 +208,8 @@ Today every `console_putchar` eventually writes either VGA memory at `0xB8000` (
 - [x] VGA text driver (`backends/vga.rs`) — CRTC cursor + cell write; console uses `rust_screen_set_cursor`
 - [x] Framebuffer driver (`backends/fb.rs`) — GOP font blit + dirty present owned in Rust
 - [x] Full cell blit path owned by display drive (`screen.rs` / `fb.rs`); console UX calls `rust_screen_*`
-- [ ] Halt pop / `console_get_buffer()` fully via device (no raw `vidptr`) — buffer is Rust cells for now
 - [x] Shell, status bar, scrollback still work on GRUB (VGA) and UEFI (fb) — smoke green
+- [ ] `console_get_buffer()` / raw `vidptr` clients fully via device (Dolphin leftover)
 
 **Exit criteria:** `console.c` contains no `write_port(0x3D4/0x3D5)` and no GOP pixel loops; those live in Rust drivers.
 
@@ -216,27 +217,30 @@ Today every `console_putchar` eventually writes either VGA memory at `0xB8000` (
 
 C registry is a 10-slot array and `void (*pop_function)(unsigned int)`. Rust keeps that ABI so `init.c` can register either side during the transition.
 
-Convert **small, console-only** pops first. They already save/restore `console_state` and only call `console_*` / `timer_get_ticks`.
+**Split (current intent):** pops are UX/aggregation; durable I/O and hardware state live in drivers.
+- Filesystem stays a **pop**; block/write path becomes **drivers** (ramdisk / virtio later).
+- Memory / CPU are **drivers** (or drive-backed info); pops (or shell) call them.
+- Sysinfo is a **pop** that aggregates multiple drive/info commands.
+- Halt pop and shell `hang`/`halt` toys are removed.
 
 | Order | Pop | Why this order |
 |-------|-----|----------------|
 | 1 | Shimjapii, Spinner, Uptime | Tiny; prove ABI + cursor save/restore |
-| 2 | Halt | Uses `console_get_buffer` — needs screen drivers first or a cell API |
-| 3 | Sysinfo, CPU, Memory | Read kernel structs; need thin C getters or Rust FFI |
-| 4 | Filesystem, Dolphin | Large, stateful; last |
+| 2 | Sysinfo, CPU, Memory | Thin UX over memory/cpu/info drives |
+| 3 | Filesystem, Dolphin | Large, stateful; FS pop + block drivers |
 
-- [ ] Rust `pops::registry` + `pop_register` / `pop_run` with the same `PopModule` layout
-- [ ] Port Shimjapii, Spinner, Uptime; drop the C files from `kernel.sh` / `builder.py`
-- [ ] Port Halt after `/dev/tty0` or `/dev/fb0` exists (no direct 80×25 pokes)
-- [ ] Port Sysinfo / CPU / Memory
-- [ ] Filesystem + Dolphin stay C until the console is a driver client (v0.8 ok)
-- [ ] Update `pop.md` for Rust pops (cursor save/restore still required)
+- [x] Rust `pops::registry` + `rust_pops_register` with the same `PopModule` layout
+- [x] Port Shimjapii, Spinner, Uptime; drop the C files from `scripts/lib/kernel.sh`
+- [x] Remove Halt pop + shell `hang` / `halt` commands
+- [x] Port Sysinfo / CPU / Memory as pops over `mem`/`cpu`/`clock` drives
+- [ ] Filesystem stays in-memory pop (no disk write yet); Dolphin later
+- [x] Update `pop.md` for Rust pops (cursor save/restore still required)
 
 ### 3.5 First char / clock drivers (same crate)
 
 - [x] Serial `/dev/ttyS0` — Rust chardev (early `boot_serial_putc` still used pre-driver)
 - [x] Null / zero — Rust chardevs via fd bridge
-- [ ] PIT clock provider — `timer.c` becomes a thin C trampoline or goes away
+- [x] PIT clock info drive (`clock` / `/dev/clock`) — `timer.c` still owns IRQ/poll
 - [ ] PCI config walk (bus 0 print at boot) — needed for v0.8 virtio, can start here
 - [ ] Delete leftover `serial_putc` from `scheduler.c` once all debug paths use ttyS0
 
@@ -244,7 +248,7 @@ Convert **small, console-only** pops first. They already save/restore `console_s
 
 - [ ] `cargo` + existing C toolchain produce one kernel; `test-uefi` green
 - [ ] Screen output goes through `/dev/tty0` and/or `/dev/fb0`
-- [ ] At least three pops are Rust and registered through the Rust registry
+- [x] At least three pops are Rust and registered through the Rust registry
 - [ ] Serial and null/zero are Rust devices; `mon -list` shows them
 - [ ] No new port I/O added under `src/core/`
 
@@ -303,7 +307,7 @@ Depends on the driver network; not scheduled:
 | 2 | Rust crate skeleton + `rust_init` | Rust | `libpopcorn_kernel.a` links; boot prints `Rust active` |
 | 3 | Driver network + IRQ table | Rust (+ C IDT trampoline) | PIT/keyboard register instead of hard-coded gates |
 | 4 | `/dev/tty0` + `/dev/fb0`; console is a client | Rust | No CRTC/GOP loops in `console.c` |
-| 5 | Rust pops: shimjapii, spinner, uptime (then halt) | Rust | C files removed from the link line |
+| 5 | Rust pops: shimjapii, spinner, uptime | Rust | C files removed from the link line |
 | 6 | Serial + null/zero; `mon -list` | Rust | Boot logs through `/dev/ttyS0` |
 | 7 | (v0.8) kbd, ramdisk, PCI, virtio-blk | Rust | Sectors in QEMU |
 
