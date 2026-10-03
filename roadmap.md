@@ -21,7 +21,8 @@ Popcorn is a modular x86-64 kernel framework for learning operating system devel
 | Boot (GRUB + UEFI) | Done | `src/core/kernel.asm`, `src/uefi/bootx64.c`, `scripts/core.sh` |
 | Console / shell UX | Done (C client of Rust screen) | `src/core/console.c`, `src/core/shell.c` |
 | PMM + kmalloc | Done (prototype) | `src/core/memory.c` |
-| VMM (4-level paging) | Partial | `src/core/vmm.c` — no 2 MiB PDE split |
+| VMM (4-level paging) | Partial | direct map 64 GiB; process PML4 clones upper 256; no PDE splitter yet |
+| PMM (bitmap) | Done (≤16 GiB track) | `memory.c` / `physmap.h` — was hard-capped at 1 GiB |
 | Scheduler + context switch | Partial | `src/core/scheduler.c` — wait queues, sleep, bootstrap guard |
 | Syscalls (14 registered) | Partial | `src/core/syscall.c` — real fd/dev/time/heap/cwd only |
 | In-memory filesystem (pop) | Done (not kernel VFS) | `src/pops/filesystem_pop.c` |
@@ -125,12 +126,24 @@ Do **not** build the driver network until this subset is in place. Finish below;
 - [x] Per-task fd table; `SYS_OPEN` / `READ` / `WRITE` / `IOCTL` go through `dev_*`, not the console
 - [x] `SYS_SLEEP` / `SYS_YIELD` on scheduler wait queues (IRQ wake)
 
-### Can slip to v0.8
+### Memory architecture (do before heavy v0.8 block / userspace)
 
-- [ ] 2 MiB PDE splitter so `vmm_map_4k` works in the identity 0–1 GiB window (`src/includes/vmm.h` documents this gap)
-- [ ] Per-process PML4 used by all non-idle tasks; user VA above 1 GiB with `VMM_PTE_US`
+Why DRAM looked “stuck at 1 GiB”: QEMU `-m 1024` **and** a PMM bitmap hard-capped at the first gigabyte. Boot already identity-mapped 64 GiB; the allocator simply refused to track the rest.
+
+- [x] Shared `physmap.h` — `VMM_DIRECT_MAP_BASE`, 64 GiB identity window, 16 GiB PMM track cap
+- [x] PMM bitmap tracks up to 16 GiB from the multiboot/UEFI mmap (no 1 GiB fallback clamp)
+- [x] Direct-map accessors (`phys_to_virt` / table walks via high-half)
+- [x] Process PML4 split: clear lower 256, copy upper 256 from master (`vmm_clone_kernel_space`)
+- [x] `vmm_init_process_address_space` uses clone (not a fresh 1 GiB-only layout)
+- [x] QEMU UEFI smoke default RAM raised to 4 GiB (`-m 4096`)
+- [x] Non-idle tasks get a private PML4; idle keeps master; `vmm_load_cr3` on switch
+- [x] 2 MiB PDE splitter — `vmm_map_4k` can overlay identity/direct-map windows
+- [ ] User VA mappings with `VMM_PTE_US` in PML4[1..] (ring 3 prep; identity still shared at PML4[0])
+
+### Can slip to v0.8+
+
 - [ ] `#PF` policy: demand-zero / guard / COW hooks
-- [ ] DMA helper (contiguous, below 4 GiB)
+- [ ] DMA helper (contiguous, below 4 GiB) — stub exists in Rust `dma.rs`
 - [ ] Dynamic tasks via kmalloc (delete both static pools)
 - [ ] Ring 3: user CS, `0xEE` → `0xEF` or `syscall`, TSS IST for user stacks
 - [ ] HPET / ACPI PM timer (optional; PIT stays fallback)

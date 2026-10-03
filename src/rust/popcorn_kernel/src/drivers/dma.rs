@@ -27,7 +27,18 @@ pub fn dma_cookie() -> u64 {
     NEXT_COOKIE.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Phys = virt for early identity / high-half direct map (placeholder).
+const DIRECT_MAP_BASE: u64 = 0xFFFF_8000_0000_0000;
+const IDENTITY_BYTES: u64 = 64u64 << 30;
+
+/// Undo the kernel direct map (or pass through low identity pointers).
 pub fn virt_to_phys(virt: u64) -> u64 {
-    virt
+    if virt >= DIRECT_MAP_BASE && virt < DIRECT_MAP_BASE + IDENTITY_BYTES {
+        virt - DIRECT_MAP_BASE
+    } else {
+        virt
+    }
+}
+
+pub fn phys_to_virt(phys: u64) -> u64 {
+    DIRECT_MAP_BASE + phys
 }

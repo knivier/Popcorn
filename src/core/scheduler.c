@@ -242,8 +242,28 @@ void task_free_stack(void* stack) {
 }
 
 // Initialize the scheduler
+/* Attach a private PML4 (shared identity + kernel half) for non-idle tasks. */
+static int task_attach_private_as(TaskStruct* task) {
+    uint64_t pml4;
+    if (!task) {
+        return -1;
+    }
+    pml4 = vmm_alloc_pml4();
+    if (pml4 == 0) {
+        serial_print("ERROR: vmm_alloc_pml4 failed\n");
+        return -1;
+    }
+    if (vmm_init_process_address_space(pml4, g_kernel_pml4_phys) != 0) {
+        vmm_free_pml4(pml4, g_kernel_pml4_phys);
+        serial_print("ERROR: vmm_init_process_address_space failed\n");
+        return -1;
+    }
+    task->address_space.pml4_phys = pml4;
+    return 0;
+}
+
 void scheduler_init(void) {
-    g_kernel_pml4_phys = vmm_get_cr3();
+    g_kernel_pml4_phys = vmm_get_cr3() & VMM_PTE_ADDR_MASK;
 
     // Initialize scheduler state
     scheduler.current_task = NULL;
@@ -278,14 +298,8 @@ void task_set_address_space(TaskStruct* task, uint64_t pml4_phys) {
     if (!task) {
         return;
     }
-    /*
-     * New PML4 must still map the kernel (same VAs as boot) or the next
-     * syscall/IRQ will fault. For a process root: vmm_alloc_pml4() then
-     * vmm_init_process_address_space(new, 0) (reference arg unused), then
-     * vmm_map_4k for user pages. Init uses vmm_map_kernel_region (layout).
-     * See vmm.h: 4 KiB overlays in 0..1 GiB need a 2 MiB PDE split first.
-     */
-    task->address_space.pml4_phys = pml4_phys;
+    /* Caller supplies a root that already shares identity + kernel half. */
+    task->address_space.pml4_phys = pml4_phys & VMM_PTE_ADDR_MASK;
 }
 
 // Scheduler tick handler (called from timer interrupt)
@@ -379,6 +393,15 @@ TaskStruct* scheduler_create_task(void (*function)(void), void* data, TaskPriori
     // Set up initial context for the task
     setup_task_context(task);
 
+    /* Idle keeps the boot master CR3; everyone else gets a private PML4. */
+    if (priority != PRIORITY_IDLE) {
+        if (task_attach_private_as(task) != 0) {
+            task_free_stack(task->stack_base);
+            task->stack_base = NULL;
+            return NULL;
+        }
+    }
+
     // Add to ready queue
     task->next = scheduler.ready_queue[priority];
     if (scheduler.ready_queue[priority]) {
@@ -427,8 +450,13 @@ void scheduler_destroy_task(uint32_t pid) {
         task->next->prev = task->prev;
     }
 
-    // Free stack
+    // Free stack + private PML4 (shared tables stay with the master).
     task_free_stack(task->stack_base);
+    if (task->address_space.pml4_phys != 0 &&
+        task->address_space.pml4_phys != g_kernel_pml4_phys) {
+        vmm_free_pml4(task->address_space.pml4_phys, g_kernel_pml4_phys);
+        task->address_space.pml4_phys = g_kernel_pml4_phys;
+    }
 
     // Mark as zombie
     task->state = TASK_STATE_ZOMBIE;
@@ -830,16 +858,12 @@ void task_switch(TaskStruct* from, TaskStruct* to) {
         }
     }
 
-    /*
-     * Load the next task's page-table root after saving the outgoing state.
-     * Stays a no-op while every task uses the boot identity PML4; required once
-     * per-process PML4s map different user VAs. Kernel VAs must remain valid in
-     * every such root (e.g. permanent kernel map into each user table).
-     */
+    /* Switch address space after saving outgoing state (identity + kernel shared). */
     if (to->address_space.pml4_phys != 0) {
-        uint64_t cr = vmm_get_cr3();
-        if (to->address_space.pml4_phys != cr) {
-            vmm_load_cr3(to->address_space.pml4_phys);
+        uint64_t want = to->address_space.pml4_phys & VMM_PTE_ADDR_MASK;
+        uint64_t cur = vmm_get_cr3() & VMM_PTE_ADDR_MASK;
+        if (want != cur) {
+            vmm_load_cr3(want);
         }
     }
 
@@ -927,6 +951,14 @@ TaskStruct* scheduler_create_task_with_pid(void (*function)(void), void* data, T
     // Set up initial context for the task
     setup_task_context(task);
 
+    if (priority != PRIORITY_IDLE) {
+        if (task_attach_private_as(task) != 0) {
+            task_free_stack(task->stack_base);
+            task->stack_base = NULL;
+            return NULL;
+        }
+    }
+
     // Add to ready queue
     task->next = scheduler.ready_queue[priority];
     if (scheduler.ready_queue[priority]) {
@@ -954,6 +986,12 @@ void scheduler_kill_all_except_idle(void) {
                 }
                 if (task->next) {
                     task->next->prev = task->prev;
+                }
+
+                if (task->address_space.pml4_phys != 0 &&
+                    task->address_space.pml4_phys != g_kernel_pml4_phys) {
+                    vmm_free_pml4(task->address_space.pml4_phys, g_kernel_pml4_phys);
+                    task->address_space.pml4_phys = g_kernel_pml4_phys;
                 }
                 
                 // Update task count

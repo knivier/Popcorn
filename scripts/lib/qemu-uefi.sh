@@ -64,7 +64,7 @@ qemu_uefi_usb_args() {
   local extra=("${@:2}")
   # shellcheck disable=SC2046
   qemu-system-x86_64 \
-    -machine q35 -m 1024 -cpu max \
+    -machine q35 -m 4096 -cpu max \
     -drive "if=pflash,format=raw,readonly=on,file=$code" \
     -drive "if=pflash,format=raw,file=$OVMF_VARS" \
     -drive "if=none,id=usbstick,format=raw,file=$UEFI_IMG" \
@@ -373,7 +373,7 @@ qemu_uefi_run_interactive() {
 
   # shellcheck disable=SC2046
   exec qemu-system-x86_64 \
-    -machine q35 -m 1024 -cpu max \
+    -machine q35 -m 4096 -cpu max \
     -drive "if=pflash,format=raw,readonly=on,file=$code" \
     -drive "if=pflash,format=raw,file=$OVMF_VARS" \
     -drive "if=none,id=usbstick,format=raw,file=$UEFI_IMG" \

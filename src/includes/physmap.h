@@ -2,6 +2,7 @@
 #define POPCORN_PHYSMAP_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 /*
  * Physical / direct-map layout — keep in sync with kernel.asm:
