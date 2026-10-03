@@ -2,6 +2,11 @@ pub mod io;
 pub mod registry;
 pub mod backends;
 pub mod bus;
+pub mod device;
+pub mod driver;
+pub mod irq;
+pub mod dma;
+pub mod class;
 
 pub use registry::{drive_cmd, init_drive, init_drives, list_devices, list_drives};
 pub use registry::{device_ioctl, device_read, device_write};

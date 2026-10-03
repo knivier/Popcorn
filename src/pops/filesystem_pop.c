@@ -300,30 +300,9 @@ void list_files_console(void) {
     }
 }
 
-// Function to list all files in the current directory (VGA version)
-void list_files() {
-    char* vidptr = console_get_buffer();
-    unsigned int pos = 0;
-
-    for (int i = 0; i < MAX_FILES; ++i) {
-        // Check if the file or directory is in the current path
-        if (file_system[i].in_use && strrncmp(file_system[i].path, current_path, strrlen(current_path)) == 0) {
-            // Ensure we are not listing files from a subdirectory
-            if (file_system[i].path[strrlen(current_path)] == '\0' || file_system[i].path[strrlen(current_path)] == '|') {
-                unsigned int j = 0;
-                while (file_system[i].name[j] != '\0') {
-                    vidptr[pos] = file_system[i].name[j];
-                    vidptr[pos + 1] = 0x07;  // Light grey color
-                    ++j;
-                    pos += 2;
-                }
-                vidptr[pos] = ' ';
-                vidptr[pos + 1] = 0x07; // Light grey color
-                pos += 2;
-            }
-        }
-    }
-    console_present();
+/* Alias — always go through the console API (no raw cell buffer). */
+void list_files(void) {
+    list_files_console();
 }
 
 // Function to delete a file
@@ -624,35 +603,15 @@ bool copy_file(const char* src_name, const char* dest_path) {
     return false; // Filesystem full
 }
 
-// Function to list the entire file system hierarchy
-void list_hierarchy(char* vidptr) {
-    unsigned int pos = 0;
-
+void list_hierarchy(void) {
     for (int i = 0; i < MAX_FILES; ++i) {
-        if (file_system[i].in_use) {
-            unsigned int j = 0;
-            int k = 0;
-            while (file_system[i].path[k] != '\0') {
-                vidptr[pos] = file_system[i].path[k];
-                vidptr[pos + 1] = 0x07;  // Light grey color
-                ++k;
-                pos += 2;
-            }
-            vidptr[pos] = '|';
-            vidptr[pos + 1] = 0x07;  // Light grey color
-            pos += 2;
-            while (file_system[i].name[j] != '\0') {
-                vidptr[pos] = file_system[i].name[j];
-                vidptr[pos + 1] = 0x07;  // Light grey color
-                ++j;
-                pos += 2;
-            }
-            vidptr[pos] = ' ';
-            vidptr[pos + 1] = 0x07; // Light grey color
-            pos += 2;
+        if (!file_system[i].in_use) {
+            continue;
         }
+        console_print_color(file_system[i].path, CONSOLE_INFO_COLOR);
+        console_print_color("|", CONSOLE_FG_COLOR);
+        console_println_color(file_system[i].name, CONSOLE_FG_COLOR);
     }
-    console_present();
 }
 
 // Access console state to save/restore cursor

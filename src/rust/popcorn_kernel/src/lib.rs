@@ -2,7 +2,9 @@
 
 extern crate alloc;
 
+mod abi;
 mod alloc_shim;
+mod catalog;
 mod console_ffi;
 mod drivers;
 mod pops;
@@ -56,6 +58,8 @@ pub extern "C" fn rust_init() {
     }
     drop(b);
 
+    catalog::init();
+    drivers::irq::seed_builtins();
     init_drives();
 }
 

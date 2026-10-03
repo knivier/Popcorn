@@ -4,13 +4,13 @@
 
 Popcorn is a modular x86-64 kernel framework for learning operating system development. It ships with a native UEFI loader, GRUB Multiboot2 ISO boot, an interactive in-kernel shell, and a pop-module extension system.
 
-**Shipped version:** v0.5 (pre-release) — this is what the tree implements today.
+**Coding target met:** v0.7 — Rust driver network, screen backends, Rust pops, kbd/PCI, in-kernel catalog.
 
-**Current target:** v0.7 — Rust driver network, screen output as drivers, first Rust pops.
+**Next version:** v0.8 — block path (ramdisk → virtio-blk), thin remaining C I/O.
 
-**Verified:** 3 Oct 2026 — Phase 1 coding gates + Phase 2 must-haves green in QEMU (`test-uefi`: `#PF` dump, GRUB+UEFI smoke, debugcon `I/B/S/2`). Process leftovers: pre-release marking, real-hardware boot.
+**Verified:** 3 Oct 2026 — Phase 1–3 coding gates green in QEMU (`test-uefi`: `#PF` dump, GRUB+UEFI smoke, debugcon `I/B/S/2`). Process leftovers: pre-release marking, real-hardware boot.
 
-**Roadmap scope:** Phase 1–2 coding gates done. Next is Phase 3: stand up the Rust driver network, move screen writing and pops onto that crate, then land first-class char/fb/block drivers. VFS, userspace, and a real NIC stack stay in Phase 5.
+**Roadmap scope:** Phase 3 coding largely done. Next is Phase 4 block/storage. VFS, userspace, and a real NIC stack stay in Phase 5.
 
 ---
 
@@ -19,17 +19,19 @@ Popcorn is a modular x86-64 kernel framework for learning operating system devel
 | Area | Status | Verified in |
 |------|--------|-------------|
 | Boot (GRUB + UEFI) | Done | `src/core/kernel.asm`, `src/uefi/bootx64.c`, `scripts/core.sh` |
-| Console / shell UX | Done (C, not a driver) | `src/core/console.c`, `src/core/kernel.c` |
+| Console / shell UX | Done (C client of Rust screen) | `src/core/console.c`, `src/core/shell.c` |
 | PMM + kmalloc | Done (prototype) | `src/core/memory.c` |
 | VMM (4-level paging) | Partial | `src/core/vmm.c` — no 2 MiB PDE split |
 | Scheduler + context switch | Partial | `src/core/scheduler.c` — wait queues, sleep, bootstrap guard |
-| Syscalls (21 registered) | Partial | `src/core/syscall.c` — fd/`dev_*` for open/read/write/ioctl; sleep/yield real |
+| Syscalls (14 registered) | Partial | `src/core/syscall.c` — real fd/dev/time/heap/cwd only |
 | In-memory filesystem (pop) | Done (not kernel VFS) | `src/pops/filesystem_pop.c` |
-| Pop modules | Done in C (9 registered) | `src/core/pop_module.c`, `src/core/init.c` |
-| Device table | Done | C fd bridge + Rust drives (`null`/`zero`/`ttyS0`/`kbd`/screen/info) |
-| IRQ table | Done (C) | `src/core/irq.c` — `irq_register` / enable / disable |
-| Rust crate | Active | drivers + screen + Shimjapii/Spinner/Uptime pops |
-| Block / PCI / storage | Not started | — |
+| Pop modules | 6 Rust + FS/Dolphin C | `pops/*`, `src/core/pop_module.c` |
+| Device / drive table | Done | Rust registry + C fd bridge |
+| Registry catalog (RAM DB) | Done | `catalog.rs` / `catalog.h` — `catalog` shell cmd |
+| IRQ table | Done (C + Rust claims) | `irq.c`, `drivers/irq.rs` |
+| Rust crate | Active | abi/device/driver/class/dma/pit + backends |
+| PCI walk | Done (bus 0) | `drivers/bus/pci.rs` |
+| Block / storage | Not started | Phase 4 |
 | CI | Done | `.github/workflows/ci.yml` — build + `test-uefi` |
 
 ---
@@ -152,25 +154,17 @@ src/rust/
   Cargo.toml                         — workspace, panic=abort, no_std
   popcorn_kernel/
     src/lib.rs                       — rust_init() extern "C"
-    src/abi.rs                       — C structs matching pop_module.h / future device.h
+    src/abi.rs                       — C structs (PopModule, CatalogEntry, ioctl)
+    src/catalog.rs                   — in-kernel registry DB (drives/devs/pops/irqs/syscalls)
     src/drivers/                     — driver network
       mod.rs
-      device.rs
-      driver.rs
-      irq.rs
-      io.rs
-      dma.rs
+      device.rs / driver.rs / irq.rs / io.rs / dma.rs
       bus/pci.rs
       class/{chardev,blockdev,fbdev}.rs
-      backends/{serial,vga,fb,pit,null}.rs
-    src/pops/                        — Rust pops
-      mod.rs
-      registry.rs
-      shimjapii.rs
-      spinner.rs
-      uptime.rs
-      halt.rs
-  .cargo/config.toml                 — x86_64-unknown-none (or custom target)
+      backends/{serial,vga,fb,pit,null,zero,kbd,screen,mem,cpu,clock}.rs
+      registry.rs                    — init_drive + /dev publish
+    src/pops/                        — Rust pops (no halt toy)
+  .cargo/config.toml                 — x86_64-unknown-none
 ```
 
 - [x] `#![no_std]`, `x86_64-unknown-none` (or custom), `panic=abort` (halt loop for now; COM1 dump later)
@@ -190,8 +184,9 @@ A small, explicit device model — not a Linux clone. “Driver network” here 
 - [x] Shell: `drv list|load|info|cmd`, `dev list`
 - [x] Info drives: `mem`, `cpu`, `clock` (PIT uptime); block I/O deferred (FS stays RAM)
 - [x] `ioctl` namespaces in `src/includes/ioctl.h` (mem/cpu/clock)
-- [ ] Classes formalized: **block** + richer fb blit still open
-- [ ] IRQ: `irq_register(irq, handler, dev_id)` — PIC backend first; IOAPIC later
+- [x] Classes sketched: `class/{chardev,blockdev,fbdev}.rs` (+ `device`/`driver`/`dma`/`irq`/`pit`)
+- [x] Rust IRQ claim table (`drivers/irq.rs`); PIC enable/EOI still C — IOAPIC later
+- [x] In-kernel catalog DB (`catalog.rs`) — shell `catalog` lists drives/devs/pops/syscalls
 
 **Exit criteria:** adding a device is a Rust `Driver` + `probe` — no edits to the `kernel.c` shell loop.
 
@@ -209,7 +204,7 @@ Today every `console_putchar` eventually writes either VGA memory at `0xB8000` (
 - [x] Framebuffer driver (`backends/fb.rs`) — GOP font blit + dirty present owned in Rust
 - [x] Full cell blit path owned by display drive (`screen.rs` / `fb.rs`); console UX calls `rust_screen_*`
 - [x] Shell, status bar, scrollback still work on GRUB (VGA) and UEFI (fb) — smoke green
-- [ ] `console_get_buffer()` / raw `vidptr` clients fully via device (Dolphin leftover)
+- [x] FS/Dolphin use `console_*` (no legacy `vidptr` / raw cell poke)
 
 **Exit criteria:** `console.c` contains no `write_port(0x3D4/0x3D5)` and no GOP pixel loops; those live in Rust drivers.
 

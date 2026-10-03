@@ -11,6 +11,7 @@
 #include "../includes/syscall.h"
 #include "../includes/utils.h"
 #include "../includes/driver_abi.h"
+#include "../includes/catalog.h"
 #include "../includes/kbd.h"
 #include <stddef.h>
 #include <stdbool.h>
@@ -36,7 +37,7 @@ void list_files(void);
 void list_files_console(void);
 bool create_directory(const char* name);
 bool change_directory(const char* name);
-void list_hierarchy(char* vidptr);
+void list_hierarchy(void);
 const char* get_current_directory(void);
 const char* search_file(const char* name);
 bool copy_file(const char* src_name, const char* dest_path);
@@ -104,6 +105,7 @@ static const char* available_commands[] = {
     "mon", "mon -debug", "mon -list", "mon -kill", "mon -ultramon",
     "dol", "dol -new", "dol -open", "dol -save", "dol -close", "dol -help",
     "drive", "drive list", "init_drive", "drive info", "drive cmd", "dev", "dev list",
+    "catalog", "catalog list",
     "wrap", "wrap on", "wrap off",
     NULL
 };
@@ -180,102 +182,13 @@ void execute_command(const char *command) {
     
     if (strcmp(command, "help") == 0 || strcmp(command, "halp") == 0) {
         console_newline();
-        console_println_color("Available Commands:", CONSOLE_HEADER_COLOR);
-        console_draw_separator(console_state.cursor_y, CONSOLE_FG_COLOR);
-        
-        console_print_color("  clear", CONSOLE_PROMPT_COLOR);
-        console_println(" - Clears the screen");
-        
-        console_print_color("  uptime", CONSOLE_PROMPT_COLOR);
-        console_println(" - Prints the system uptime");
-        
-        console_print_color("  write <filename> <content>", CONSOLE_PROMPT_COLOR);
-        console_println(" - Writes content to a file");
-        
-        console_print_color("  read <filename>", CONSOLE_PROMPT_COLOR);
-        console_println(" - Reads the content of a file");
-        
-        console_print_color("  delete <filename>", CONSOLE_PROMPT_COLOR);
-        console_println(" - Deletes a file");
-        
-        console_print_color("  rm <filename>", CONSOLE_PROMPT_COLOR);
-        console_println(" - Removes a file (alias for delete)");
-        
-        console_print_color("  mkdir <dirname>", CONSOLE_PROMPT_COLOR);
-        console_println(" - Creates a new directory");
-        
-        console_print_color("  go <dirname>", CONSOLE_PROMPT_COLOR);
-        console_println(" - Changes to the specified directory");
-        
-        console_print_color("  back", CONSOLE_PROMPT_COLOR);
-        console_println(" - Goes back to the previous directory");
-        
-        console_print_color("  ls", CONSOLE_PROMPT_COLOR);
-        console_println(" - Lists files and directories in current directory");
-        
-        console_print_color("  search <filename>", CONSOLE_PROMPT_COLOR);
-        console_println(" - Searches for a file and shows its location");
-        
-        console_print_color("  cp <filename> <directory>", CONSOLE_PROMPT_COLOR);
-        console_println(" - Copies a file to another directory");
-        
-        console_print_color("  listsys", CONSOLE_PROMPT_COLOR);
-        console_println(" - Lists the entire file system hierarchy");
-        
-        console_print_color("  sysinfo", CONSOLE_PROMPT_COLOR);
-        console_println(" - Displays detailed system information");
-        
-        console_print_color("  mem [option]", CONSOLE_PROMPT_COLOR);
-        console_println(" - Memory commands: -map, -use, -stats, -info, -debug");
-        
-        console_print_color("  tasks", CONSOLE_PROMPT_COLOR);
-        console_println(" - Show current task information");
-        
-        console_print_color("  timer", CONSOLE_PROMPT_COLOR);
-        console_println(" - Show timer information");
-        console_print_color("  syscalls", CONSOLE_PROMPT_COLOR);
-        console_println(" - Show system call table");
-
-        console_println_color("Task Monitor Commands:", CONSOLE_INFO_COLOR);
-        console_print_color("  mon -debug", CONSOLE_PROMPT_COLOR);
-        console_println(" - Start a debug task");
-        console_print_color("  mon -debug [pid]", CONSOLE_PROMPT_COLOR);
-        console_println(" - Start debug task with custom PID");
-        console_print_color("  mon -list", CONSOLE_PROMPT_COLOR);
-        console_println(" - List all running tasks");
-        console_print_color("  mon -kill [pid]", CONSOLE_PROMPT_COLOR);
-        console_println(" - Kill specific task by PID");
-        console_print_color("  mon -ultramon", CONSOLE_PROMPT_COLOR);
-        console_println(" - Kill all tasks except idle");
-        
-        console_print_color("  cpu [option]", CONSOLE_PROMPT_COLOR);
-        console_println(" - CPU commands: -hz, -info");
-        
-        console_print_color("  dol [option]", CONSOLE_PROMPT_COLOR);
-        console_println(" - Dolphin text editor: -new, -open, -save, -help");
-        
-        console_print_color("  stop", CONSOLE_PROMPT_COLOR);
-        console_println(" - Shuts down the system");
-
-        console_println_color("Drive Commands:", CONSOLE_INFO_COLOR);
-        console_print_color("  drive list", CONSOLE_PROMPT_COLOR);
-        console_println(" - List drives (ready/idle)");
-        console_print_color("  init_drive <name>", CONSOLE_PROMPT_COLOR);
-        console_println(" - Start a drive (null, zero, ttyS0, kbd, tty0, fb0, mem, cpu, clock)");
-        console_print_color("  drive info <name>", CONSOLE_PROMPT_COLOR);
-        console_println(" - Drive status");
-        console_print_color("  drive cmd <name> <cmd>", CONSOLE_PROMPT_COLOR);
-        console_println(" - Drive cmd: status|info|init; mem:stats|usage; cpu:info|hz; clock:ticks|uptime");
-        console_print_color("  dev list", CONSOLE_PROMPT_COLOR);
-        console_println(" - List /dev nodes from ready drives");
-
-        console_println_color("Terminal:", CONSOLE_INFO_COLOR);
-        console_print_color("  Up/Down", CONSOLE_PROMPT_COLOR);
-        console_println(" - Scroll output history (type snaps to bottom)");
-        console_print_color("  Left/Right", CONSOLE_PROMPT_COLOR);
-        console_println(" - Browse command history");
-        console_print_color("  wrap on|off", CONSOLE_PROMPT_COLOR);
-        console_println(" - Soft-wrap long lines at the edge (default on)");
+        console_println_color("Commands:", CONSOLE_HEADER_COLOR);
+        console_println("  clear uptime stop wrap on|off");
+        console_println("  write/read/rm/mkdir/go/back/ls/search/cp/listsys");
+        console_println("  sysinfo mem[-map|-use|-stats|-info|-debug] cpu[-hz|-info]");
+        console_println("  tasks timer syscalls mon[-list|-debug|-kill|-ultramon]");
+        console_println("  dol[-new|-open|-save|-help] drive/init_drive/dev/catalog");
+        console_println("  arrows: ^v scroll  <> history");
     } else if (strcmp(command, "wrap") == 0 || strcmp(command, "wrap on") == 0) {
         console_set_wrap(true);
         console_print_success("wrap on");
@@ -590,7 +503,7 @@ void execute_command(const char *command) {
         console_newline();
         console_println_color("File System Hierarchy:", CONSOLE_HEADER_COLOR);
         console_draw_separator(console_state.cursor_y, CONSOLE_FG_COLOR);
-        list_hierarchy(console_get_buffer());
+        list_hierarchy();
         console_newline();
     } else if (strcmp(command, "sysinfo") == 0) {
         sysinfo_print_full();
@@ -852,6 +765,10 @@ void execute_command(const char *command) {
     } else if (strcmp(command, "dev") == 0 || strcmp(command, "dev list") == 0) {
         char buf[256];
         list_devices(buf, sizeof(buf));
+        console_println_color(buf, CONSOLE_INFO_COLOR);
+    } else if (strcmp(command, "catalog") == 0 || strcmp(command, "catalog list") == 0) {
+        char buf[512];
+        rust_catalog_list(CATALOG_KIND_ALL, buf, sizeof(buf));
         console_println_color(buf, CONSOLE_INFO_COLOR);
     } else {
         console_print_error("Command not found");

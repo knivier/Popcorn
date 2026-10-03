@@ -1,17 +1,6 @@
 //! C-compatible pop registry helpers.
 
-use core::ffi::c_char;
-
-/// Matches `PopModule` in `src/includes/pop_module.h`.
-#[repr(C)]
-pub struct PopModule {
-    pub name: *const c_char,
-    pub message: *const c_char,
-    pub pop_function: Option<extern "C" fn(u32)>,
-}
-
-// SAFETY: PopModule is only ever created as immortal statics with C-string literals.
-unsafe impl Sync for PopModule {}
+pub use crate::abi::PopModule;
 
 extern "C" {
     fn register_pop_module(module: *const PopModule);

@@ -30,9 +30,8 @@ const char* get_current_directory(void);
 extern unsigned char keyboard_map[128];
 extern void boot_serial_putc(char c);
 
-/* Legacy symbols still referenced by pops / console. */
+/* Shared console cursor byte offset (shell history / legacy helpers). */
 unsigned int current_loc = 0;
-char *vidptr = (char*)0xb8000;
 ConsoleState console_state = {0, 0, CONSOLE_FG_COLOR, true, false, 0};
 
 void kmain(void) {

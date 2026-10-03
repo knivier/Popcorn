@@ -8,4 +8,5 @@ pub mod screen;
 pub mod meminfo;
 pub mod cpuinfo;
 pub mod clock;
+pub mod pit;
 pub mod kbd;

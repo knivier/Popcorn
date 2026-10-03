@@ -376,15 +376,26 @@ void dolphin_new_line(void) {
 void dolphin_render(void) {
     if (!editor.active) return;
     
-    // Clear screen and redraw
-    extern char *vidptr;
     extern void console_set_cursor(unsigned int x, unsigned int y);
-    
-    // Clear content area (leave top status)
-    for (unsigned int y = 4; y < 24; y++) {
-        for (unsigned int x = 0; x < 80; x++) {
-            vidptr[(y * 80 + x) * 2] = ' ';
-            vidptr[(y * 80 + x) * 2 + 1] = 0x07;
+    extern unsigned int console_cols(void);
+    extern unsigned int console_rows(void);
+
+    /* Clear content area via console API (no raw vidptr). */
+    {
+        unsigned int cols = console_cols();
+        unsigned int rows = console_rows();
+        unsigned int y_end = (rows > 2u) ? (rows - 2u) : rows;
+        if (y_end > 24u) {
+            y_end = 24u;
+        }
+        if (cols > 80u) {
+            cols = 80u;
+        }
+        for (unsigned int y = 4; y < y_end; y++) {
+            console_set_cursor(0, y);
+            for (unsigned int x = 0; x < cols; x++) {
+                console_putchar(' ');
+            }
         }
     }
     

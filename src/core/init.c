@@ -269,7 +269,7 @@ void init_show_syscall_info(void) {
 
     console_set_cursor(0, 20);
     console_print_color("    Calls: ", BOOT_INFO_COLOR);
-    console_println_color("21 System Calls Registered", BOOT_SUCCESS_COLOR);
+    console_println_color("14 System Calls Registered", BOOT_SUCCESS_COLOR);
 
     console_set_cursor(0, 21);
     for (int i = 0; i < BOOT_SCREEN_WIDTH; i++) {

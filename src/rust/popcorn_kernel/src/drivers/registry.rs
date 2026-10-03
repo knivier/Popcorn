@@ -4,6 +4,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use crate::catalog;
+
 use super::backends::{clock, cpuinfo, fb, kbd, meminfo, null, serial, vga, zero};
 use super::bus::pci;
 
@@ -117,6 +119,15 @@ fn register_dev(name: &str) {
     unsafe {
         device_register_rust(buf.as_ptr());
     }
+    catalog::publish_device(name, "char", 0);
+}
+
+fn class_for(kind: DriveKind) -> &'static str {
+    match kind {
+        DriveKind::Char => "char",
+        DriveKind::Screen => "fb",
+        DriveKind::Info => "info",
+    }
 }
 
 fn probe(name: &str) -> Result<(), &'static str> {
@@ -139,7 +150,10 @@ pub fn init_drives() {
     if INIT.swap(true, Ordering::SeqCst) {
         return;
     }
-    let _ = table();
+    let t = table();
+    for (i, d) in t.iter().enumerate() {
+        catalog::publish_drive(d.name, class_for(d.kind), false, i as u32);
+    }
 
     let _ = init_drive("null");
     let _ = init_drive("zero");
@@ -172,7 +186,11 @@ pub fn init_drive(name: &str) -> Result<(), &'static str> {
     }
     probe(t[idx].name)?;
     t[idx].ready = true;
-    register_dev(t[idx].dev_name);
+    let name = t[idx].name;
+    let kind = t[idx].kind;
+    let dev_name = t[idx].dev_name;
+    register_dev(dev_name);
+    catalog::publish_drive(name, class_for(kind), true, idx as u32);
     Ok(())
 }
 
