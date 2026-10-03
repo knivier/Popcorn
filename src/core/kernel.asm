@@ -312,6 +312,7 @@ mbi_staging:
 section .text
 global keyboard_handler
 global timer_handler
+extern irq_dispatch
 global syscall_handler_asm
 global read_port
 global write_port
@@ -321,18 +322,50 @@ global cpuid_get_features
 global cpuid_extended_brand
 global rdtsc
 global default_cpu_exception
+global exc_double_fault
+global exc_general_protection
+global exc_page_fault
 
-extern keyboard_handler_main
-extern timer_interrupt_handler
 extern syscall_dispatch
+extern cpu_exception_panic
 
 ; CPU exception vectors 0x00–0x1F: halt if unhandled. Presents a valid gate
 ; so a fault (e.g. #PF) does not re-fault on an empty IDT entry.
 default_cpu_exception:
   cli
-.hang:
+.hang_def:
   hlt
-  jmp .hang
+  jmp .hang_def
+
+; ---- Diagnosable exceptions: dump vector / error / RIP (/ CR2) on COM1 ----
+; Frame on entry to *_common (error-code exceptions):
+;   [rsp+0]=vector, [rsp+8]=error, [rsp+16]=RIP, [rsp+24]=CS, [rsp+32]=RFLAGS
+exc_double_fault:
+  push 8
+  jmp cpu_exception_common
+
+exc_general_protection:
+  push 13
+  jmp cpu_exception_common
+
+exc_page_fault:
+  push 14
+  jmp cpu_exception_common
+
+cpu_exception_common:
+  cli
+  mov rdi, [rsp]          ; vector
+  mov rsi, [rsp + 8]      ; error code
+  mov rdx, [rsp + 16]     ; RIP
+  mov rcx, [rsp + 24]     ; CS
+  mov r8,  [rsp + 32]     ; RFLAGS
+  mov r9, cr2             ; CR2 (meaningful for #PF)
+  and rsp, -16            ; 16-byte align for SysV call
+  sub rsp, 8
+  call cpu_exception_panic
+.hang_exc:
+  hlt
+  jmp .hang_exc
 
 read_port:
   mov rdx, rdi
@@ -368,7 +401,8 @@ keyboard_handler:
   push r14
   push r15
   sub rsp, 8
-  call keyboard_handler_main
+  mov edi, 1
+  call irq_dispatch
   add rsp, 8
   pop r15
   pop r14
@@ -404,7 +438,8 @@ timer_handler:
   push r14
   push r15
   sub rsp, 8
-  call timer_interrupt_handler
+  mov edi, 0
+  call irq_dispatch
   add rsp, 8
   pop r15
   pop r14

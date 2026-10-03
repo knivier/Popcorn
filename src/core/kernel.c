@@ -15,6 +15,8 @@
 #include "../includes/syscall.h"
 #include "../includes/utils.h"
 #include "../includes/keyboard_queue.h"
+#include "../includes/irq.h"
+#include "../includes/device.h"
 #include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -47,6 +49,12 @@ extern unsigned char keyboard_map[128];
 extern void keyboard_handler(void);
 extern void timer_handler(void);
 extern void default_cpu_exception(void);
+extern void exc_double_fault(void);
+extern void exc_general_protection(void);
+extern void exc_page_fault(void);
+void keyboard_handler_main(void);
+extern void exc_general_protection(void);
+extern void exc_page_fault(void);
 extern char read_port(unsigned short port);
 extern void write_port(unsigned short port, unsigned char data);
 
@@ -137,7 +145,7 @@ bool key_queue_pop(uint8_t* out)
 /* Boot .bss: initial kernel stack (asm); RSP0 for TSS. */
 extern char stack_top;
 
-static void idt_set_gate(uint8_t vector, uint64_t handler, uint8_t type_attr, uint8_t ist) {
+void idt_set_gate(uint8_t vector, uint64_t handler, uint8_t type_attr, uint8_t ist) {
     IDT[vector].offset_low = (uint16_t)(handler & 0xFFFFU);
     IDT[vector].selector = KERNEL_CODE_SEGMENT_OFFSET;
     IDT[vector].ist = (unsigned char)(ist & 0x7U);
@@ -212,15 +220,15 @@ void idt_init(void)
     for (uint8_t n = 0; n < 32U; n++) {
         idt_set_gate(n, def, INTERRUPT_GATE, 0U);
     }
-    /* #PF, #DF: use IST1 / IST2 so delivery works if current RSP is unusable. */
-    idt_set_gate(0x0e, def, INTERRUPT_GATE, 1U);
-    idt_set_gate(0x08, def, INTERRUPT_GATE, 2U);
+    /* #DF / #PF / #GP: diagnosable dumps on COM1; IST for #DF/#PF/#GP. */
+    idt_set_gate(0x08, (uint64_t)(uintptr_t)exc_double_fault, INTERRUPT_GATE, 2U);
+    idt_set_gate(0x0d, (uint64_t)(uintptr_t)exc_general_protection, INTERRUPT_GATE, 1U);
+    idt_set_gate(0x0e, (uint64_t)(uintptr_t)exc_page_fault, INTERRUPT_GATE, 1U);
 
-    uint64_t keyboard_address = (uint64_t)(uintptr_t)keyboard_handler;
-    idt_set_gate(0x21, keyboard_address, INTERRUPT_GATE, 0U);
-
-    uint64_t timer_address = (uint64_t)(uintptr_t)timer_handler;
-    idt_set_gate(0x20, timer_address, INTERRUPT_GATE, 0U);
+    /* IRQ0 timer / IRQ1 keyboard via central irq table (not hard-coded gates alone). */
+    irq_init();
+    irq_register(0, timer_interrupt_handler);
+    irq_register(1, keyboard_handler_main);
 
     extern void syscall_handler_asm(void);
     uint64_t syscall_address = (uint64_t)(uintptr_t)syscall_handler_asm;
@@ -288,7 +296,14 @@ void kb_init(void)
     while (read_port(KEYBOARD_STATUS_PORT) & 0x01) {
         (void)read_port(KEYBOARD_DATA_PORT);
     }
-    write_port(0x21, 0xFD);
+    irq_enable(1);
+}
+
+/* Waiters blocked in sys_read on console; woken from IRQ1. */
+static WaitQueue g_console_read_wq;
+
+WaitQueue* console_read_waitqueue(void) {
+    return &g_console_read_wq;
 }
 
 void keyboard_poll_ps2(void) {
@@ -319,7 +334,7 @@ void add_to_history(const char *command) {
     if (command == NULL || command[0] == '\0') {
         return;
     }
-    
+
     // Don't add duplicates of the last command
     if (history_count > 0) {
         bool is_duplicate = true;
@@ -334,11 +349,11 @@ void add_to_history(const char *command) {
             return;
         }
     }
-    
+
     // Add to circular buffer
     unsigned int index = history_count % HISTORY_SIZE;
     strcpy_simple(command_history[index], command);
-    
+
     if (history_count < HISTORY_SIZE) {
         history_count++;
     }
@@ -357,13 +372,13 @@ const char* get_history_command(int offset) {
         unsigned int oldest = history_count % HISTORY_SIZE;
         index = (oldest + offset) % HISTORY_SIZE;
     }
-    
+
     return command_history[index];
 }
 
 /* List of all commands for autocomplete */
 static const char* available_commands[] = {
-    "help", "halp", "hang", "clear", "uptime", "halt", "stop",
+    "help", "halp", "hang", "clear", "uptime", "halt", "stop", "fault",
     "write", "read", "delete", "rm", "mkdir", "go", "back",
     "ls", "search", "cp", "listsys", "sysinfo",
     "mem", "mem -map", "mem -use", "mem -stats", "mem -info", "mem -debug",
@@ -377,20 +392,20 @@ static const char* available_commands[] = {
 /* Parse number from string */
 int parse_number(const char* str, uint32_t* result) {
     if (!str || !result) return 0;
-    
+
     uint32_t num = 0;
     const char* start = str;
-    
+
     while (*str >= '0' && *str <= '9') {
         num = num * 10 + (*str - '0');
         str++;
     }
-    
+
     // Check if we parsed anything and if there are no trailing characters
     if (str == start || (*str != '\0' && *str != ' ')) {
         return 0;
     }
-    
+
     *result = num;
     return 1;
 }
@@ -398,15 +413,15 @@ int parse_number(const char* str, uint32_t* result) {
 /* Autocomplete command */
 void autocomplete_command(char *buffer, unsigned int *index) {
     if (*index == 0) return;
-    
+
     const char *match = NULL;
     int match_count = 0;
-    
+
     // Find matching commands
     for (int i = 0; available_commands[i] != NULL; i++) {
         const char *cmd = available_commands[i];
         bool matches = true;
-        
+
         // Check if command starts with buffer content
         for (unsigned int j = 0; j < *index; j++) {
             if (cmd[j] != buffer[j]) {
@@ -414,13 +429,13 @@ void autocomplete_command(char *buffer, unsigned int *index) {
                 break;
             }
         }
-        
+
         if (matches) {
             match = cmd;
             match_count++;
         }
     }
-    
+
     // If exactly one match, autocomplete it
     if (match_count == 1) {
         size_t match_len = strlen_simple(match);
@@ -438,6 +453,7 @@ void keyboard_handler_main(void) {
     if (status & 0x01) {
         unsigned char keycode = read_port(KEYBOARD_DATA_PORT);
         key_queue_push(keycode);
+        scheduler_wake_all(&g_console_read_wq);
     }
     /* Master PIC: End of interrupt */
     write_port(0x20, 0x20);
@@ -547,6 +563,13 @@ void execute_command(const char *command) {
         
         console_print_color("  stop", CONSOLE_PROMPT_COLOR);
         console_println(" - Shuts down the system");
+
+        console_print_color("  fault", CONSOLE_PROMPT_COLOR);
+        console_println(" - Trigger #PF (serial dump + halt)");
+    } else if (strcmp(command, "fault") == 0) {
+        console_println_color("Triggering page fault...", CONSOLE_WARNING_COLOR);
+        /* Unmapped canonical VA (PML4[1]); dumps #PF + CR2 on COM1 then halts. */
+        *(volatile uint32_t*)(uintptr_t)(1ULL << 39) = 0x41414141u;
     } else if (strcmp(command, "hang") == 0) {
         console_print_warning("System hanging...");
         spinner_pop_func(current_loc);
@@ -1128,9 +1151,21 @@ void kmain(void) {
     uint64_t last_uefi_poll_tick = 0;
 
     boot_serial_putc('L');
-    /* UEFI/QEMU: sti delivers a latent IRQ and hangs; drive PIT via polling instead. */
-    timer_enable_poll();
+    /*
+     * Timer mode is chosen in init_transition_to_console():
+     * UEFI → poll-only PIT; GRUB → IRQ0 PIT. Do not force poll here.
+     */
+    if (!timer_is_poll_mode()) {
+        __asm__ volatile("sti" ::: "memory");
+    }
+    scheduler_end_bootstrap();
     boot_serial_putc('M');
+
+#ifdef POPCORN_TEST_PF
+    /* CI: force a page fault after IDT is live; expect #PF dump on COM1/debugcon.
+     * PML4[1] is unmapped (VA bit 39) on both GRUB and UEFI page tables. */
+    *(volatile uint32_t*)(uintptr_t)(1ULL << 39) = 0x50465046u;
+#endif
 
     while (1) {
         unsigned char keycode;

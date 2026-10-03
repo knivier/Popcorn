@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nasm clang lld qemu-system-x86 ovmf mtools dosfstools \
+            grub-pc-bin grub-common xorriso
+
+      - name: Build kernel + UEFI image
+        run: ./scripts/core.sh all
+
+      - name: UEFI + GRUB ISO QEMU smoke
+        run: ./scripts/core.sh test-uefi

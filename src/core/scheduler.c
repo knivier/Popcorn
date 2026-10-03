@@ -4,6 +4,7 @@
 #include "../includes/console.h"
 #include "../includes/memory.h"
 #include "../includes/utils.h"
+#include "../includes/device.h"
 #include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -58,6 +59,115 @@ static bool bootstrap_on_kmain_stack(void) {
            !idle_cpu_has_run;
 }
 
+#define TASK_POOL_CAP 32u
+static TaskStruct g_task_pool[TASK_POOL_CAP];
+static uint32_t g_task_pool_index;
+
+void scheduler_end_bootstrap(void) {
+    /*
+     * Entering the interactive shell: allow ticks/yields. The idle TCB becomes the
+     * carrier for kmain's context on the first real preempt (see task_switch fake_idle).
+     */
+    idle_cpu_has_run = true;
+}
+
+static void ready_remove(TaskStruct* task) {
+    if (!task) {
+        return;
+    }
+    int p = (int)task->priority;
+    if (p < PRIORITY_IDLE || p > PRIORITY_REALTIME) {
+        return;
+    }
+    if (task->prev) {
+        task->prev->next = task->next;
+    } else if (scheduler.ready_queue[p] == task) {
+        scheduler.ready_queue[p] = task->next;
+    }
+    if (task->next) {
+        task->next->prev = task->prev;
+    }
+    task->next = NULL;
+    task->prev = NULL;
+}
+
+static void ready_add(TaskStruct* task) {
+    if (!task) {
+        return;
+    }
+    int p = (int)task->priority;
+    if (p < PRIORITY_IDLE || p > PRIORITY_REALTIME) {
+        return;
+    }
+    task->next = scheduler.ready_queue[p];
+    if (scheduler.ready_queue[p]) {
+        scheduler.ready_queue[p]->prev = task;
+    }
+    scheduler.ready_queue[p] = task;
+    task->prev = NULL;
+}
+
+static void wake_expired_sleepers(void) {
+    uint64_t now = timer_get_ticks();
+    for (uint32_t i = 0; i < g_task_pool_index; i++) {
+        TaskStruct* t = &g_task_pool[i];
+        if (t->state == TASK_STATE_SLEEPING && now >= t->sleep_until_tick) {
+            t->state = TASK_STATE_READY;
+            ready_add(t);
+        }
+    }
+}
+
+void scheduler_block(WaitQueue* wq) {
+    TaskStruct* t = scheduler.current_task;
+    if (!t || !wq || bootstrap_on_kmain_stack()) {
+        return;
+    }
+    ready_remove(t);
+    t->state = TASK_STATE_BLOCKED;
+    t->wait_next = wq->head;
+    wq->head = t;
+    scheduler_schedule();
+}
+
+void scheduler_wake_one(WaitQueue* wq) {
+    if (!wq || !wq->head) {
+        return;
+    }
+    TaskStruct* t = wq->head;
+    wq->head = t->wait_next;
+    t->wait_next = NULL;
+    if (t->state == TASK_STATE_BLOCKED) {
+        t->state = TASK_STATE_READY;
+        ready_add(t);
+    }
+}
+
+void scheduler_wake_all(WaitQueue* wq) {
+    if (!wq) {
+        return;
+    }
+    while (wq->head) {
+        scheduler_wake_one(wq);
+    }
+}
+
+void scheduler_sleep_ms(uint32_t ms) {
+    TaskStruct* t = scheduler.current_task;
+    if (!t || bootstrap_on_kmain_stack()) {
+        return;
+    }
+    if (ms == 0) {
+        scheduler_yield();
+        return;
+    }
+    ready_remove(t);
+    t->sleep_until_tick = timer_get_ticks() + timer_ms_to_ticks(ms);
+    t->state = TASK_STATE_SLEEPING;
+    t->wait_next = NULL;
+    scheduler_schedule();
+}
+
 // External functions
 extern uint64_t timer_get_ticks(void);
 extern unsigned char read_port(unsigned short port);
@@ -71,8 +181,12 @@ extern void write_port(unsigned short port, unsigned char data);
 #define SERIAL_PORT 0x3F8
 
 static void serial_putc(char c) {
-    // Wait for serial port to be ready
-    while ((read_port(SERIAL_PORT + 5) & 0x20) == 0);
+    /* Bound wait — bare COM1 with no backend must not wedge boot. */
+    for (int i = 0; i < 100000; i++) {
+        if (read_port(SERIAL_PORT + 5) & 0x20) {
+            break;
+        }
+    }
     write_port(SERIAL_PORT, c);
 }
 
@@ -82,15 +196,24 @@ static void serial_print(const char* str) {
     }
 }
 
+static TaskStruct* task_pool_alloc(void) {
+    if (g_task_pool_index >= TASK_POOL_CAP) {
+        console_println_color("Task pool exhausted", CONSOLE_ERROR_COLOR);
+        serial_print("ERROR: Task pool exhausted\n");
+        return NULL;
+    }
+    return &g_task_pool[g_task_pool_index++];
+}
+
 // Stack management functions
 void* task_allocate_stack(uint64_t size) {
     (void)size;  // Suppress unused parameter warning
     
     // Use static stack allocation to avoid memory manager issues during early boot
-    static char static_stacks[32][16384];  // 32 tasks, 16KB each
+    static char static_stacks[TASK_POOL_CAP][16384];  // 32 tasks, 16KB each
     static uint32_t stack_index = 0;
     
-    if (stack_index >= 32) {
+    if (stack_index >= TASK_POOL_CAP) {
         return NULL;
     }
     
@@ -167,6 +290,10 @@ void scheduler_tick(void) {
     if (!scheduler.scheduler_active || !scheduler.current_task) {
         return;
     }
+
+    wake_expired_sleepers();
+
+    /* Until scheduler_end_bootstrap(), skip preempt — still on kmain boot stack. */
     if (bootstrap_on_kmain_stack()) {
         return;
     }
@@ -213,17 +340,10 @@ TaskStruct* scheduler_create_task(void (*function)(void), void* data, TaskPriori
         return NULL;
     }
 
-    // Allocate task structure (simplified - in real system would use kmalloc)
-    static TaskStruct task_pool[32];
-    static uint32_t task_pool_index = 0;
-
-    if (task_pool_index >= 32) {
-        console_println_color("Task pool exhausted", CONSOLE_ERROR_COLOR);
-        serial_print("ERROR: Task pool exhausted\n");
+    TaskStruct* task = task_pool_alloc();
+    if (!task) {
         return NULL;
     }
-
-    TaskStruct* task = &task_pool[task_pool_index++];
 
     // Initialize task
     task_init(task, function, data, priority);
@@ -565,6 +685,9 @@ void task_init(TaskStruct* task, void (*function)(void), void* data, TaskPriorit
     task->prev = NULL;
 
     task->address_space.pml4_phys = g_kernel_pml4_phys;
+    task->sleep_until_tick = 0;
+    task->wait_next = NULL;
+    fd_table_init(task->fds);
 }
 
 // Set up initial context for a new task
@@ -725,10 +848,13 @@ void task_exit(void) {
 // Idle task - runs when no other tasks are ready
 void idle_task(void) {
     idle_cpu_has_run = true;
-    // Very simple idle loop - just increment a counter
-    static int counter = 0;
     while (1) {
-        counter++;
+        /* UEFI poll path: sti;hlt can hang on latent IRQ — pause and let timer_poll run. */
+        if (timer_is_poll_mode()) {
+            __asm__ volatile("pause");
+        } else {
+            __asm__ volatile("sti; hlt" ::: "memory");
+        }
     }
 }
 
@@ -769,17 +895,10 @@ TaskStruct* scheduler_create_task_with_pid(void (*function)(void), void* data, T
         return NULL;
     }
 
-    // Allocate task structure (simplified - in real system would use kmalloc)
-    static TaskStruct task_pool[32];
-    static uint32_t task_pool_index = 0;
-
-    if (task_pool_index >= 32) {
-        console_println_color("Task pool exhausted", CONSOLE_ERROR_COLOR);
-        serial_print("ERROR: Task pool exhausted\n");
+    TaskStruct* task = task_pool_alloc();
+    if (!task) {
         return NULL;
     }
-
-    TaskStruct* task = &task_pool[task_pool_index++];
 
     // Initialize task
     task_init(task, function, data, priority);

@@ -98,13 +98,13 @@ These work as direct port I/O or firmware calls. v0.7 moves them into the Rust d
 Verified **not** done. These are the gate into v0.7, not a separate multi-month freeze. Land them in C (or the first Rust crate) **before** binding real devices.
 
 - [ ] Mark releases pre-release until v0.7 exit criteria
-- [ ] Keep `test-uefi` green on GRUB ISO and UEFI img
+- [x] Keep `test-uefi` green on GRUB ISO and UEFI img
 - [ ] Boot on real hardware (T440p / Ventoy USB, Secure Boot off)
-- [ ] Diagnosable CPU exceptions — `#PF`, `#GP`, `#DF` dump CR2 / error / RIP on COM1, then halt. Today `default_cpu_exception` in `src/core/kernel.asm` is `cli; hlt` with IST already wired for `#PF`/`#DF` but no dump
-- [ ] Stop forcing poll-only time in `kmain`: `init.c` enables IRQ PIT on the GRUB path, then `kernel.c` always calls `timer_enable_poll()`
-- [ ] One task/stack allocator — `scheduler_create_task` and `scheduler_create_task_with_pid` each have a **separate** `static TaskStruct task_pool[32]`
-- [ ] Scheduler bootstrap: `bootstrap_on_kmain_stack` still skips ticks until idle has run
-- [ ] CI: GitHub Actions running `./scripts/core.sh build` + `test-uefi`
+- [x] Diagnosable CPU exceptions — `#PF`, `#GP`, `#DF` dump CR2 / error / RIP on COM1, then halt. Today `default_cpu_exception` in `src/core/kernel.asm` is `cli; hlt` with IST already wired for `#PF`/`#DF` but no dump
+- [x] Stop forcing poll-only time in `kmain`: `init.c` enables IRQ PIT on the GRUB path, then `kernel.c` always calls `timer_enable_poll()`
+- [x] One task/stack allocator — `scheduler_create_task` and `scheduler_create_task_with_pid` each have a **separate** `static TaskStruct task_pool[32]`
+- [x] Scheduler bootstrap: `bootstrap_on_kmain_stack` still skips ticks until idle has run
+- [x] CI: GitHub Actions running `./scripts/core.sh build` + `test-uefi`
 
 **Exit criteria:** `#PF` prints a useful serial dump in QEMU; GRUB path can use IRQ time; CI green.
 
@@ -112,15 +112,15 @@ Verified **not** done. These are the gate into v0.7, not a separate multi-month 
 
 ## Phase 2 — Driver-facing kernel (overlap with v0.7)
 
-Do **not** build the driver network on the current syscall stubs (`sys_open` always returns 3; `sys_write` only talks to `console_putchar`; `sys_sleep` prints and returns). Finish the subset below; full POSIX and ring 3 can wait.
+Do **not** build the driver network until this subset is in place. Finish below; full POSIX and ring 3 can wait.
 
 ### Must land with v0.7
 
-- [ ] Central IRQ table: `irq_register` / `irq_enable` / `irq_disable` (replaces hard-coded `idt_set_gate(0x20/0x21)` in `kernel.c`)
-- [ ] Idle `sti; hlt` on paths that are not stuck in UEFI poll mode
-- [ ] `timer_get_ticks()` + `SYS_GETTIME` from one clock source
-- [ ] Per-task fd table; `SYS_OPEN` / `READ` / `WRITE` / `IOCTL` go through `dev_*`, not the console
-- [ ] `SYS_SLEEP` / `SYS_YIELD` on scheduler wait queues (IRQ wake)
+- [x] Central IRQ table: `irq_register` / `irq_enable` / `irq_disable` (replaces hard-coded `idt_set_gate(0x20/0x21)` in `kernel.c`)
+- [x] Idle `sti; hlt` on paths that are not stuck in UEFI poll mode
+- [x] `timer_get_ticks()` + `SYS_GETTIME` from one clock source
+- [x] Per-task fd table; `SYS_OPEN` / `READ` / `WRITE` / `IOCTL` go through `dev_*`, not the console
+- [x] `SYS_SLEEP` / `SYS_YIELD` on scheduler wait queues (IRQ wake)
 
 ### Can slip to v0.8
 

@@ -12,6 +12,7 @@
 #include "../includes/dolphin_pop.h"
 #include "../includes/spinner_pop.h"
 #include "../includes/syscall.h"
+#include "../includes/device.h"
 #include "../includes/utils.h"
 #include "../includes/boot_fb.h"
 #include <stddef.h>
@@ -229,6 +230,7 @@ void init_show_timer_info(void) {
 void init_show_scheduler_info(void) {
     init_draw_progress_bar(3, total_init_steps, "Initializing Scheduler");
 
+    device_init();
     scheduler_init();
 
     console_set_cursor(0, 18);

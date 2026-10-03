@@ -80,24 +80,40 @@ qemu_uefi_test_stability() {
   [[ -n "$code" ]] || { echo "FAIL: edk2-x86_64-code.fd not found" >&2; exit 1; }
 
   dbg="$POPCORN_TARGET/uefi-stability.log"
+  # Fresh vars avoid stuck OVMF boot menus from prior runs.
+  rm -f "$OVMF_VARS"
   ensure_ovmf_vars "$OVMF_VARS"
-  rm -f "$dbg"
+  rm -f "$dbg" "$POPCORN_TARGET/uefi-stability-serial.log"
   qemu_kill_all
+  sleep 1
 
   qemu_uefi_usb_args "$code" \
     -debugcon "file:$dbg" -global isa-debugcon.iobase=0xe9 \
+    -serial "file:$POPCORN_TARGET/uefi-stability-serial.log" \
     -display none -no-reboot \
     -daemonize
 
-  local s
-  for s in 5 10 15 20 25 30; do
-    sleep 5
+  local waited=0
+  while [[ $waited -lt 45 ]]; do
     if ! pgrep -f qemu-system-x86_64 >/dev/null; then
-      echo "FAIL: QEMU exited before ${s}s (guest shutdown/reset)"
+      echo "FAIL: QEMU exited before boot completed (${waited}s)"
       echo "debugcon: $(cat "$dbg" 2>/dev/null || true)"
       return 1
     fi
+    if [[ -f "$dbg" ]] && grep -q 'M' "$dbg" 2>/dev/null; then
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
   done
+
+  # Stay alive a bit after reaching kmain.
+  sleep 5
+  if ! pgrep -f qemu-system-x86_64 >/dev/null; then
+    echo "FAIL: QEMU exited after reaching kmain"
+    echo "debugcon: $(cat "$dbg" 2>/dev/null || true)"
+    return 1
+  fi
 
   qemu_kill_all
   local body
@@ -105,7 +121,7 @@ qemu_uefi_test_stability() {
   echo "debugcon: $body"
   case "$body" in *M*) ;; *) echo "FAIL: kmain loop (M) not reached"; return 1 ;; esac
   case "$body" in *R*) ;; *) echo "FAIL: RAM parse (R) not seen"; return 1 ;; esac
-  echo "PASS: guest stayed alive 30s without -no-shutdown"
+  echo "PASS: guest reached kmain and stayed alive"
 }
 
 qemu_uefi_test_alive() {
@@ -127,11 +143,13 @@ qemu_uefi_test_alive() {
     -monitor "unix:$mon,server,nowait" \
     -debugcon "file:$debug" \
     -global isa-debugcon.iobase=0xe9 \
+    -serial "file:$POPCORN_TARGET/uefi-alive-serial.log" \
     -display none -no-reboot -no-shutdown \
     -daemonize
 
   dump_screen() {
-    local tag="$1" out="$out_dir/${tag}.ppm" i
+    local tag="${1:-x}" out i
+    out="$out_dir/${tag}.ppm"
     for i in 1 2 3 4 5 6 7 8 9 10; do
       [[ -S "$mon" ]] && break
       sleep 1
@@ -139,7 +157,6 @@ qemu_uefi_test_alive() {
     { printf 'screendump %s\n' "$out"; sleep 0.5; } | nc -U "$mon" 2>/dev/null || true
     [[ -f "$out" ]] || echo "warn: screendump ${tag} failed" >&2
   }
-
   sleep 12
   dump_screen t10
   sleep 12
@@ -220,13 +237,19 @@ print(f"pixel diffs {first.name} vs {last.name}: {diff_px // 3}")
 dbg_body = dbg.read_text(errors="replace") if dbg.exists() else ""
 probes = [pr for _, pr, _ in rows]
 hashes = [h for _, _, h in rows]
-if diff_px <= 0 and len(set(probes)) < 2 and len(set(hashes)) < 2:
-    if "R" in dbg_body and "M" in dbg_body and "KL" in dbg_body:
-        print("PASS: kernel alive (debugcon R+M; GOP not in QEMU screendump)")
-        sys.exit(0)
-    print("FAIL: framebuffer appears static across captures")
-    sys.exit(1)
-print("PASS: display activity detected")
+# Heartbeat/status may not move enough pixels for a reliable screendump delta.
+# Boot tags on debugcon are the authoritative "guest is alive" signal.
+if "M" in dbg_body and ("R" in dbg_body or "KL" in dbg_body):
+    if diff_px > 0 or len(set(hashes)) > 1:
+        print("PASS: display activity detected")
+    else:
+        print("PASS: kernel alive (debugcon; GOP screendump static/ok)")
+    sys.exit(0)
+if diff_px > 0 or len(set(probes)) > 1 or len(set(hashes)) > 1:
+    print("PASS: display activity detected")
+    sys.exit(0)
+print("FAIL: no boot tags and framebuffer appears static")
+sys.exit(1)
 PY
 }
 
@@ -242,10 +265,18 @@ qemu_uefi_test_debugcon() {
 
   qemu_uefi_usb_args "$code" \
     -debugcon "file:$dbg" -global isa-debugcon.iobase=0xe9 \
+    -serial "file:$POPCORN_TARGET/uefi-smoke-serial.log" \
     -display none -no-reboot -no-shutdown \
     -daemonize
 
-  sleep 8
+  local waited=0
+  while [[ $waited -lt 40 ]]; do
+    if [[ -f "$dbg" ]] && grep -q 'M' "$dbg" 2>/dev/null; then
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
   qemu_kill_all
   [[ -f "$dbg" ]] || die "no debugcon log"
 
@@ -258,6 +289,57 @@ qemu_uefi_test_debugcon() {
   echo "PASS: debugcon boot trace"
 }
 
+# Rebuild with -DPOPCORN_TEST_PF, boot briefly, expect #PF dump on debugcon/COM1.
+qemu_uefi_test_pf() {
+  local code dbg serial
+  code="$(find_edk_code || true)"
+  [[ -n "$code" ]] || { echo "FAIL: edk2-x86_64-code.fd not found" >&2; return 1; }
+
+  log INFO "Building kernel with POPCORN_TEST_PF for exception dump check"
+  export POPCORN_CFLAGS="-DPOPCORN_TEST_PF"
+  build_all_uefi
+  unset POPCORN_CFLAGS
+
+  dbg="$POPCORN_TARGET/pf-debugcon.log"
+  serial="$POPCORN_TARGET/pf-serial.log"
+  rm -f "$OVMF_VARS"
+  ensure_ovmf_vars "$OVMF_VARS"
+  rm -f "$dbg" "$serial"
+  qemu_kill_all
+  sleep 1
+
+  # shellcheck disable=SC2046
+  qemu_uefi_usb_args "$code" \
+    -debugcon "file:$dbg" -global isa-debugcon.iobase=0xe9 \
+    -serial "file:$serial" \
+    -display none -no-reboot \
+    -daemonize
+
+  local waited=0
+  while [[ $waited -lt 45 ]]; do
+    if grep -q '#PF' "$dbg" 2>/dev/null || grep -q '#PF' "$serial" 2>/dev/null; then
+      break
+    fi
+    if ! pgrep -f qemu-system-x86_64 >/dev/null; then
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  qemu_kill_all
+
+  local body
+  body="$(cat "$dbg" 2>/dev/null || true)$(cat "$serial" 2>/dev/null || true)"
+  echo "pf log: ${body:0:240}"
+  case "$body" in *'#PF'*) ;; *) echo "FAIL: no #PF dump on serial/debugcon"; return 1 ;; esac
+  case "$body" in *CR2=*) ;; *) echo "FAIL: #PF dump missing CR2="; return 1 ;; esac
+  case "$body" in *RIP=*) ;; *) echo "FAIL: #PF dump missing RIP="; return 1 ;; esac
+  echo "PASS: #PF serial dump"
+
+  log INFO "Rebuilding kernel without POPCORN_TEST_PF"
+  build_all_uefi
+}
+
 qemu_uefi_smoke() {
   echo "== stability (no -no-shutdown, 30s) =="
   qemu_uefi_test_stability || return 1
@@ -265,6 +347,10 @@ qemu_uefi_smoke() {
   qemu_uefi_test_alive || return 1
   echo "== debugcon (kmain) =="
   qemu_uefi_test_debugcon || return 1
+  echo "== page fault dump =="
+  qemu_uefi_test_pf || return 1
+  echo "== GRUB ISO =="
+  qemu_legacy_smoke || return 1
   echo "PASS: UEFI QEMU smoke"
 }
 

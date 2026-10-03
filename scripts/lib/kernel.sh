@@ -93,14 +93,15 @@ compile_asm() {
 
 compile_c() {
   log INFO "Compiling $1"
+  # shellcheck disable=SC2086
   if [[ "${CC:-}" == "x86_64-elf-gcc" ]]; then
     "$CC" -m64 -c "$POPCORN_SRC/$1" -o "$2" -Wall -Wextra -ffreestanding -fno-stack-protector \
-      -mcmodel=large -mno-red-zone >>"$BUILD_LOG" 2>&1 || die "C compile failed for $1"
+      -mcmodel=large -mno-red-zone ${POPCORN_CFLAGS:-} >>"$BUILD_LOG" 2>&1 || die "C compile failed for $1"
     return 0
   fi
   "$CC" -target "$TARGET_TRIPLE" -m64 -c "$POPCORN_SRC/$1" -o "$2" \
     -Wall -Wextra -ffreestanding -fno-stack-protector -mcmodel=large -mno-red-zone \
-    >>"$BUILD_LOG" 2>&1 || die "C compile failed for $1"
+    ${POPCORN_CFLAGS:-} >>"$BUILD_LOG" 2>&1 || die "C compile failed for $1"
 }
 
 link_kernel() {
@@ -138,6 +139,9 @@ build_kernel() {
   compile_c "pops/dolphin_pop.c" "$OBJ_DIR/dolphin_pop.o"
   compile_c "core/timer.c" "$OBJ_DIR/timer.o"
   compile_c "core/scheduler.c" "$OBJ_DIR/scheduler.o"
+  compile_c "core/exception.c" "$OBJ_DIR/exception.o"
+  compile_c "core/irq.c" "$OBJ_DIR/irq.o"
+  compile_c "core/device.c" "$OBJ_DIR/device.o"
   compile_c "core/memory.c" "$OBJ_DIR/memory.o"
   compile_c "core/vmm.c" "$OBJ_DIR/vmm.o"
   compile_c "core/init.c" "$OBJ_DIR/init.o"
@@ -150,7 +154,8 @@ build_kernel() {
     "$OBJ_DIR/halt_pop.o" "$OBJ_DIR/filesystem_pop.o" "$OBJ_DIR/multiboot2.o"
     "$OBJ_DIR/uefi_input.o" "$OBJ_DIR/sysinfo_pop.o" "$OBJ_DIR/memory_pop.o"
     "$OBJ_DIR/cpu_pop.o" "$OBJ_DIR/dolphin_pop.o" "$OBJ_DIR/timer.o"
-    "$OBJ_DIR/scheduler.o" "$OBJ_DIR/memory.o" "$OBJ_DIR/vmm.o"
+    "$OBJ_DIR/scheduler.o" "$OBJ_DIR/exception.o" "$OBJ_DIR/irq.o" "$OBJ_DIR/device.o"
+    "$OBJ_DIR/memory.o" "$OBJ_DIR/vmm.o"
     "$OBJ_DIR/init.o" "$OBJ_DIR/syscall.o"
   )
   for obj in "${objs[@]}"; do
@@ -200,6 +205,44 @@ run_legacy_qemu() {
   [[ -f "$ISO_OUT" ]] || create_legacy_iso
   log INFO "Starting QEMU (legacy ISO): RAM=${QEMU_MEMORY}MB cores=${QEMU_CORES}"
   qemu-system-x86_64 -cdrom "$ISO_OUT" -cpu qemu64 -m "$QEMU_MEMORY" -smp "$QEMU_CORES" -serial stdio
+}
+
+# GRUB Multiboot2 ISO smoke: reach kmain (debugcon 'M') under IRQ PIT path.
+qemu_legacy_smoke() {
+  local dbg serial
+  [[ -f "$KERNEL_OUT" ]] || build_kernel
+  create_legacy_iso
+  dbg="$POPCORN_TARGET/legacy-smoke-debugcon.log"
+  serial="$POPCORN_TARGET/legacy-smoke-serial.log"
+  rm -f "$dbg" "$serial"
+  echo "== GRUB ISO (Multiboot2) =="
+  qemu_kill_all || true
+  qemu-system-x86_64 \
+    -cdrom "$ISO_OUT" -cpu qemu64 -m "${QEMU_MEMORY:-512}" \
+    -debugcon "file:$dbg" -global isa-debugcon.iobase=0xe9 \
+    -serial "file:$serial" \
+    -display none -no-reboot -no-shutdown \
+    -daemonize
+
+  local waited=0
+  while [[ $waited -lt 45 ]]; do
+    if [[ -f "$dbg" ]] && grep -q 'M' "$dbg" 2>/dev/null; then
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  qemu_kill_all || true
+
+  local body
+  body="$(cat "$dbg" 2>/dev/null || true)$(cat "$serial" 2>/dev/null || true)"
+  echo "legacy debugcon/serial: ${body:0:80}"
+  case "$body" in *M*) ;; *)
+    echo "FAIL: GRUB ISO did not reach kmain (no debugcon M)"
+    return 1
+    ;;
+  esac
+  echo "PASS: GRUB ISO reached kmain"
 }
 
 show_logs() {

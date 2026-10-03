@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "vmm.h"
+#include "device.h"
 
 // Task states
 typedef enum {
@@ -97,7 +98,17 @@ typedef struct task_struct {
 
     /* Per-task translation root; default is boot kernel PML4 (identity map). */
     AddressSpace address_space;
+
+    /* Append-only: keep offsetof(context)/address_space stable for context_switch.asm */
+    uint64_t sleep_until_tick;
+    struct task_struct* wait_next;
+    FileDesc fds[FD_MAX];
 } TaskStruct;
+
+/* Intrusive wait queue (tasks linked via wait_next). */
+typedef struct WaitQueue {
+    TaskStruct* head;
+} WaitQueue;
 
 // Scheduler state
 typedef struct {
@@ -124,6 +135,14 @@ void scheduler_print_tasks(void);
 void scheduler_kill_all_except_idle(void);
 uint32_t scheduler_get_task_count(void);
 TaskStruct* scheduler_create_task_with_pid(void (*function)(void), void* data, TaskPriority priority, uint32_t custom_pid);
+/* After init: idle TCB may carry kmain/shell context; allow tick-driven schedule. */
+void scheduler_end_bootstrap(void);
+
+/* Block current task on wq until irq/timer wake; sleep_ms uses tick deadline. */
+void scheduler_block(WaitQueue* wq);
+void scheduler_wake_one(WaitQueue* wq);
+void scheduler_wake_all(WaitQueue* wq);
+void scheduler_sleep_ms(uint32_t ms);
 
 // Task management
 void task_init(TaskStruct* task, void (*function)(void), void* data, TaskPriority priority);

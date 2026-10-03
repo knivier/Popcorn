@@ -5,6 +5,7 @@
 #include "../includes/scheduler.h"
 #include "../includes/timer.h"
 #include "../includes/utils.h"
+#include "../includes/device.h"
 #include <stddef.h>
 
 // Global system call table
@@ -13,6 +14,14 @@ static uint32_t syscall_count = 0;
 
 // Current process context (simplified for now)
 static uint32_t current_pid = 1;
+
+static FileDesc* current_fds(void) {
+    TaskStruct* t = scheduler_get_current_task();
+    if (!t) {
+        return NULL;
+    }
+    return t->fds;
+}
 
 // Initialize system call interface
 void syscall_init(void) {
@@ -154,69 +163,53 @@ int64_t sys_read(syscall_context_t* ctx) {
     int fd = (int)ctx->rdi;
     void* buf = (void*)ctx->rsi;
     size_t count = (size_t)ctx->rdx;
-    
-    // Suppress unused variable warnings for now
-    (void)buf;
-    (void)count;
-    
-    // Simplified: read from console for now
-    if (fd == 0) { // stdin
-        // This would normally read from user input
-        // For now, return 0 (no data available)
-        return 0;
+    FileDesc* fds = current_fds();
+    Device* dev = fd_get(fds, fd);
+    if (!dev || !dev->ops || !dev->ops->read || !buf) {
+        return SYSCALL_EINVAL;
     }
-    
-    return SYSCALL_EINVAL;
+    return dev->ops->read(dev, buf, count);
 }
 
 int64_t sys_write(syscall_context_t* ctx) {
     int fd = (int)ctx->rdi;
     const void* buf = (const void*)ctx->rsi;
     size_t count = (size_t)ctx->rdx;
-    
-    // Validate buffer pointer (basic check - in real kernel would check user space)
-    if (!buf) {
+    FileDesc* fds = current_fds();
+    Device* dev = fd_get(fds, fd);
+    if (!dev || !dev->ops || !dev->ops->write || !buf) {
         return SYSCALL_EINVAL;
     }
-    
-    // Limit maximum write size to prevent DoS
     if (count > 4096) {
         return SYSCALL_EINVAL;
     }
-    
-    // Simplified: write to console for now
-    if (fd == 1 || fd == 2) { // stdout or stderr
-        const char* str = (const char*)buf;
-        for (size_t i = 0; i < count; i++) {
-            console_putchar(str[i]);
-        }
-        return count;
-    }
-    
-    return SYSCALL_EINVAL;
+    return dev->ops->write(dev, buf, count);
 }
 
 int64_t sys_open(syscall_context_t* ctx) {
     const char* pathname = (const char*)ctx->rdi;
     int flags = (int)ctx->rsi;
-    
-    // Suppress unused variable warning for now
-    (void)flags;
-    
-    // Simplified file opening
-    console_print_color("Opening file: ", CONSOLE_INFO_COLOR);
-    console_println_color(pathname, CONSOLE_FG_COLOR);
-    
-    // Return a fake file descriptor
-    return 3; // Start from 3 (0,1,2 are stdin,stdout,stderr)
+    FileDesc* fds = current_fds();
+    if (!pathname || !fds) {
+        return SYSCALL_EINVAL;
+    }
+    Device* dev = device_find(pathname);
+    if (!dev) {
+        return SYSCALL_ENOENT;
+    }
+    int fd = fd_alloc(fds, dev, (uint32_t)flags);
+    if (fd < 0) {
+        return SYSCALL_ENOMEM;
+    }
+    return fd;
 }
 
 int64_t sys_close(syscall_context_t* ctx) {
     int fd = (int)ctx->rdi;
-    console_print_color("Closing file descriptor: ", CONSOLE_INFO_COLOR);
-    char buffer[16];
-    int_to_str(fd, buffer);
-    console_println_color(buffer, CONSOLE_INFO_COLOR);
+    FileDesc* fds = current_fds();
+    if (!fds || fd_close(fds, fd) != 0) {
+        return SYSCALL_EINVAL;
+    }
     return SYSCALL_SUCCESS;
 }
 
@@ -437,22 +430,19 @@ int64_t sys_munmap(syscall_context_t* ctx) {
 }
 
 int64_t sys_gettime(syscall_context_t* ctx) {
-    (void)ctx; // Suppress unused parameter warning
-    return timer_get_uptime_ms();
+    (void)ctx;
+    /* Single clock: PIT ticks via timer_get_ticks → ms. */
+    return (int64_t)timer_get_uptime_ms();
 }
 
 int64_t sys_sleep(syscall_context_t* ctx) {
     uint32_t ms = (uint32_t)ctx->rdi;
-    console_print_color("Sleep for ", CONSOLE_INFO_COLOR);
-    char buffer[16];
-    int_to_str(ms, buffer);
-    console_print_color(buffer, CONSOLE_INFO_COLOR);
-    console_println_color(" ms", CONSOLE_INFO_COLOR);
+    scheduler_sleep_ms(ms);
     return SYSCALL_SUCCESS;
 }
 
 int64_t sys_yield(syscall_context_t* ctx) {
-    (void)ctx; // Suppress unused parameter warning
+    (void)ctx;
     scheduler_yield();
     return SYSCALL_SUCCESS;
 }
@@ -548,58 +538,11 @@ int64_t sys_ioctl(syscall_context_t* ctx) {
     int fd = (int)ctx->rdi;
     uint64_t request = ctx->rsi;
     void* argp = (void*)ctx->rdx;
-    
-    // For now, implement a simplified ioctl that handles basic device operations
-    // In a real implementation, this would:
-    // - Route to appropriate device driver based on fd
-    // - Handle device-specific commands
-    // - Validate permissions
-    // - Handle different device types (TTY, network, etc.)
-    
-    // Handle console/TTY operations (fd 0, 1, 2)
-    if (fd >= 0 && fd <= 2) {
-        switch (request) {
-            case 0x5401: // TCGETS - Get terminal attributes
-                console_println_color("Ioctl: TCGETS (get terminal attributes)", CONSOLE_INFO_COLOR);
-                return SYSCALL_SUCCESS;
-                
-            case 0x5402: // TCSETS - Set terminal attributes
-                console_println_color("Ioctl: TCSETS (set terminal attributes)", CONSOLE_INFO_COLOR);
-                return SYSCALL_SUCCESS;
-                
-            case 0x540B: // TIOCGWINSZ - Get window size
-                if (argp) {
-                    // Validate pointer before writing (basic check)
-                    // In real kernel, would verify argp is in user space
-                    uint16_t* winsize = (uint16_t*)argp;
-                    winsize[0] = 80;  // rows
-                    winsize[1] = 25;  // cols
-                    winsize[2] = 0;   // x pixels (not used)
-                    winsize[3] = 0;   // y pixels (not used)
-                }
-                console_println_color("Ioctl: TIOCGWINSZ (get window size)", CONSOLE_INFO_COLOR);
-                return SYSCALL_SUCCESS;
-                
-            default:
-                console_print_color("Ioctl: Unknown request ", CONSOLE_WARNING_COLOR);
-                char buffer[16];
-                int_to_str((int)request, buffer);
-                console_println_color(buffer, CONSOLE_WARNING_COLOR);
-                return SYSCALL_EINVAL;
-        }
+    FileDesc* fds = current_fds();
+    Device* dev = fd_get(fds, fd);
+    if (!dev || !dev->ops || !dev->ops->ioctl) {
+        return SYSCALL_EINVAL;
     }
-    
-    // Handle file descriptor operations
-    if (fd >= 3) {
-        console_print_color("Ioctl: File descriptor ", CONSOLE_INFO_COLOR);
-        char buffer[16];
-        int_to_str(fd, buffer);
-        console_print_color(buffer, CONSOLE_INFO_COLOR);
-        console_print_color(" request ", CONSOLE_INFO_COLOR);
-        int_to_str((int)request, buffer);
-        console_println_color(buffer, CONSOLE_SUCCESS_COLOR);
-        return SYSCALL_SUCCESS;
-    }
-    
-    return SYSCALL_EINVAL;
+    int64_t rc = dev->ops->ioctl(dev, request, argp);
+    return (rc < 0) ? SYSCALL_EINVAL : rc;
 }

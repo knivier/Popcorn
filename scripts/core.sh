@@ -41,7 +41,8 @@ Run:
   run-uefi    QEMU with popcorn-uefi.img (interactive)
 
 Test:
-  test-uefi   QEMU smoke: stability + alive + debugcon
+  test-uefi   QEMU smoke: UEFI img + GRUB ISO + #PF dump
+  test-pf     Rebuild with POPCORN_TEST_PF; expect #PF COM1 dump
 
 Other:
   clean       Remove target/
@@ -114,6 +115,10 @@ main() {
       check_kernel_dependencies
       build_all_uefi
       qemu_uefi_smoke
+      ;;
+    test-pf)
+      check_kernel_dependencies
+      qemu_uefi_test_pf
       ;;
     test-uefi-stability)
       check_kernel_dependencies

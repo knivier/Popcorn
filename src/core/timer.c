@@ -1,6 +1,7 @@
 // src/core/timer.c
 #include "../includes/timer.h"
 #include "../includes/console.h"
+#include "../includes/irq.h"
 #include <stddef.h>
 
 // External port I/O functions
@@ -47,11 +48,9 @@ void timer_interrupt_handler(void) {
 
 // Enable timer interrupts
 void timer_enable(void) {
-    // Unmask timer interrupt (IRQ 0) in PIC
-    char mask = read_port(0x21);
-    write_port(0x21, mask & ~0x01);
+    irq_enable(0);
     global_timer.is_active = true;
-    
+    pit_poll_mode = false;
 }
 
 /* Clear pending PIC IRQs before sti (UEFI/QEMU may leave IRR latched). */
@@ -68,9 +67,7 @@ void pic_acknowledge_pending(void) {
 
 // Disable timer interrupts
 void timer_disable(void) {
-    // Mask timer interrupt (IRQ 0) in PIC
-    char mask = read_port(0x21);
-    write_port(0x21, mask | 0x01);
+    irq_disable(0);
     global_timer.is_active = false;
     pit_poll_mode = false;
 }
