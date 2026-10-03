@@ -17,6 +17,13 @@ jobs:
           sudo apt-get install -y nasm clang lld qemu-system-x86 ovmf mtools dosfstools \
             grub-pc-bin grub-common xorriso
 
+      - name: Install Rust (x86_64-unknown-none)
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          source "$HOME/.cargo/env"
+          rustup target add x86_64-unknown-none
+
       - name: Build kernel + UEFI image
         run: ./scripts/core.sh all
 

@@ -1,0 +1,11 @@
+[build]
+target = "x86_64-unknown-none"
+
+[target.x86_64-unknown-none]
+# Popcorn high-half is 0xFFFF800000000000 (needs large). We link only the
+# crate .o (not prebuilt core), so large is safe.
+rustflags = [
+  "-C", "code-model=large",
+  "-C", "relocation-model=static",
+  "-C", "target-feature=-sse,-sse2,-sse3,-ssse3,-sse4.1,-sse4.2,-avx,-avx2",
+]

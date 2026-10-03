@@ -170,11 +170,12 @@ src/rust/
   .cargo/config.toml                 — x86_64-unknown-none (or custom target)
 ```
 
-- [ ] `#![no_std]`, `x86_64-unknown-none` (or custom), `panic=abort` → COM1 dump + halt
-- [ ] `cargo build` produces a staticlib; `ld` pulls it with existing `link.ld`
+- [x] `#![no_std]`, `x86_64-unknown-none` (or custom), `panic=abort` (halt loop for now; COM1 dump later)
+- [x] `cargo build` produces a staticlib; `ld` pulls it with existing `link.ld`
 - [ ] No alloc until a `kmalloc`/`kfree` allocator shim exists (`GlobalAlloc`)
-- [ ] `rust_init()` called from `init.c` after IDT/PIC, before C pop registration
-- [ ] rustc added to `core.sh` dependency check (and documented for Fedora / macOS)
+- [x] `rust_init()` called from `init.c` after IDT/PIC, before C pop registration — prints `Rust active`
+- [x] rustc added to `core.sh` dependency check (and documented for Fedora / macOS / Debian)
+
 
 ### 3.2 Driver network (Rust)
 
@@ -297,7 +298,7 @@ Depends on the driver network; not scheduled:
 | Step | What | Language | Done when |
 |------|------|----------|-----------|
 | 1 | Exception dump + CI + readme + single task pool | C + Actions | QEMU `#PF` prints CR2; `test-uefi` in CI |
-| 2 | Rust crate skeleton + `rust_init` | Rust | `libpopcorn_kernel.a` links; kernel still boots |
+| 2 | Rust crate skeleton + `rust_init` | Rust | `libpopcorn_kernel.a` links; boot prints `Rust active` |
 | 3 | Driver network + IRQ table | Rust (+ C IDT trampoline) | PIT/keyboard register instead of hard-coded gates |
 | 4 | `/dev/tty0` + `/dev/fb0`; console is a client | Rust | No CRTC/GOP loops in `console.c` |
 | 5 | Rust pops: shimjapii, spinner, uptime (then halt) | Rust | C files removed from the link line |

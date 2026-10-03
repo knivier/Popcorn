@@ -22,6 +22,45 @@ brew_install_if_missing() {
   brew install "$formula" >>"$BUILD_LOG" 2>&1 || die "Homebrew failed installing $formula"
 }
 
+ensure_rust_toolchain() {
+  if [[ -f "${HOME:-}/.cargo/env" ]]; then
+    # shellcheck disable=SC1091
+    source "${HOME}/.cargo/env"
+  fi
+  have rustc && have cargo || die "Rust required (install rustup from https://rustup.rs). Then: rustup target add x86_64-unknown-none"
+  if ! rustup target list --installed 2>/dev/null | grep -qx 'x86_64-unknown-none'; then
+    log INFO "Adding Rust target x86_64-unknown-none"
+    rustup target add x86_64-unknown-none >>"$BUILD_LOG" 2>&1 \
+      || die "rustup target add x86_64-unknown-none failed"
+  fi
+}
+
+build_rust_kernel() {
+  ensure_rust_toolchain
+  local rust_dir="$POPCORN_SRC/rust"
+  local out_dir="$POPCORN_TARGET/rust"
+  local archive member
+  mkdir -p "$out_dir" "$OBJ_DIR"
+  [[ -f "$rust_dir/Cargo.toml" ]] || die "Missing Rust workspace: $rust_dir/Cargo.toml"
+  log INFO "Building Rust crate popcorn_kernel (x86_64-unknown-none)"
+  (
+    cd "$rust_dir"
+    CARGO_TARGET_DIR="$out_dir" cargo build --release --target x86_64-unknown-none
+  ) >>"$BUILD_LOG" 2>&1 || die "cargo build failed — see $BUILD_LOG"
+  archive="$out_dir/x86_64-unknown-none/release/libpopcorn_kernel.a"
+  [[ -f "$archive" ]] || die "Missing $archive"
+  # Link only the crate .o — pulling prebuilt core/compiler_builtins into this
+  # high-half image breaks R_X86_64_32S boot relocations. rust_init only needs C.
+  member="$(ar t "$archive" | grep '^popcorn_kernel-' | head -n1 || true)"
+  [[ -n "$member" ]] || die "No popcorn_kernel-*.o in $archive"
+  RUST_KERNEL_OBJ="$OBJ_DIR/popcorn_kernel_rs.o"
+  (cd "$OBJ_DIR" && ar x "$archive" "$member" && mv -f "$member" "$RUST_KERNEL_OBJ") \
+    >>"$BUILD_LOG" 2>&1 || die "Failed to extract $member from Rust archive"
+  [[ -f "$RUST_KERNEL_OBJ" ]] || die "Missing $RUST_KERNEL_OBJ"
+  export RUST_KERNEL_OBJ
+  log SUCCESS "Rust object: $RUST_KERNEL_OBJ (from $archive)"
+}
+
 check_kernel_dependencies() {
   local missing=()
   local deps=(nasm qemu-system-x86_64)
@@ -31,6 +70,7 @@ check_kernel_dependencies() {
     fi
   done
   if [[ ${#missing[@]} -eq 0 ]]; then
+    ensure_rust_toolchain
     return 0
   fi
   if [[ "$HOST_OS" == "darwin" ]]; then
@@ -42,6 +82,7 @@ check_kernel_dependencies() {
         *) die "Missing dependency: $dep" ;;
       esac
     done
+    ensure_rust_toolchain
   else
     die "Missing dependencies: ${missing[*]}"
   fi
@@ -117,6 +158,7 @@ build_kernel() {
   mkdir -p "$OBJ_DIR"
   : >"$BUILD_LOG" 2>/dev/null || true
   ensure_elf_toolchain
+  build_rust_kernel
 
   compile_asm "core/kernel.asm" "$OBJ_DIR/kasm.o"
   compile_asm "core/idt.asm" "$OBJ_DIR/idt.o"
@@ -161,7 +203,8 @@ build_kernel() {
   for obj in "${objs[@]}"; do
     [[ -f "$obj" ]] || die "Missing object file: $obj"
   done
-  link_kernel "${objs[@]}"
+  [[ -n "${RUST_KERNEL_OBJ:-}" && -f "$RUST_KERNEL_OBJ" ]] || die "Rust object missing — build_rust_kernel failed"
+  link_kernel "${objs[@]}" "$RUST_KERNEL_OBJ"
 }
 
 create_legacy_iso() {

@@ -285,6 +285,7 @@ qemu_uefi_test_debugcon() {
   echo "debugcon: ${body:0:40}..."
   case "$body" in *icd*KL*) ;; *) die "expected boot trace icd..KL" ;; esac
   case "$body" in *R*) ;; *) die "expected R (UEFI RAM / MBI parsed)" ;; esac
+  case "$body" in *r*) ;; *) die "expected r (rust_init / Rust active)" ;; esac
   case "$body" in *M*) ;; *) die "expected M (kmain loop entered)" ;; esac
   echo "PASS: debugcon boot trace"
 }

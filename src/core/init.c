@@ -13,6 +13,7 @@
 #include "../includes/spinner_pop.h"
 #include "../includes/syscall.h"
 #include "../includes/device.h"
+#include "../includes/rust_abi.h"
 #include "../includes/utils.h"
 #include "../includes/boot_fb.h"
 #include <stddef.h>
@@ -351,6 +352,8 @@ void init_transition_to_console(void) {
     console_heartbeat_tick();
     console_println_color("Welcome to Popcorn Kernel!", CONSOLE_SUCCESS_COLOR);
     console_newline();
+    /* After clear so "Rust active" stays on the interactive console. */
+    rust_init();
     if (multiboot2_is_uefi_boot()) {
         console_println_color("Boot: UEFI native loader (GOP framebuffer)", CONSOLE_INFO_COLOR);
         console_println_color("Keyboard: PS/2 poll (ExitBootServices)", CONSOLE_INFO_COLOR);

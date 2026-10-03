@@ -61,6 +61,7 @@ popcorn/
 │   └── popcorn_build/ # Python build library
 ├── src/               # kernel sources only
 │   ├── core/ pops/ includes/ uefi/
+│   ├── rust/          # no_std crate (libpopcorn_kernel.a)
 │   └── link.ld
 └── target/            # ALL build outputs (gitignored)
     ├── kernel
@@ -74,16 +75,22 @@ popcorn/
 **Fedora/RHEL:**
 ```bash
 sudo dnf install nasm clang lld qemu-system-x86 grub2-tools-extra grub2-pc-modules xorriso mtools edk2-ovmf dosfstools
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+rustup target add x86_64-unknown-none
 ```
 
 **Ubuntu/Debian:**
 ```bash
 sudo apt install nasm clang lld qemu-system-x86 grub-pc-bin grub-common xorriso mtools ovmf dosfstools
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+rustup target add x86_64-unknown-none
 ```
 
 **macOS (Homebrew):**
 ```bash
 brew install nasm qemu xorriso mtools llvm i686-elf-grub x86_64-elf-grub x86_64-elf-binutils x86_64-elf-gcc
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+rustup target add x86_64-unknown-none
 ```
 
 ## Architecture

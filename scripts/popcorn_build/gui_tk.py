@@ -96,7 +96,7 @@ class PopcornTkGui:
         btn("Build kernel", lambda: self._run("build"))
         btn("Build all (UEFI img)", lambda: self._run("all"))
         btn("Legacy ISO", lambda: self._run("iso"))
-        btn("Run UEFI (QEMU)", lambda: self._run("run-uefi"))
+        btn("Run UEFI (QEMU + VNC)", lambda: self._run("run-uefi"))
         btn("Stop QEMU", self._stop_qemu)
         btn("Clean target/", lambda: self._run("clean"))
         btn("Clear logs", self._clear_logs)
@@ -166,12 +166,12 @@ class PopcornTkGui:
         def do() -> None:
             self.root.after(0, lambda: self._set_status(f"Running {action}…"))
             if action == "run-uefi":
-                # Launch interactively; core.sh exec's qemu.
                 res = run_core("all", self.logs, via_wsl=self.via_wsl)
                 if not res.ok:
                     raise RuntimeError("Build failed before run")
-                self.qemu.run_iso(qemu_bin=self.tc.qemu, cfg=QemuConfig())
-                self.root.after(0, lambda: self._set_status("QEMU running"))
+                # WSL: VNC + auto-launch TigerVNC when ready.
+                self.qemu.run_uefi(open_vnc=True)
+                self.root.after(0, lambda: self._set_status("QEMU + VNC running"))
                 return
             res = run_core(action, self.logs, via_wsl=self.via_wsl)
             if not res.ok:
@@ -187,8 +187,8 @@ class PopcornTkGui:
                 res = run_core(step, self.logs, via_wsl=self.via_wsl)
                 if not res.ok:
                     raise RuntimeError(f"{step} failed")
-            self.qemu.run_iso(qemu_bin=self.tc.qemu, cfg=QemuConfig())
-            self.root.after(0, lambda: self._set_status("QEMU running"))
+            self.qemu.run_uefi(open_vnc=True)
+            self.root.after(0, lambda: self._set_status("QEMU + VNC running"))
 
         self._bg(do)
 
