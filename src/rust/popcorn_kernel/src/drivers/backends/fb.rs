@@ -1,11 +1,11 @@
-//! Framebuffer /dev/fb0 — GOP pixel text panel (8×16 font).
+//! Framebuffer /dev/fb0 — full-bleed GOP text at native 8×16 glyphs.
 
 use super::font8x16::FONT8X16;
 
-const VGA_WIDTH: u32 = 80;
-const VGA_HEIGHT: u32 = 25;
-const FONT_W: u32 = 8;
-const FONT_H: u32 = 16;
+pub const FONT_W: u32 = 8;
+pub const FONT_H: u32 = 16;
+pub const MAX_COLS: u32 = 240;
+pub const MAX_ROWS: u32 = 70;
 const POPCORN_FB_BG_RGB: u32 = 0x001018;
 
 static mut ACTIVE: bool = false;
@@ -20,6 +20,8 @@ static mut GPOS: u8 = 0;
 static mut GSIZE: u8 = 8;
 static mut BPOS: u8 = 0;
 static mut BSIZE: u8 = 8;
+static mut COLS: u32 = 80;
+static mut ROWS: u32 = 25;
 static mut ORIGIN_X: u32 = 0;
 static mut ORIGIN_Y: u32 = 0;
 static mut SCALE: u8 = 1;
@@ -36,7 +38,6 @@ extern "C" {
     fn boot_identity_uncache_range(phys: u64, len: u64);
 }
 
-/// VGA 16-color palette → 0xRRGGBB (index 0 = Popcorn navy).
 static PALETTE: [u32; 16] = [
     POPCORN_FB_BG_RGB,
     0x0000AA,
@@ -67,6 +68,14 @@ pub fn is_active() -> bool {
     unsafe { ACTIVE }
 }
 
+pub fn cols() -> u32 {
+    unsafe { COLS }
+}
+
+pub fn rows() -> u32 {
+    unsafe { ROWS }
+}
+
 pub struct FbHandoff {
     pub addr: u64,
     pub pitch: u32,
@@ -81,7 +90,6 @@ pub struct FbHandoff {
     pub blue_size: u8,
 }
 
-/// Configure GOP text panel. Returns true if framebuffer mode is live.
 pub fn init_from_handoff(h: &FbHandoff) -> bool {
     if h.addr == 0 || h.bpp < 15 || h.bpp > 32 || h.width < 320 || h.height < 200 {
         return false;
@@ -130,40 +138,40 @@ pub fn init_from_handoff(h: &FbHandoff) -> bool {
     true
 }
 
-pub fn cell_w() -> u32 {
+fn cell_w() -> u32 {
     FONT_W * unsafe { SCALE as u32 }
 }
 
-pub fn cell_h() -> u32 {
+fn cell_h() -> u32 {
     FONT_H * unsafe { SCALE as u32 }
 }
 
 fn compute_layout() {
     unsafe {
-        let sw = WIDTH / (VGA_WIDTH * FONT_W);
-        let sh = HEIGHT / (VGA_HEIGHT * FONT_H);
-        let mut s = if sw < sh { sw } else { sh };
-        if s < 1 {
-            s = 1;
+        /* Native 8×16 → ~160×45 on 720p / ~240×67 on 1080p. */
+        SCALE = 1;
+        let cw = FONT_W;
+        let ch = FONT_H;
+        let mut c = WIDTH / cw;
+        let mut r = HEIGHT / ch;
+        if c < 40 {
+            c = 40;
         }
-        if s > 4 {
-            s = 4;
+        if r < 15 {
+            r = 15;
         }
-        SCALE = s as u8;
-        while SCALE > 1
-            && (VGA_WIDTH * FONT_W * SCALE as u32 > WIDTH
-                || VGA_HEIGHT * FONT_H * SCALE as u32 > HEIGHT)
-        {
-            SCALE -= 1;
+        if c > MAX_COLS {
+            c = MAX_COLS;
         }
-        let text_w = VGA_WIDTH * cell_w();
-        let text_h = VGA_HEIGHT * cell_h();
+        if r > MAX_ROWS {
+            r = MAX_ROWS;
+        }
+        COLS = c;
+        ROWS = r;
+        let text_w = c * cw;
+        let text_h = r * ch;
         ORIGIN_X = if WIDTH > text_w { (WIDTH - text_w) / 2 } else { 0 };
-        ORIGIN_Y = if HEIGHT > text_h {
-            (HEIGHT - text_h) / 2
-        } else {
-            0
-        };
+        ORIGIN_Y = if HEIGHT > text_h { (HEIGHT - text_h) / 2 } else { 0 };
     }
 }
 
@@ -189,7 +197,8 @@ fn put_pixel(x: u32, y: u32, pixel: u32) {
         if BASE == 0 || x >= WIDTH || y >= HEIGHT {
             return;
         }
-        let p = (BASE as *mut u8).add((y as usize) * (PITCH as usize) + (x as usize) * (BYTESPP as usize));
+        let p = (BASE as *mut u8)
+            .add((y as usize) * (PITCH as usize) + (x as usize) * (BYTESPP as usize));
         for i in 0..BYTESPP as usize {
             *p.add(i) = (pixel >> (i * 8)) as u8;
         }
@@ -200,16 +209,8 @@ pub fn paint_background(rgb: u32) {
     if !is_active() {
         return;
     }
-    compute_layout();
     unsafe {
-        boot_fb_solid_fill(
-            BASE as *mut u8,
-            PITCH,
-            WIDTH,
-            HEIGHT,
-            BYTESPP,
-            rgb,
-        );
+        boot_fb_solid_fill(BASE as *mut u8, PITCH, WIDTH, HEIGHT, BYTESPP, rgb);
     }
 }
 
@@ -217,12 +218,15 @@ pub fn fill_text_panel() {
     if !is_active() {
         return;
     }
+    paint_background(POPCORN_FB_BG_RGB);
+    let pix = pack(POPCORN_FB_BG_RGB);
+    let cw = cell_w();
+    let ch = cell_h();
     unsafe {
         let x0 = ORIGIN_X;
         let y0 = ORIGIN_Y;
-        let rw = VGA_WIDTH * cell_w();
-        let rh = VGA_HEIGHT * cell_h();
-        let pix = pack(POPCORN_FB_BG_RGB);
+        let rw = COLS * cw;
+        let rh = ROWS * ch;
         let mut y = y0;
         while y < y0 + rh && y < HEIGHT {
             let mut x = x0;
@@ -244,7 +248,7 @@ pub fn relayout() {
 }
 
 pub fn draw_cell(cx: u32, cy: u32, ch: u8, attr: u8) {
-    if !is_active() || cx >= VGA_WIDTH || cy >= VGA_HEIGHT {
+    if !is_active() || cx >= cols() || cy >= rows() {
         return;
     }
     let fgp = pack(PALETTE[(attr & 0x0F) as usize]);
@@ -252,6 +256,7 @@ pub fn draw_cell(cx: u32, cy: u32, ch: u8, attr: u8) {
     let glyph = &FONT8X16[(ch & 0x7F) as usize];
     let cw = cell_w();
     let chh = cell_h();
+    let scale = unsafe { SCALE as u32 };
     let px0 = unsafe { ORIGIN_X } + cx * cw;
     let py0 = unsafe { ORIGIN_Y } + cy * chh;
     for dy in 0..chh {
@@ -259,7 +264,6 @@ pub fn draw_cell(cx: u32, cy: u32, ch: u8, attr: u8) {
             put_pixel(px0 + dx, py0 + dy, bgp);
         }
     }
-    let scale = unsafe { SCALE as u32 };
     for row in 0..FONT_H {
         let bits = glyph[row as usize];
         for col in 0..FONT_W {
@@ -278,7 +282,7 @@ pub fn draw_cell(cx: u32, cy: u32, ch: u8, attr: u8) {
 }
 
 pub fn draw_cursor(cx: u32, cy: u32, attr: u8, visible: bool) {
-    if !is_active() || !visible {
+    if !is_active() || !visible || cx >= cols() || cy >= rows() {
         return;
     }
     let fgp = pack(PALETTE[(attr & 0x0F) as usize]);
@@ -308,15 +312,14 @@ pub fn ioctl(request: u64, argp: *mut u8) -> i64 {
             if !argp.is_null() {
                 unsafe {
                     let w = argp as *mut u16;
-                    *w = VGA_HEIGHT as u16;
-                    *w.add(1) = VGA_WIDTH as u16;
+                    *w = rows() as u16;
+                    *w.add(1) = cols() as u16;
                     *w.add(2) = 0;
                     *w.add(3) = 0;
                 }
             }
             0
         }
-        // FBIO_PRESENT — flush via screen layer (caller).
         0x4600 => 0,
         _ => -2,
     }

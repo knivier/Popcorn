@@ -146,6 +146,16 @@ pub extern "C" fn rust_screen_backend() -> i32 {
 }
 
 #[no_mangle]
+pub extern "C" fn rust_screen_cols() -> u32 {
+    drivers::screen_cols()
+}
+
+#[no_mangle]
+pub extern "C" fn rust_screen_rows() -> u32 {
+    drivers::screen_rows()
+}
+
+#[no_mangle]
 pub extern "C" fn rust_screen_cells() -> *mut u8 {
     drivers::cells_ptr()
 }

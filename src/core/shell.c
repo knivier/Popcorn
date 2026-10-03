@@ -17,7 +17,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define HISTORY_SIZE 50
+#define HISTORY_SIZE 100
 #define ENTER_KEY_CODE 0x1C
 
 char command_history[HISTORY_SIZE][128];
@@ -111,6 +111,7 @@ static const char* available_commands[] = {
     "mon", "mon -debug", "mon -list", "mon -kill", "mon -ultramon",
     "dol", "dol -new", "dol -open", "dol -save", "dol -close", "dol -help",
     "drive", "drive list", "init_drive", "drive info", "drive cmd", "dev", "dev list",
+    "wrap", "wrap on", "wrap off",
     NULL
 };
 
@@ -283,6 +284,20 @@ void execute_command(const char *command) {
         console_println(" - Run a drive command (status|info|init)");
         console_print_color("  dev list", CONSOLE_PROMPT_COLOR);
         console_println(" - List /dev nodes from ready drives");
+
+        console_println_color("Terminal:", CONSOLE_INFO_COLOR);
+        console_print_color("  Up/Down", CONSOLE_PROMPT_COLOR);
+        console_println(" - Scroll output history (type snaps to bottom)");
+        console_print_color("  Left/Right", CONSOLE_PROMPT_COLOR);
+        console_println(" - Browse command history");
+        console_print_color("  wrap on|off", CONSOLE_PROMPT_COLOR);
+        console_println(" - Soft-wrap long lines at the edge (default on)");
+    } else if (strcmp(command, "wrap") == 0 || strcmp(command, "wrap on") == 0) {
+        console_set_wrap(true);
+        console_print_success("wrap on");
+    } else if (strcmp(command, "wrap off") == 0) {
+        console_set_wrap(false);
+        console_print_success("wrap off");
     } else if (strcmp(command, "fault") == 0) {
         console_println_color("Triggering page fault...", CONSOLE_WARNING_COLOR);
         /* Unmapped canonical VA (PML4[1]); dumps #PF + CR2 on COM1 then halts. */

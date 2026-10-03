@@ -32,6 +32,8 @@ int rust_screen_init_fb(uint64_t addr, uint32_t pitch, uint32_t width, uint32_t 
                         uint8_t blue_size); /* 1=fb, 0=vga fallback */
 char* rust_screen_cells(void);
 int rust_screen_backend(void); /* 0=none 1=vga 2=fb */
+uint32_t rust_screen_cols(void);
+uint32_t rust_screen_rows(void);
 void rust_screen_set_cursor(uint32_t x, uint32_t y);
 void rust_screen_set_cursor_visible(int visible);
 void rust_screen_write_cell(uint32_t x, uint32_t y, uint8_t ch, uint8_t attr);

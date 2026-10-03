@@ -4,6 +4,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "console.h"
 
 // Boot screen states
 typedef enum {
@@ -17,8 +18,9 @@ typedef enum {
 } InitState;
 
 // Boot screen configuration
-#define BOOT_SCREEN_WIDTH 80
-#define BOOT_SCREEN_HEIGHT 25
+/* Boot chrome width follows the live console grid (80 on VGA, ~160 on 720p). */
+#define BOOT_SCREEN_WIDTH ((int)console_cols())
+#define BOOT_SCREEN_HEIGHT ((int)console_rows())
 
 // Boot screen colors
 #define BOOT_TITLE_COLOR COLOR_LIGHT_MAGENTA
@@ -26,7 +28,7 @@ typedef enum {
 #define BOOT_SUCCESS_COLOR COLOR_LIGHT_GREEN
 #define BOOT_WARNING_COLOR COLOR_YELLOW
 #define BOOT_ERROR_COLOR COLOR_LIGHT_RED
-#define BOOT_INFO_COLOR COLOR_LIGHT_GRAY
+#define BOOT_INFO_COLOR COLOR_WHITE
 
 // Function declarations
 void init_boot_screen(void);
@@ -38,6 +40,7 @@ void init_show_scheduler_info(void);
 void init_show_syscall_info(void);
 void init_show_modules(void);
 void init_wait_for_enter(void);
+void init_boot_hold(void);
 void init_clear_boot_screen(void);
 void init_transition_to_console(void);
 

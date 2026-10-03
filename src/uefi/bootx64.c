@@ -318,9 +318,61 @@ static void* memset_local(void* dst, INT8 v, UINTN n) {
 
 typedef EFI_STATUS (EFIAPI *EFI_GOP_QUERY_MODE_FN)(void* This, UINT32 ModeNumber, UINTN* SizeOfInfo,
     EFI_GRAPHICS_OUTPUT_MODE_INFORMATION** Info);
+typedef EFI_STATUS (EFIAPI *EFI_GOP_SET_MODE_FN)(void* This, UINT32 ModeNumber);
 
 static BOOLEAN uefi_ptr_ok(UINTN p) {
     return p >= 0x1000ULL && p < 0xFFFFFFFFFFFFULL;
+}
+
+/* Prefer 1280×720 (compact VNC); else closest mode at/above 800×600. */
+static void gop_prefer_720p(EFI_GRAPHICS_OUTPUT_PROTOCOL* gop) {
+    EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE* pm;
+    EFI_GOP_QUERY_MODE_FN query;
+    EFI_GOP_SET_MODE_FN set_mode;
+    UINT32 best = 0xFFFFFFFFu;
+    UINT32 best_score = 0xFFFFFFFFu;
+    UINT32 i;
+
+    if (!gop || !gop->Mode || !gop->QueryMode || !gop->SetMode) {
+        return;
+    }
+    pm = gop->Mode;
+    query = (EFI_GOP_QUERY_MODE_FN)gop->QueryMode;
+    set_mode = (EFI_GOP_SET_MODE_FN)gop->SetMode;
+
+    for (i = 0; i < pm->MaxMode; i++) {
+        UINTN info_size = 0;
+        EFI_GRAPHICS_OUTPUT_MODE_INFORMATION* mi = NULL;
+        UINT32 score;
+        UINT32 dx;
+        UINT32 dy;
+        if (EFI_ERROR(query(gop, i, &info_size, &mi)) || !mi) {
+            continue;
+        }
+        if (mi->HorizontalResolution == 1280 && mi->VerticalResolution == 720) {
+            best = i;
+            best_score = 0;
+            break;
+        }
+        if (mi->HorizontalResolution < 800 || mi->VerticalResolution < 600) {
+            continue;
+        }
+        /* Prefer modes near 720p over jumping to a huge 1080p. */
+        dx = (mi->HorizontalResolution > 1280)
+                 ? (mi->HorizontalResolution - 1280)
+                 : (1280 - mi->HorizontalResolution);
+        dy = (mi->VerticalResolution > 720)
+                 ? (mi->VerticalResolution - 720)
+                 : (720 - mi->VerticalResolution);
+        score = dx + dy;
+        if (score < best_score) {
+            best_score = score;
+            best = i;
+        }
+    }
+    if (best != 0xFFFFFFFFu && best != pm->Mode) {
+        (void)set_mode(gop, best);
+    }
 }
 
 static BOOLEAN fill_boot_info_from_gop(EFI_SYSTEM_TABLE* st, PopcornUefiBootInfo* info) {
@@ -330,6 +382,8 @@ static BOOLEAN fill_boot_info_from_gop(EFI_SYSTEM_TABLE* st, PopcornUefiBootInfo
     if (EFI_ERROR(status) || !gop || !uefi_ptr_ok((UINTN)gop)) {
         return FALSE;
     }
+
+    gop_prefer_720p(gop);
 
     EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE* pm = gop->Mode;
     if (!pm || !uefi_ptr_ok((UINTN)pm)) {

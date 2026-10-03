@@ -15,8 +15,8 @@ OVMF_VARS="${OVMF_VARS:-$POPCORN_TARGET/ovmf_vars.fd}"
 # Video for UEFI/GOP: std VGA often leaves a blank GTK window while the kernel
 # correctly paints OVMF's GOP buffer. virtio-vga (or ramfb) is what QEMU shows.
 qemu_uefi_video_args() {
-  # 1280x800 matches 80x25 @ 8x16 glyphs at 2x (640x400 → 1280x800).
-  local res="${POPCORN_QEMU_RES:-1280x800}"
+  # Temporary: 720p so VNC stays compact/readable. Override with POPCORN_QEMU_RES.
+  local res="${POPCORN_QEMU_RES:-1280x720}"
   local xres="${res%x*}"
   local yres="${res#*x}"
   if qemu-system-x86_64 -device help 2>&1 | grep -q 'name "virtio-vga"'; then

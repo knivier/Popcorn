@@ -4,17 +4,26 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// VGA Text Mode Constants
+/* Legacy VGA text defaults (also used when no GOP). */
 #define VGA_WIDTH 80
 #define VGA_HEIGHT 25
-#define VGA_MEMORY_SIZE (VGA_WIDTH * VGA_HEIGHT * 2)
 #define VGA_MEMORY_ADDRESS 0xB8000
-/* Last two rows are reserved (heartbeat + status); shell scrolls above them. */
-#define CONSOLE_STATUS_ROW (VGA_HEIGHT - 1u)
-#define CONSOLE_HEARTBEAT_ROW (VGA_HEIGHT - 2u)
-#define CONSOLE_SCROLL_ROWS (VGA_HEIGHT - 2u)
 
-// Color definitions (VGA text mode)
+/* Full-bleed FB grid at 8×16 (160×45 @720p, 240×67 @1080p). */
+#define CONSOLE_MAX_COLS 240
+#define CONSOLE_MAX_ROWS 70
+#define CONSOLE_MAX_CELL_BYTES (CONSOLE_MAX_COLS * CONSOLE_MAX_ROWS * 2)
+
+/* Runtime grid (FB fills the panel; VGA stays 80×25). */
+unsigned int console_cols(void);
+unsigned int console_rows(void);
+
+/* Last two rows: heartbeat + status; shell scrolls above them. */
+#define CONSOLE_STATUS_ROW (console_rows() - 1u)
+#define CONSOLE_HEARTBEAT_ROW (console_rows() - 2u)
+#define CONSOLE_SCROLL_ROWS (console_rows() - 2u)
+
+/* Color definitions (VGA text mode) */
 #define COLOR_BLACK         0x00
 #define COLOR_BLUE          0x01
 #define COLOR_GREEN         0x02
@@ -32,7 +41,6 @@
 #define COLOR_YELLOW        0x0E
 #define COLOR_WHITE         0x0F
 
-// Background colors (shifted left by 4 bits)
 #define BG_BLACK        0x00
 #define BG_BLUE         0x10
 #define BG_GREEN        0x20
@@ -50,9 +58,8 @@
 #define BG_YELLOW       0xE0
 #define BG_WHITE        0xF0
 
-// Console theme colors
 #define CONSOLE_BG_COLOR     BG_BLACK
-#define CONSOLE_FG_COLOR     COLOR_LIGHT_GRAY
+#define CONSOLE_FG_COLOR     COLOR_WHITE
 #define CONSOLE_PROMPT_COLOR COLOR_LIGHT_GREEN
 #define CONSOLE_ERROR_COLOR  COLOR_LIGHT_RED
 #define CONSOLE_SUCCESS_COLOR COLOR_LIGHT_GREEN
@@ -60,34 +67,28 @@
 #define CONSOLE_WARNING_COLOR COLOR_YELLOW
 #define CONSOLE_HEADER_COLOR COLOR_LIGHT_MAGENTA
 
-// Scrollback buffer configuration
-#define SCROLLBACK_LINES 500
-#define SCROLLBACK_LINE_SIZE (VGA_WIDTH * 2)  // char + color per column
+#define SCROLLBACK_LINES 2000
+#define SCROLLBACK_LINE_SIZE (CONSOLE_MAX_COLS * 2)
 
-// Console state structure
 typedef struct {
     unsigned int cursor_x;
     unsigned int cursor_y;
     unsigned char current_color;
     bool cursor_visible;
     bool double_buffer_enabled;
-    int scroll_offset;  // Lines scrolled back (0 = current view)
+    int scroll_offset;
+    bool wrap_enabled;
 } ConsoleState;
 
-// Scrollback buffer structure
 typedef struct {
     char buffer[SCROLLBACK_LINES * SCROLLBACK_LINE_SIZE];
     unsigned int current_line;
     unsigned int total_lines;
 } ScrollbackBuffer;
 
-// Function declarations
 void console_init(void);
 void console_clear(void);
 
-// Framebuffer text backend (UEFI/no-CSM machines). console_present() mirrors the
-// 80x25 text cells to the linear framebuffer; it is a no-op in VGA text mode.
-// console_get_buffer() returns the active text-cell buffer (0xB8000 or shadow).
 void console_present(void);
 void console_sync_begin(void);
 void console_sync_end(void);
@@ -116,20 +117,20 @@ void console_print_success(const char* message);
 void console_print_info(const char* message);
 void console_print_warning(const char* message);
 
-// Utility functions
 unsigned char make_color(unsigned char foreground, unsigned char background);
 void console_center_text(const char* text, unsigned int y, unsigned char color);
 void console_draw_separator(unsigned int y, unsigned char color);
 
-// Double buffering functions
 void console_enable_double_buffer(bool enable);
 void console_swap_buffers(void);
 void console_flush(void);
 
-// Scrollback functions
 void console_scroll_up(void);
 void console_scroll_down(void);
+void console_scroll_to_bottom(void);
 void console_save_line(unsigned int y);
 void console_restore_view(void);
+void console_set_wrap(bool enabled);
+bool console_wrap_enabled(void);
 
-#endif // CONSOLE_H
+#endif /* CONSOLE_H */

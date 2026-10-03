@@ -79,8 +79,12 @@ void init_boot_screen(void) {
     console_println_color("", CONSOLE_FG_COLOR);
     console_println_color("", CONSOLE_FG_COLOR);
     console_heartbeat_tick();
+    console_present();
 
-    if (!console_fb_active()) {
+    /* UEFI used to skip this and flash past the boot UI; pause so it is visible. */
+    if (console_fb_active()) {
+        init_boot_hold();
+    } else {
         init_wait_for_enter();
     }
 
@@ -135,6 +139,7 @@ void init_draw_header(void) {
     console_println_color("Initialization Progress:", BOOT_SUBTITLE_COLOR);
     console_draw_separator(15, BOOT_INFO_COLOR);
     console_sync_end();
+    console_present();
 }
 
 void init_draw_progress_bar(int current, int total, const char* item) {
@@ -168,6 +173,7 @@ void init_draw_progress_bar(int current, int total, const char* item) {
         console_print_color(" ", CONSOLE_FG_COLOR);
     }
     console_sync_end();
+    console_present();
 }
 
 void init_show_memory_info(void) {
@@ -320,6 +326,7 @@ void init_wait_for_enter(void) {
     console_set_cursor(0, 22);
     console_println_color("", CONSOLE_FG_COLOR);
     console_println_color("Press ENTER to continue to console (auto-continue)...", BOOT_SUBTITLE_COLOR);
+    console_present();
 
     extern unsigned char read_port(unsigned short port);
 
@@ -337,6 +344,19 @@ void init_wait_for_enter(void) {
             if (keycode == ENTER_KEY_CODE) {
                 break;
             }
+        }
+    }
+}
+
+/* Brief beat so UEFI/GOP shows the finished progress bar before the console. */
+void init_boot_hold(void) {
+    console_set_cursor(0, 22);
+    console_println_color("", CONSOLE_FG_COLOR);
+    console_println_color("Starting console...", BOOT_SUBTITLE_COLOR);
+    console_present();
+    for (volatile uint32_t i = 0; i < 8000000u; i++) {
+        if ((i & 0x1FFFFFu) == 0u) {
+            console_present();
         }
     }
 }
@@ -376,7 +396,7 @@ void init_transition_to_console(void) {
     }
 
     console_draw_prompt_with_path(get_current_directory());
-
     console_print_status_bar();
     console_heartbeat_tick();
+    console_present();
 }

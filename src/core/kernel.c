@@ -99,6 +99,7 @@ void kmain(void) {
                             continue;
                         }
                         if (input_index < sizeof(input_buffer) - 1) {
+                            console_scroll_to_bottom();
                             input_buffer[input_index++] = (char)keycode;
                             console_set_color(CONSOLE_BG_COLOR | COLOR_WHITE);
                             console_putchar((char)keycode);
@@ -144,6 +145,7 @@ void kmain(void) {
         }
 
         if (keycode == ENTER_KEY_CODE) {
+            console_scroll_to_bottom();
             input_buffer[input_index] = '\0';
             add_to_history(input_buffer);  // Add to history
             console_newline();
@@ -158,18 +160,28 @@ void kmain(void) {
             console_print_status_bar();
             console_set_color(CONSOLE_BG_COLOR | COLOR_WHITE);
         } else if (keycode == BACKSPACE_KEY_CODE) {
+            console_scroll_to_bottom();
             if (input_index > 0) {
                 input_index--;
                 input_buffer[input_index] = '\0';
                 console_backspace();
             }
         } else if (keycode == TAB_KEY_CODE) {
+            console_scroll_to_bottom();
             autocomplete_command(input_buffer, &input_index);
         } else if (keycode == UP_ARROW_CODE) {
+            /* Terminal scrollback (older lines). */
+            console_scroll_up();
+        } else if (keycode == DOWN_ARROW_CODE) {
+            /* Terminal scrollback (toward live prompt). */
+            console_scroll_down();
+        } else if (keycode == LEFT_ARROW_CODE) {
+            /* Command history: older. */
+            console_scroll_to_bottom();
             if (history_count > 0) {
                 if (history_index == -1) {
                     strcpy_simple(temp_buffer, input_buffer);
-                    history_index = history_count;
+                    history_index = (int)history_count;
                 }
                 if (history_index > 0) {
                     history_index--;
@@ -185,7 +197,9 @@ void kmain(void) {
                     }
                 }
             }
-        } else if (keycode == DOWN_ARROW_CODE) {
+        } else if (keycode == RIGHT_ARROW_CODE) {
+            /* Command history: newer / back to draft. */
+            console_scroll_to_bottom();
             if (history_index != -1) {
                 history_index++;
                 while (input_index > 0) {
@@ -205,12 +219,17 @@ void kmain(void) {
                 console_print(input_buffer);
             }
         } else if (keycode == PAGE_UP_CODE) {
-            console_scroll_up();
+            for (int i = 0; i < 10; i++) {
+                console_scroll_up();
+            }
         } else if (keycode == PAGE_DOWN_CODE) {
-            console_scroll_down();
+            for (int i = 0; i < 10; i++) {
+                console_scroll_down();
+            }
         } else if (input_index < sizeof(input_buffer) - 1 && keycode < 128) {
             char ch = keyboard_map[keycode];
             if (ch != 0) {
+                console_scroll_to_bottom();
                 input_buffer[input_index++] = ch;
                 console_set_color(CONSOLE_BG_COLOR | COLOR_WHITE);
                 console_putchar(ch);
