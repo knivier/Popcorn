@@ -12,6 +12,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/img-uefi.sh"
 UEFI_IMG="${UEFI_IMG:-$POPCORN_TARGET/popcorn-uefi.img}"
 DATA_IMG="${DATA_IMG:-$POPCORN_TARGET/popcorn-data.img}"
 INTERNAL_IMG="${INTERNAL_IMG:-$POPCORN_TARGET/popcorn-internal.img}"
+USB_DATA_IMG="${USB_DATA_IMG:-$POPCORN_TARGET/popcorn-usb-data.img}"
 OVMF_VARS="${OVMF_VARS:-$POPCORN_TARGET/ovmf_vars.fd}"
 
 # Ensure a raw image exists (never the Windows host drive).
@@ -24,18 +25,23 @@ ensure_raw_img() {
   fi
 }
 
-# Two legacy virtio-blk disks for the picker:
-#   virtio[0] → guest name usb0  (boot/USB stand-in, writable)
-#   virtio[1] → guest name nvme0 (internal stand-in, LOCKED until install … YES)
+# Data disks for the picker:
+#   usb-storage (xHCI, popcorn-usb-data.img) → guest name usb0 (real USB MSC,
+#                 writable; the boot ESP usb-storage becomes usb1)
+#   virtio-blk → guest name vda   when USB MSC works, else usb0 (stand-in)
+#   NVMe       → guest name nvme0 (real NVMe, Internal, LOCKED until install … YES)
 # Boot ESP stays on USB-storage (not virtio).
 qemu_uefi_data_disk_args() {
   ensure_raw_img "$DATA_IMG" 64 "USB/boot stand-in disk"
-  ensure_raw_img "$INTERNAL_IMG" 128 "internal stand-in disk"
+  ensure_raw_img "$USB_DATA_IMG" 64 "USB mass-storage data disk"
+  ensure_raw_img "$INTERNAL_IMG" 128 "internal NVMe disk"
   printf '%s\n' \
+    -drive "if=none,id=popmsc,format=raw,file=$USB_DATA_IMG" \
+    -device "usb-storage,bus=xhci.0,drive=popmsc" \
     -drive "if=none,id=popusb,format=raw,file=$DATA_IMG" \
     -device "virtio-blk-pci,drive=popusb,disable-modern=on" \
     -drive "if=none,id=popnvme,format=raw,file=$INTERNAL_IMG" \
-    -device "virtio-blk-pci,drive=popnvme,disable-modern=on"
+    -device "nvme,drive=popnvme,serial=POPCORN1"
 }
 
 # Video for UEFI/GOP: std VGA often leaves a blank GTK window while the kernel

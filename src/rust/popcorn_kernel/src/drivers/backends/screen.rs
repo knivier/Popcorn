@@ -337,17 +337,25 @@ fn sync_cursor() {
     }
     unsafe {
         let cur = CURSOR_Y * cols() as u32 + CURSOR_X;
-        if PREV_CURSOR != cur && PREV_CURSOR != 0xFFFF_FFFF {
+        /* Erase the old underline when the cursor moved *or* was just hidden. */
+        if PREV_CURSOR != 0xFFFF_FFFF && (PREV_CURSOR != cur || !CURSOR_VISIBLE) {
             let ox = PREV_CURSOR % cols() as u32;
             let oy = PREV_CURSOR / cols() as u32;
-            /* Force redraw — cursor underline painted over the glyph; RENDERED
-             * still matches CELLS so sync_cell alone would skip and leave ____. */
-            let off = cell_off(ox as usize, oy as usize);
-            RENDERED[off] = 0xFF;
-            sync_cell(ox, oy);
+            if oy < rows() as u32 {
+                /* The underline was painted over the glyph while RENDERED still
+                 * matches CELLS, so sync_cell would skip: repaint the cell directly. */
+                let off = cell_off(ox as usize, oy as usize);
+                let (ch, attr) = (CELLS[off], CELLS[off + 1]);
+                fb::draw_cell(ox, oy, ch, attr);
+                RENDERED[off] = ch;
+                RENDERED[off + 1] = attr;
+            }
+            PREV_CURSOR = 0xFFFF_FFFF;
         }
-        let (_ch, attr) = cell_at(CURSOR_X, CURSOR_Y);
-        fb::draw_cursor(CURSOR_X, CURSOR_Y, attr, CURSOR_VISIBLE);
-        PREV_CURSOR = cur;
+        if CURSOR_VISIBLE {
+            let (_ch, attr) = cell_at(CURSOR_X, CURSOR_Y);
+            fb::draw_cursor(CURSOR_X, CURSOR_Y, attr, true);
+            PREV_CURSOR = cur;
+        }
     }
 }

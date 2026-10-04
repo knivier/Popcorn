@@ -27,12 +27,17 @@ const char* get_current_directory(void);
 #define TAB_KEY_CODE 0x0F
 #define KEYBOARD_EXT_PREFIX 0xE0
 
-extern unsigned char keyboard_map[128];
 extern void boot_serial_putc(char c);
 
 /* Shared console cursor byte offset (shell history / legacy helpers). */
 unsigned int current_loc = 0;
 ConsoleState console_state = {0, 0, CONSOLE_FG_COLOR, true, false, 0};
+
+/* Modifier state from the scancode loop; read by Dolphin via keyboard_map.h. */
+static bool kbd_shift = false;
+static bool kbd_caps = false;
+int kbd_shift_active(void) { return kbd_shift ? 1 : 0; }
+int kbd_caps_active(void) { return kbd_caps ? 1 : 0; }
 
 void kmain(void) {
     init_boot_screen();
@@ -47,14 +52,14 @@ void kmain(void) {
     // - Enabled timer interrupts
     
     // Initialize input buffer and history
-    char input_buffer[256] = {0};
-    char temp_buffer[256] = {0};
+    /* A typed line must fit one 128-byte history slot (127 chars + NUL). */
+#define INPUT_MAX 127u
+    char input_buffer[INPUT_MAX + 1] = {0};
+    char temp_buffer[INPUT_MAX + 1] = {0};
     unsigned int input_index = 0;
     int history_index = -1;
     /* PS/2 set 1: 0xE0 byte prefixes extended scancode; break = make | 0x80. */
     static bool kbd_expect_e0 = false;
-    static bool kbd_shift = false;
-    static bool kbd_caps = false;
 
     uint64_t loop_iter = 0;
     uint64_t last_uefi_poll_tick = 0;
@@ -99,7 +104,7 @@ void kmain(void) {
                         if (dolphin_is_active()) {
                             continue;
                         }
-                        if (input_index < sizeof(input_buffer) - 1) {
+                        if (input_index < INPUT_MAX) {
                             console_scroll_to_bottom();
                             input_buffer[input_index++] = (char)keycode;
                             console_set_color(CONSOLE_BG_COLOR | COLOR_WHITE);
@@ -238,17 +243,10 @@ void kmain(void) {
             for (int i = 0; i < 10; i++) {
                 console_scroll_down();
             }
-        } else if (input_index < sizeof(input_buffer) - 1 && keycode < 128) {
-            extern unsigned char keyboard_map_shift[128];
-            char base = (char)keyboard_map[keycode];
-            char ch;
-            if (base >= 'a' && base <= 'z') {
-                /* Caps XOR Shift → uppercase letter. */
-                ch = (kbd_caps ^ kbd_shift) ? (char)(base - 'a' + 'A') : base;
-            } else {
-                ch = kbd_shift ? (char)keyboard_map_shift[keycode] : base;
-            }
-            if (ch != 0) {
+        } else if (input_index < INPUT_MAX && keycode < 128) {
+            char ch = kbd_scancode_to_char(keycode, kbd_shift, kbd_caps);
+            /* Printable ASCII only: no stray control bytes in the command line. */
+            if (ch >= ' ' && ch < 127) {
                 console_scroll_to_bottom();
                 input_buffer[input_index++] = ch;
                 console_set_color(CONSOLE_BG_COLOR | COLOR_WHITE);

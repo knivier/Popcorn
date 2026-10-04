@@ -1,7 +1,7 @@
 //! Legacy virtio-blk (PCI transitional) — up to 4 devices.
 
 use alloc::boxed::Box;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::Ordering;
 
 use crate::drivers::bus::pci;
 use crate::drivers::dma;
@@ -66,7 +66,6 @@ struct VirtioBlk {
 }
 
 static mut DEVS: [Option<VirtioBlk>; MAX_VIRTIO_DISKS] = [None, None, None, None];
-static DEV_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 fn io_read32(base: u16, off: u16) -> u32 {
     unsafe { inl(base + off) }
@@ -171,12 +170,7 @@ pub fn probe_all() -> usize {
             break;
         }
     }
-    DEV_COUNT.store(n, Ordering::Release);
     n
-}
-
-pub fn count() -> usize {
-    DEV_COUNT.load(Ordering::Acquire)
 }
 
 pub fn capacity(idx: usize) -> Option<(u64, u32)> {
@@ -255,19 +249,28 @@ fn do_io(idx: usize, is_write: bool, lba: u64, buf: &mut [u8]) -> i64 {
         io_write16(dev.iobase, REG_QUEUE_NOTIFY, 0);
 
         let used = (base + dev.used_off) as *mut u16;
+        let mut done = false;
         for _ in 0..10_000_000u32 {
             core::sync::atomic::fence(Ordering::SeqCst);
-            let uidx = *used.add(1);
+            let uidx = core::ptr::read_volatile(used.add(1));
             if uidx != dev.last_used_idx {
                 dev.last_used_idx = uidx;
                 let _ = io_read8(dev.iobase, REG_ISR);
+                done = true;
                 break;
             }
             core::hint::spin_loop();
         }
+        if !done {
+            /* The device may still DMA into `req` later: leak it rather than
+             * hand the page back to the allocator. */
+            core::mem::forget(req);
+            return -1;
+        }
     }
 
-    if req.status != 0 {
+    /* Written by the device via DMA — read volatile, never cache. */
+    if unsafe { core::ptr::read_volatile(&req.status) } != 0 {
         return -1;
     }
     if !is_write {
@@ -281,7 +284,11 @@ pub fn read(idx: usize, lba: u64, buf: &mut [u8]) -> i64 {
 }
 
 pub fn write(idx: usize, lba: u64, buf: &[u8]) -> i64 {
+    /* A short buffer used to panic (slice length mismatch) = kernel hang. */
+    if buf.len() < SECTOR_SIZE as usize {
+        return -2;
+    }
     let mut tmp = [0u8; 512];
-    tmp.copy_from_slice(&buf[..512.min(buf.len())]);
+    tmp.copy_from_slice(&buf[..512]);
     do_io(idx, true, lba, &mut tmp)
 }

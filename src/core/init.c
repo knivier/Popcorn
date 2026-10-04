@@ -281,12 +281,10 @@ void init_show_modules(void) {
     init_draw_progress_bar(5, total_init_steps, "Loading Kernel Modules");
 
     extern void rust_pops_register(void);
-    extern const PopModule filesystem_module;
     extern const PopModule dolphin_module;
 
-    /* Rust: shimjapii/spinner/uptime/memory/cpu/sysinfo. FS stays in-memory C. */
+    /* Rust: shimjapii/spinner/uptime/memory/cpu/sysinfo + FAT32. Dolphin stays C. */
     rust_pops_register();
-    register_pop_module(&filesystem_module);
     register_pop_module(&dolphin_module);
 
     console_set_cursor(0, 18);
@@ -295,7 +293,7 @@ void init_show_modules(void) {
 
     console_set_cursor(0, 19);
     console_print_color("    Modules: ", BOOT_INFO_COLOR);
-    console_println_color("8 Pop Modules Registered", BOOT_SUCCESS_COLOR);
+    console_println_color("Rust pops + Dolphin + FAT32", BOOT_SUCCESS_COLOR);
 
     console_set_cursor(0, 20);
     console_print_color("    Features: ", BOOT_INFO_COLOR);

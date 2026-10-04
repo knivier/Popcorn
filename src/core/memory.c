@@ -43,7 +43,7 @@ typedef struct {
 static memory_pool normal_pool;
 static KernelMemoryStats mem_stats;
 
-#define MAX_MEMORY_BLOCKS 1024
+#define MAX_MEMORY_BLOCKS 2048
 static mem_block memory_blocks[MAX_MEMORY_BLOCKS];
 static uint32_t memory_block_index = 0;
 
@@ -453,12 +453,23 @@ void* zone_alloc(MemoryZone zone, size_t size, uint32_t flags) {
     if (st < 0) {
         return NULL;
     }
-    if (memory_block_index >= MAX_MEMORY_BLOCKS) {
-        pmm_free_range_frames((uint32_t)st, npg);
-        return NULL;
+    /* Reuse a freed slot first: kfree() only marks is_free, so without this the
+     * table (and every Rust Vec/Box/FAT op) dies after MAX_MEMORY_BLOCKS total allocs. */
+    mem_block* b = NULL;
+    for (uint32_t i = 0; i < memory_block_index; i++) {
+        if (memory_blocks[i].is_free) {
+            b = &memory_blocks[i];
+            break;
+        }
+    }
+    if (!b) {
+        if (memory_block_index >= MAX_MEMORY_BLOCKS) {
+            pmm_free_range_frames((uint32_t)st, npg);
+            return NULL;
+        }
+        b = &memory_blocks[memory_block_index++];
     }
     void* base = (void*)(uintptr_t)((uint32_t)st * PAGE_SIZE);
-    mem_block* b = &memory_blocks[memory_block_index++];
     b->base = base;
     b->size = (size_t)npg * PAGE_SIZE;
     b->is_free = false;

@@ -7,6 +7,7 @@ pub mod device;
 pub mod driver;
 pub mod irq;
 pub mod dma;
+pub mod usb;
 pub mod class;
 
 pub use registry::{drive_cmd, init_drive, init_drives, list_devices, list_drives};

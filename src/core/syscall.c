@@ -50,7 +50,7 @@ void syscall_init(void) {
     syscall_register(SYS_MALLOC, sys_malloc, "malloc", SYSCALL_FLAG_NONE);
     syscall_register(SYS_FREE, sys_free, "free", SYSCALL_FLAG_NONE);
 
-    /* In-memory FS helpers. */
+    /* Working-directory helpers (backed by the Rust FAT32 driver). */
     syscall_register(SYS_GETCWD, sys_getcwd, "getcwd", SYSCALL_FLAG_NONE);
     syscall_register(SYS_CHDIR, sys_chdir, "chdir", SYSCALL_FLAG_NONE);
 

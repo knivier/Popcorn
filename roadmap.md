@@ -25,14 +25,14 @@ Popcorn is a modular x86-64 kernel framework for learning operating system devel
 | PMM (bitmap) | Done (≤16 GiB track) | `memory.c` / `physmap.h` — was hard-capped at 1 GiB |
 | Scheduler + context switch | Partial | `src/core/scheduler.c` — wait queues, sleep, bootstrap guard |
 | Syscalls (14 registered) | Partial | `src/core/syscall.c` — real fd/dev/time/heap/cwd only |
-| In-memory filesystem (pop) | Done (not kernel VFS) | `src/pops/filesystem_pop.c` |
+| FAT32 on selected disk | Done (no VFS) | `rust/popcorn_kernel/src/fs/` (the in-memory FS pop was removed) |
 | Pop modules | 6 Rust + FS/Dolphin C | `pops/*`, `src/core/pop_module.c` |
 | Device / drive table | Done | Rust registry + C fd bridge |
 | Registry catalog (RAM DB) | Done | `catalog.rs` / `catalog.h` — `catalog` shell cmd |
 | IRQ table | Done (C + Rust claims) | `irq.c`, `drivers/irq.rs` |
 | Rust crate | Active | abi/device/driver/class/dma/pit + backends |
 | PCI walk | Done (bus 0) | `drivers/bus/pci.rs` |
-| Block / storage | Not started | Phase 4 |
+| Block / storage | Done (ram / virtio / NVMe / USB MSC) | `drivers/block/`, `drivers/usb/` |
 | CI | Done | `.github/workflows/ci.yml` — build + `test-uefi` |
 
 ---
@@ -46,7 +46,7 @@ New kernel work lands in Rust unless it has to stay C/asm.
 | `kernel.asm` long-mode entry | Driver network (`device` / `driver` / `irq` / `io`) | VMM helpers |
 | `context_switch.asm`, IDT/TSS setup | VGA text + GOP framebuffer backends | Wait-queue rewrite |
 | `kmain` input loop (until kbd chardev) | Serial, null/zero, PIT clock provider | ELF / ring 3 |
-| `memory.c` PMM (allocator shim only) | Pop registry + simple pops | Filesystem pop, Dolphin |
+| `memory.c` PMM (allocator shim only) | Pop registry + simple pops | Dolphin |
 | Linker script `link.ld` | `console_*` writing via `/dev/tty0` + `/dev/fb0` | virtio-net |
 
 C calls a small `extern "C"` surface (`driver_init`, `irq_dispatch`, `dev_read` / `dev_write`, `pop_register` / `pop_run`). Rust owns registration, probe, and class ops. Panic in Rust = serial dump + halt, same as a CPU exception.
@@ -226,7 +226,7 @@ Today every `console_putchar` eventually writes either VGA memory at `0xB8000` (
 C registry is a 10-slot array and `void (*pop_function)(unsigned int)`. Rust keeps that ABI so `init.c` can register either side during the transition.
 
 **Split (current intent):** pops are UX/aggregation; durable I/O and hardware state live in drivers.
-- Filesystem stays a **pop**; block/write path becomes **drivers** (ramdisk / virtio later).
+- Filesystem is now Rust FAT32 (`fs/`) over the **block drivers** (ramdisk / virtio / NVMe / USB MSC); the old in-memory FS pop is gone.
 - Memory / CPU are **drivers** (or drive-backed info); pops (or shell) call them.
 - Sysinfo is a **pop** that aggregates multiple drive/info commands.
 - Halt pop and shell `hang`/`halt` toys are removed.
@@ -235,13 +235,13 @@ C registry is a 10-slot array and `void (*pop_function)(unsigned int)`. Rust kee
 |-------|-----|----------------|
 | 1 | Shimjapii, Spinner, Uptime | Tiny; prove ABI + cursor save/restore |
 | 2 | Sysinfo, CPU, Memory | Thin UX over memory/cpu/info drives |
-| 3 | Filesystem, Dolphin | Large, stateful; FS pop + block drivers |
+| 3 | Dolphin (FS is now Rust FAT32, not a pop) | Large, stateful; sits on the FAT32 shell API |
 
 - [x] Rust `pops::registry` + `rust_pops_register` with the same `PopModule` layout
 - [x] Port Shimjapii, Spinner, Uptime; drop the C files from `scripts/lib/kernel.sh`
 - [x] Remove Halt pop + shell `hang` / `halt` commands
 - [x] Port Sysinfo / CPU / Memory as pops over `mem`/`cpu`/`clock` drives
-- [ ] Filesystem stays in-memory pop (no disk write yet); Dolphin later
+- [x] In-memory filesystem pop replaced by FAT32 on the selected block disk; Dolphin saves through it
 - [x] Update `pop.md` for Rust pops (cursor save/restore still required)
 
 ### 3.5 First char / clock drivers (same crate)
@@ -283,8 +283,9 @@ QEMU: virtio[0]=`usb0` (`popcorn-data.img`), virtio[1]=`nvme0` (`popcorn-interna
 |------|-------------|--------|
 | 1 | Disk registry + `disk list/use/info/read/write`; `ram0`; QEMU virtio `usb0` | Done |
 | 1b | Multi-virtio + picker; `install … YES`; QEMU locked `nvme0` stand-in | Done |
-| 2 | Enumerate real PCI NVMe/SATA as `internal` (stub → driver) | Later |
-| 3 | Real USB MSC `usb0` (not virtio stand-in) | Later |
+| 2 | Real NVMe driver + `install … YES`; QEMU `-device nvme` | Done |
+| 3 | Real USB MSC over xHCI (`usb0`); virtio fallback | Done |
+| 4 | AHCI/SATA (if hardware lacks NVMe) | Later |
 
 | Driver | Priority | Notes |
 |--------|----------|-------|
@@ -298,9 +299,10 @@ QEMU: virtio[0]=`usb0` (`popcorn-data.img`), virtio[1]=`nvme0` (`popcorn-interna
 - [x] Multi virtio-blk + boot auto-select / internal lock
 - [x] Shell `disk` + `install <name> [YES]`
 - [x] QEMU two-disk picker test images
-- [ ] Wave 2: real NVMe/AHCI drivers
-- [ ] Wave 3: USB MSC
-- [ ] VFS / on-disk FS (after sector I/O solid)
+- [x] Wave 2: NVMe driver (AHCI later)
+- [x] Wave 3: USB MSC over xHCI
+- [x] FAT32 on selected disk (format-on-first-use; shell ls/write/read/…)
+- [ ] Full VFS / multi-mount (later)
 
 ### 4.3 Platform (stretch)
 
@@ -317,10 +319,10 @@ QEMU: virtio[0]=`usb0` (`popcorn-data.img`), virtio[1]=`nvme0` (`popcorn-interna
 
 Depends on the driver network; not scheduled:
 
-- VFS + on-disk FS (ext2, FAT); retire the in-memory filesystem pop
+- VFS layer + a second on-disk FS (ext2); FAT32 already exists but is called directly by the shell
 - ELF loader and ring-3 userspace
 - Networking stack (virtio-net + minimal IP)
-- USB (xHCI)
+- USB hubs / HID (xHCI mass storage already works)
 - SMP, per-CPU runqueues
 
 ---

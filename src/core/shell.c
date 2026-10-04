@@ -13,6 +13,7 @@
 #include "../includes/driver_abi.h"
 #include "../includes/catalog.h"
 #include "../includes/disk.h"
+#include "../includes/filesystem.h"
 #include "../includes/kbd.h"
 #include <stddef.h>
 #include <stdbool.h>
@@ -28,20 +29,8 @@ extern ConsoleState console_state;
 extern unsigned int current_loc;
 extern void write_port(unsigned short port, unsigned char data);
 
-extern const PopModule filesystem_module;
 extern const PopModule dolphin_module;
 
-bool write_file(const char* name, const char* content);
-const char* read_file(const char* name);
-bool delete_file(const char* name);
-void list_files(void);
-void list_files_console(void);
-bool create_directory(const char* name);
-bool change_directory(const char* name);
-void list_hierarchy(void);
-const char* get_current_directory(void);
-const char* search_file(const char* name);
-bool copy_file(const char* src_name, const char* dest_path);
 int get_tick_count(void);
 
 void printTerm(const char *str, unsigned char color) {
@@ -69,30 +58,35 @@ void add_to_history(const char *command) {
         }
     }
 
-    // Add to circular buffer
-    unsigned int index = history_count % HISTORY_SIZE;
-    strcpy_simple(command_history[index], command);
-
+    /* Oldest-first array; when full, drop the oldest entry by shifting down.
+     * (The old modulo scheme pinned history_count at HISTORY_SIZE, so every new
+     * command overwrote slot 0 and the "newest" lookup read stale data.) */
+    unsigned int index;
     if (history_count < HISTORY_SIZE) {
-        history_count++;
+        index = history_count++;
+    } else {
+        for (unsigned int i = 1; i < HISTORY_SIZE; i++) {
+            for (unsigned int j = 0; j < sizeof(command_history[0]); j++) {
+                command_history[i - 1][j] = command_history[i][j];
+            }
+        }
+        index = HISTORY_SIZE - 1;
     }
+    /* Bounded copy: callers' line buffers are larger than a history slot. */
+    unsigned int n = 0;
+    while (n < sizeof(command_history[0]) - 1 && command[n] != '\0') {
+        command_history[index][n] = command[n];
+        n++;
+    }
+    command_history[index][n] = '\0';
 }
 
-/* Get command from history */
+/* Get command from history (offset 0 = oldest) */
 const char* get_history_command(int offset) {
     if (history_count == 0 || offset < 0 || offset >= (int)history_count) {
         return NULL;
     }
-    unsigned int index;
-    if (history_count <= HISTORY_SIZE) {
-        index = offset;
-    } else {
-        // Calculate actual position: start of oldest + offset
-        unsigned int oldest = history_count % HISTORY_SIZE;
-        index = (oldest + offset) % HISTORY_SIZE;
-    }
-
-    return command_history[index];
+    return command_history[offset];
 }
 
 /* List of all commands for autocomplete */
@@ -809,9 +803,9 @@ void execute_command(const char *command) {
             if (rc == 0) {
                 console_print_success("unlocked + selected (writes allowed)");
             } else if (rc == 1) {
-                console_println_color("Confirm: install <name> YES  (ERASES TARGET)", CONSOLE_INFO_COLOR);
+                console_println_color("Armed. Now type: install <name> YES  (writes to this disk)", CONSOLE_INFO_COLOR);
             } else {
-                console_print_error("install failed (internal disks only; need driver)");
+                console_print_error("install failed (unknown disk, not an internal disk, or no driver)");
             }
         }
     } else if (strcmp(command, "disk info") == 0) {
@@ -924,7 +918,9 @@ void execute_command(const char *command) {
             if (ok) {
                 int rc = rust_disk_write((uint64_t)lba32, sec, sizeof(sec));
                 if (rc == -5) {
-                    console_print_error("disk LOCKED — install <name> YES first");
+                    console_print_error("disk LOCKED — install <name>, then install <name> YES");
+                } else if (rc == -6) {
+                    console_print_error("refused: sector is in the MBR/GPT zone of a disk holding other data");
                 } else if (rc < 0) {
                     console_print_error("disk write refused (disk use <name> first?)");
                 } else {

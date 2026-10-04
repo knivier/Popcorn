@@ -7,6 +7,7 @@ mod alloc_shim;
 mod catalog;
 mod console_ffi;
 mod drivers;
+mod fs;
 mod pops;
 
 use alloc::boxed::Box;
@@ -61,6 +62,7 @@ pub extern "C" fn rust_init() {
     catalog::init();
     drivers::irq::seed_builtins();
     init_drives();
+    fs::init();
 }
 
 #[no_mangle]
