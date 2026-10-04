@@ -272,17 +272,35 @@ Refactor the rest of Phase 0 I/O, then storage.
 - [x] Shell/`kmain` read scancodes via `/dev/kbd` device ops (`kbd_read_scancode`)
 - [x] PS/2 controller split (keyboard vs mouse/aux channels; aux disabled until mouse drive)
 
-### 4.2 Block
+### 4.2 Block (Windows-safe)
+
+**Policy (picker):** boot/USB medium auto-selected and writable. `internal`
+(NVMe/SATA / QEMU second virtio) stays **LOCKED** until `install <name> YES`.
+ThinkPad Windows NVMe is never written unless the user explicitly unlocks it.
+QEMU: virtio[0]=`usb0` (`popcorn-data.img`), virtio[1]=`nvme0` (`popcorn-internal.img`).
+
+| Wave | Deliverable | Status |
+|------|-------------|--------|
+| 1 | Disk registry + `disk list/use/info/read/write`; `ram0`; QEMU virtio `usb0` | Done |
+| 1b | Multi-virtio + picker; `install … YES`; QEMU locked `nvme0` stand-in | Done |
+| 2 | Enumerate real PCI NVMe/SATA as `internal` (stub → driver) | Later |
+| 3 | Real USB MSC `usb0` (not virtio stand-in) | Later |
 
 | Driver | Priority | Notes |
 |--------|----------|-------|
-| **ramdisk** | P0 | Tests the block class with no hardware |
-| **virtio-blk** | P0 | Primary QEMU target; PCI virtio 1.0 |
-| **ata/ahci** | P1 | Real hardware; stretch |
+| **ramdisk** (`ram0`) | P0 | Always present; proves write gate |
+| **virtio-blk** (`usb0`/`nvme0`) | P0 | QEMU stand-ins; legacy `disable-modern=on` |
+| **usb** (`usb0` real) | P1 | ThinkPad persistent store |
+| **ata/ahci/nvme** | P2 | Internal; locked until install |
 
-- [ ] Block layer (`bio` or simple `block_request`)
-- [ ] Ramdisk, virtio-blk; AHCI stretch
-- [ ] `ioctl`: flush, geometry
+- [x] Write-gated disk registry (`drivers/block/`, `disk.h`)
+- [x] Ramdisk `ram0` (4 MiB, 512 B sectors)
+- [x] Multi virtio-blk + boot auto-select / internal lock
+- [x] Shell `disk` + `install <name> [YES]`
+- [x] QEMU two-disk picker test images
+- [ ] Wave 2: real NVMe/AHCI drivers
+- [ ] Wave 3: USB MSC
+- [ ] VFS / on-disk FS (after sector I/O solid)
 
 ### 4.3 Platform (stretch)
 

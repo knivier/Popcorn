@@ -12,6 +12,7 @@
 #include "../includes/utils.h"
 #include "../includes/driver_abi.h"
 #include "../includes/catalog.h"
+#include "../includes/disk.h"
 #include "../includes/kbd.h"
 #include <stddef.h>
 #include <stdbool.h>
@@ -106,6 +107,8 @@ static const char* available_commands[] = {
     "dol", "dol -new", "dol -open", "dol -save", "dol -close", "dol -help",
     "drive", "drive list", "init_drive", "drive info", "drive cmd", "dev", "dev list",
     "catalog", "catalog list",
+    "disk", "disk list", "disk use", "disk info", "disk read", "disk write",
+    "install",
     "wrap", "wrap on", "wrap off",
     NULL
 };
@@ -182,13 +185,20 @@ void execute_command(const char *command) {
     
     if (strcmp(command, "help") == 0 || strcmp(command, "halp") == 0) {
         console_newline();
-        console_println_color("Commands:", CONSOLE_HEADER_COLOR);
-        console_println("  clear uptime stop wrap on|off");
-        console_println("  write/read/rm/mkdir/go/back/ls/search/cp/listsys");
-        console_println("  sysinfo mem[-map|-use|-stats|-info|-debug] cpu[-hz|-info]");
-        console_println("  tasks timer syscalls mon[-list|-debug|-kill|-ultramon]");
-        console_println("  dol[-new|-open|-save|-help] drive/init_drive/dev/catalog");
-        console_println("  arrows: ^v scroll  <> history");
+        console_println_color("Shell", CONSOLE_HEADER_COLOR);
+        console_println("  clear   uptime   stop   wrap on|off");
+        console_println_color("Files", CONSOLE_HEADER_COLOR);
+        console_println("  ls  write  read  rm  mkdir  go  back  search  cp  listsys");
+        console_println_color("System", CONSOLE_HEADER_COLOR);
+        console_println("  sysinfo   mem   cpu   tasks   timer   syscalls");
+        console_println("  mon -list|-debug|-kill|-ultramon");
+        console_println_color("Devices", CONSOLE_HEADER_COLOR);
+        console_println("  drive list   init_drive <name>   dev list   catalog");
+        console_println("  disk list | use <name> | info | read <lba> | write <lba> <data>");
+        console_println("  install <internal> | install <internal> YES");
+        console_println_color("Editor / keys", CONSOLE_HEADER_COLOR);
+        console_println("  dol -new|-open|-save|-help");
+        console_println("  Up/Down scroll   Left/Right history");
     } else if (strcmp(command, "wrap") == 0 || strcmp(command, "wrap on") == 0) {
         console_set_wrap(true);
         console_print_success("wrap on");
@@ -770,6 +780,158 @@ void execute_command(const char *command) {
         char buf[512];
         rust_catalog_list(CATALOG_KIND_ALL, buf, sizeof(buf));
         console_println_color(buf, CONSOLE_INFO_COLOR);
+    } else if (strcmp(command, "disk") == 0 || strcmp(command, "disk list") == 0) {
+        char buf[384];
+        rust_disk_list(buf, sizeof(buf));
+        console_println_color(buf, CONSOLE_INFO_COLOR);
+    } else if (strncmp(command, "disk use ", 9) == 0) {
+        if (rust_disk_use(command + 9) == 0) {
+            console_print_success("disk selected");
+        } else {
+            console_print_error("disk use failed (unknown or LOCKED — install <name> YES)");
+        }
+    } else if (strncmp(command, "install ", 8) == 0) {
+        const char* p = command + 8;
+        char name[32];
+        int ni = 0;
+        while (*p && *p != ' ' && ni < (int)sizeof(name) - 1) {
+            name[ni++] = *p++;
+        }
+        name[ni] = '\0';
+        while (*p == ' ') {
+            p++;
+        }
+        int yes = (strcmp(p, "YES") == 0);
+        if (name[0] == '\0') {
+            console_print_error("Usage: install <name> [YES]");
+        } else {
+            int rc = rust_disk_install(name, yes);
+            if (rc == 0) {
+                console_print_success("unlocked + selected (writes allowed)");
+            } else if (rc == 1) {
+                console_println_color("Confirm: install <name> YES  (ERASES TARGET)", CONSOLE_INFO_COLOR);
+            } else {
+                console_print_error("install failed (internal disks only; need driver)");
+            }
+        }
+    } else if (strcmp(command, "disk info") == 0) {
+        char buf[192];
+        rust_disk_info(buf, sizeof(buf));
+        console_println_color(buf, CONSOLE_INFO_COLOR);
+    } else if (strncmp(command, "disk read ", 10) == 0) {
+        uint32_t lba32 = 0;
+        if (!parse_number(command + 10, &lba32)) {
+            console_print_error("Usage: disk read <lba>");
+        } else {
+            uint8_t sec[512];
+            int rc = rust_disk_read((uint64_t)lba32, sec, sizeof(sec));
+            if (rc < 0) {
+                console_print_error("disk read failed (select a disk first?)");
+            } else {
+                /* ASCII preview (printable) + continuous hex — not spaced byte pairs. */
+                char ascii[17];
+                char hex[33];
+                int ai = 0;
+                int hi = 0;
+                const char* hx = "0123456789ABCDEF";
+                for (int i = 0; i < 16; i++) {
+                    uint8_t b = sec[i];
+                    ascii[ai++] = (b >= 32 && b < 127) ? (char)b : '.';
+                    hex[hi++] = hx[b >> 4];
+                    hex[hi++] = hx[b & 0xF];
+                }
+                ascii[ai] = '\0';
+                hex[hi] = '\0';
+                console_print_color("text ", CONSOLE_INFO_COLOR);
+                console_println_color(ascii, CONSOLE_FG_COLOR);
+                console_print_color("hex  ", CONSOLE_INFO_COLOR);
+                console_println_color(hex, CONSOLE_FG_COLOR);
+            }
+        }
+    } else if (strncmp(command, "disk write ", 11) == 0) {
+        /*
+         * disk write <lba> [payload]
+         *   payload hex:  DEADBEEF  or  DE AD BE EF
+         *   payload text: POPCORN   (any non-hex → ASCII into sector)
+         * Rest of the 512-byte sector is zero-filled.
+         */
+        const char* p = command + 11;
+        uint32_t lba32 = 0;
+        if (!parse_number(p, &lba32)) {
+            console_print_error("Usage: disk write <lba> <hex|text>");
+        } else {
+            while (*p >= '0' && *p <= '9') {
+                p++;
+            }
+            while (*p == ' ') {
+                p++;
+            }
+            uint8_t sec[512];
+            for (int i = 0; i < 512; i++) {
+                sec[i] = 0;
+            }
+            int ok = 1;
+            if (*p) {
+                /* Hex if every non-space char is 0-9A-F; otherwise ASCII text. */
+                int all_hex = 1;
+                for (const char* q = p; *q; q++) {
+                    char c = *q;
+                    if (c == ' ') {
+                        continue;
+                    }
+                    int hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+                              (c >= 'A' && c <= 'F');
+                    if (!hex) {
+                        all_hex = 0;
+                        break;
+                    }
+                }
+                int bi = 0;
+                if (all_hex) {
+                    while (*p && bi < 512) {
+                        while (*p == ' ') {
+                            p++;
+                        }
+                        if (!*p) {
+                            break;
+                        }
+                        char c1 = *p++;
+                        while (*p == ' ') {
+                            p++;
+                        }
+                        char c2 = *p ? *p++ : '0';
+                        int h1 = (c1 >= '0' && c1 <= '9') ? c1 - '0'
+                                 : (c1 >= 'a' && c1 <= 'f') ? c1 - 'a' + 10
+                                 : (c1 >= 'A' && c1 <= 'F') ? c1 - 'A' + 10
+                                 : -1;
+                        int h2 = (c2 >= '0' && c2 <= '9') ? c2 - '0'
+                                 : (c2 >= 'a' && c2 <= 'f') ? c2 - 'a' + 10
+                                 : (c2 >= 'A' && c2 <= 'F') ? c2 - 'A' + 10
+                                 : -1;
+                        if (h1 < 0 || h2 < 0) {
+                            console_print_error("bad hex (use DEADBEEF or text like POPCORN)");
+                            ok = 0;
+                            break;
+                        }
+                        sec[bi++] = (uint8_t)((h1 << 4) | h2);
+                    }
+                } else {
+                    while (*p && bi < 512) {
+                        sec[bi++] = (uint8_t)*p++;
+                    }
+                }
+            }
+            if (ok) {
+                int rc = rust_disk_write((uint64_t)lba32, sec, sizeof(sec));
+                if (rc == -5) {
+                    console_print_error("disk LOCKED — install <name> YES first");
+                } else if (rc < 0) {
+                    console_print_error("disk write refused (disk use <name> first?)");
+                } else {
+                    console_print_success("sector written");
+                }
+            }
+        }
     } else {
         console_print_error("Command not found");
         console_print_color("Command: ", CONSOLE_INFO_COLOR);

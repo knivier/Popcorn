@@ -172,6 +172,8 @@ pub fn init_drives() {
     }
 
     pci::scan_bus0_print();
+    /* Block disks: ram0 always; vda if virtio-blk present. Write-gated. */
+    super::block::init();
 }
 
 /// Start one drive by name and publish its /dev node.

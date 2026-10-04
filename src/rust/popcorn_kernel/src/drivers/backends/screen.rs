@@ -340,6 +340,10 @@ fn sync_cursor() {
         if PREV_CURSOR != cur && PREV_CURSOR != 0xFFFF_FFFF {
             let ox = PREV_CURSOR % cols() as u32;
             let oy = PREV_CURSOR / cols() as u32;
+            /* Force redraw — cursor underline painted over the glyph; RENDERED
+             * still matches CELLS so sync_cell alone would skip and leave ____. */
+            let off = cell_off(ox as usize, oy as usize);
+            RENDERED[off] = 0xFF;
             sync_cell(ox, oy);
         }
         let (_ch, attr) = cell_at(CURSOR_X, CURSOR_Y);

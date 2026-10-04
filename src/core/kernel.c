@@ -53,6 +53,8 @@ void kmain(void) {
     int history_index = -1;
     /* PS/2 set 1: 0xE0 byte prefixes extended scancode; break = make | 0x80. */
     static bool kbd_expect_e0 = false;
+    static bool kbd_shift = false;
+    static bool kbd_caps = false;
 
     uint64_t loop_iter = 0;
     uint64_t last_uefi_poll_tick = 0;
@@ -132,7 +134,21 @@ void kmain(void) {
             kbd_expect_e0 = true;
             continue;
         } else if (keycode & 0x80) {
-            continue; /* key release: do not pass to map or as text */
+            /* Releases: track Shift; ignore other breaks. */
+            uint8_t make = (uint8_t)(keycode & 0x7F);
+            if (make == KBD_SCAN_LSHIFT || make == KBD_SCAN_RSHIFT) {
+                kbd_shift = false;
+            }
+            continue;
+        } else {
+            if (keycode == KBD_SCAN_LSHIFT || keycode == KBD_SCAN_RSHIFT) {
+                kbd_shift = true;
+                continue;
+            }
+            if (keycode == KBD_SCAN_CAPS) {
+                kbd_caps = !kbd_caps;
+                continue;
+            }
         }
 
         if (dolphin_is_active()) {
@@ -223,7 +239,15 @@ void kmain(void) {
                 console_scroll_down();
             }
         } else if (input_index < sizeof(input_buffer) - 1 && keycode < 128) {
-            char ch = keyboard_map[keycode];
+            extern unsigned char keyboard_map_shift[128];
+            char base = (char)keyboard_map[keycode];
+            char ch;
+            if (base >= 'a' && base <= 'z') {
+                /* Caps XOR Shift → uppercase letter. */
+                ch = (kbd_caps ^ kbd_shift) ? (char)(base - 'a' + 'A') : base;
+            } else {
+                ch = kbd_shift ? (char)keyboard_map_shift[keycode] : base;
+            }
             if (ch != 0) {
                 console_scroll_to_bottom();
                 input_buffer[input_index++] = ch;

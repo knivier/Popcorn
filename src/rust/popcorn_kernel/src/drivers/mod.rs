@@ -2,6 +2,7 @@ pub mod io;
 pub mod registry;
 pub mod backends;
 pub mod bus;
+pub mod block;
 pub mod device;
 pub mod driver;
 pub mod irq;

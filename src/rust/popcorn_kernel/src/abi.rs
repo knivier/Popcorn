@@ -31,6 +31,7 @@ pub const CATALOG_KIND_DEVICE: u8 = 2;
 pub const CATALOG_KIND_POP: u8 = 3;
 pub const CATALOG_KIND_IRQ: u8 = 4;
 pub const CATALOG_KIND_SYSCALL: u8 = 5;
+pub const CATALOG_KIND_DISK: u8 = 6;
 
 pub const CATALOG_STATE_IDLE: u8 = 0;
 pub const CATALOG_STATE_READY: u8 = 1;

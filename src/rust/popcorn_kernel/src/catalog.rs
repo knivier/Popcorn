@@ -140,6 +140,7 @@ pub fn list(kind_filter: u8, buf: &mut [u8]) -> usize {
             CATALOG_KIND_POP => "pop",
             CATALOG_KIND_IRQ => "irq",
             CATALOG_KIND_SYSCALL => "sys",
+            crate::abi::CATALOG_KIND_DISK => "disk",
             _ => "?",
         };
         let state = match e.state {

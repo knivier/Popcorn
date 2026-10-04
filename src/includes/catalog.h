@@ -12,6 +12,7 @@
 #define CATALOG_KIND_POP      3
 #define CATALOG_KIND_IRQ      4
 #define CATALOG_KIND_SYSCALL  5
+#define CATALOG_KIND_DISK     6
 
 #define CATALOG_STATE_IDLE    0
 #define CATALOG_STATE_READY   1

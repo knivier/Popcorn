@@ -10,7 +10,33 @@ source "$(dirname "${BASH_SOURCE[0]}")/kernel.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/img-uefi.sh"
 
 UEFI_IMG="${UEFI_IMG:-$POPCORN_TARGET/popcorn-uefi.img}"
+DATA_IMG="${DATA_IMG:-$POPCORN_TARGET/popcorn-data.img}"
+INTERNAL_IMG="${INTERNAL_IMG:-$POPCORN_TARGET/popcorn-internal.img}"
 OVMF_VARS="${OVMF_VARS:-$POPCORN_TARGET/ovmf_vars.fd}"
+
+# Ensure a raw image exists (never the Windows host drive).
+ensure_raw_img() {
+  local path="$1" mib="$2" label="$3"
+  if [[ ! -f "$path" ]]; then
+    log INFO "Creating $label: $path (${mib} MiB)"
+    dd if=/dev/zero of="$path" bs=1M count="$mib" status=none 2>/dev/null \
+      || dd if=/dev/zero of="$path" bs=1048576 count="$mib" 2>/dev/null
+  fi
+}
+
+# Two legacy virtio-blk disks for the picker:
+#   virtio[0] → guest name usb0  (boot/USB stand-in, writable)
+#   virtio[1] → guest name nvme0 (internal stand-in, LOCKED until install … YES)
+# Boot ESP stays on USB-storage (not virtio).
+qemu_uefi_data_disk_args() {
+  ensure_raw_img "$DATA_IMG" 64 "USB/boot stand-in disk"
+  ensure_raw_img "$INTERNAL_IMG" 128 "internal stand-in disk"
+  printf '%s\n' \
+    -drive "if=none,id=popusb,format=raw,file=$DATA_IMG" \
+    -device "virtio-blk-pci,drive=popusb,disable-modern=on" \
+    -drive "if=none,id=popnvme,format=raw,file=$INTERNAL_IMG" \
+    -device "virtio-blk-pci,drive=popnvme,disable-modern=on"
+}
 
 # Video for UEFI/GOP: std VGA often leaves a blank GTK window while the kernel
 # correctly paints OVMF's GOP buffer. virtio-vga (or ramfb) is what QEMU shows.
@@ -70,6 +96,7 @@ qemu_uefi_usb_args() {
     -drive "if=none,id=usbstick,format=raw,file=$UEFI_IMG" \
     -device qemu-xhci,id=xhci \
     -device usb-storage,bus=xhci.0,drive=usbstick \
+    $(qemu_uefi_data_disk_args) \
     $(qemu_uefi_video_args) \
     "${extra[@]}"
 }
@@ -379,6 +406,7 @@ qemu_uefi_run_interactive() {
     -drive "if=none,id=usbstick,format=raw,file=$UEFI_IMG" \
     -device qemu-xhci,id=xhci \
     -device usb-storage,bus=xhci.0,drive=usbstick \
+    $(qemu_uefi_data_disk_args) \
     $(qemu_uefi_video_args) \
     $(qemu_uefi_display_args) \
     -serial stdio \
