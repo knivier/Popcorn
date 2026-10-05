@@ -14,7 +14,6 @@ context_restore_iret_rsp: resq 1
 section .text
 global context_save
 global context_restore
-global context_switch_to_task
 extern scheduler_get_current_task
 
 ; void context_save(CPUContext* c)
@@ -146,9 +145,3 @@ context_restore:
     mov r14, [r14 + 8]
     mov rsp, [rel context_restore_iret_rsp]
     iretq
-
-; void context_switch_to_task(TaskStruct* t)
-; TaskStruct.context offset must match src/includes/scheduler.h (see _Static_assert in scheduler.c).
-context_switch_to_task:
-    add rdi, 72
-    jmp context_restore

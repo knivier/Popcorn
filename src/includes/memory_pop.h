@@ -1,4 +1,4 @@
-// src/includes/memory_pop.h
+// src/includes/memory_pop.h — implemented in Rust (mem info drive + memory pop)
 #ifndef MEMORY_POP_H
 #define MEMORY_POP_H
 

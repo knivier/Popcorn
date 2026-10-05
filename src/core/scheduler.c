@@ -12,9 +12,7 @@
 extern char __kernel_start[];
 extern char __text_vend[];
 
-_Static_assert(
-    offsetof(TaskStruct, context) == 72,
-    "context_switch_to_task: update add rdi, N in context_switch.asm to match offsetof(TaskStruct, context)");
+_Static_assert(offsetof(TaskStruct, context) == 72, "TaskStruct.context offset");
 _Static_assert(offsetof(CPUContext, r15) == 0, "asm context_save: update offsets");
 _Static_assert(offsetof(CPUContext, rax) == 112, "asm context_save: update offsets");
 _Static_assert(offsetof(CPUContext, rip) == 120, "asm context_save: mov [r10+120]");
@@ -168,31 +166,43 @@ void scheduler_sleep_ms(uint32_t ms) {
     scheduler_schedule();
 }
 
+bool scheduler_park(TaskStruct* t, WaitQueue* wq) {
+    if (!t || !wq) {
+        return false;
+    }
+    ready_remove(t);
+    t->state = TASK_STATE_BLOCKED;
+    t->wait_next = wq->head;
+    wq->head = t;
+    return true;
+}
+
+bool scheduler_arm_sleep(TaskStruct* t, uint64_t sleep_until_tick) {
+    if (!t) {
+        return false;
+    }
+    ready_remove(t);
+    t->sleep_until_tick = sleep_until_tick;
+    t->state = TASK_STATE_SLEEPING;
+    t->wait_next = NULL;
+    return true;
+}
+
+void scheduler_service_sleepers(void) {
+    wake_expired_sleepers();
+}
+
 // External functions
 extern uint64_t timer_get_ticks(void);
-extern unsigned char read_port(unsigned short port);
-extern void write_port(unsigned short port, unsigned char data);
+extern void boot_serial_putc(char c);
 
 // Stack management constants
 #define TASK_STACK_SIZE (16 * 1024)  // 16KB per task stack
 #define STACK_ALIGNMENT 16           // 16-byte alignment for x86-64
 
-// Serial port for debugging (COM1)
-#define SERIAL_PORT 0x3F8
-
-static void serial_putc(char c) {
-    /* Bound wait — bare COM1 with no backend must not wedge boot. */
-    for (int i = 0; i < 100000; i++) {
-        if (read_port(SERIAL_PORT + 5) & 0x20) {
-            break;
-        }
-    }
-    write_port(SERIAL_PORT, c);
-}
-
 static void serial_print(const char* str) {
-    while (*str) {
-        serial_putc(*str++);
+    while (str && *str) {
+        boot_serial_putc(*str++);
     }
 }
 
@@ -232,8 +242,28 @@ void task_free_stack(void* stack) {
 }
 
 // Initialize the scheduler
+/* Attach a private PML4 (shared identity + kernel half) for non-idle tasks. */
+static int task_attach_private_as(TaskStruct* task) {
+    uint64_t pml4;
+    if (!task) {
+        return -1;
+    }
+    pml4 = vmm_alloc_pml4();
+    if (pml4 == 0) {
+        serial_print("ERROR: vmm_alloc_pml4 failed\n");
+        return -1;
+    }
+    if (vmm_init_process_address_space(pml4, g_kernel_pml4_phys) != 0) {
+        vmm_free_pml4(pml4, g_kernel_pml4_phys);
+        serial_print("ERROR: vmm_init_process_address_space failed\n");
+        return -1;
+    }
+    task->address_space.pml4_phys = pml4;
+    return 0;
+}
+
 void scheduler_init(void) {
-    g_kernel_pml4_phys = vmm_get_cr3();
+    g_kernel_pml4_phys = vmm_get_cr3() & VMM_PTE_ADDR_MASK;
 
     // Initialize scheduler state
     scheduler.current_task = NULL;
@@ -268,14 +298,8 @@ void task_set_address_space(TaskStruct* task, uint64_t pml4_phys) {
     if (!task) {
         return;
     }
-    /*
-     * New PML4 must still map the kernel (same VAs as boot) or the next
-     * syscall/IRQ will fault. For a process root: vmm_alloc_pml4() then
-     * vmm_init_process_address_space(new, 0) (reference arg unused), then
-     * vmm_map_4k for user pages. Init uses vmm_map_kernel_region (layout).
-     * See vmm.h: 4 KiB overlays in 0..1 GiB need a 2 MiB PDE split first.
-     */
-    task->address_space.pml4_phys = pml4_phys;
+    /* Caller supplies a root that already shares identity + kernel half. */
+    task->address_space.pml4_phys = pml4_phys & VMM_PTE_ADDR_MASK;
 }
 
 // Scheduler tick handler (called from timer interrupt)
@@ -369,6 +393,15 @@ TaskStruct* scheduler_create_task(void (*function)(void), void* data, TaskPriori
     // Set up initial context for the task
     setup_task_context(task);
 
+    /* Idle keeps the boot master CR3; everyone else gets a private PML4. */
+    if (priority != PRIORITY_IDLE) {
+        if (task_attach_private_as(task) != 0) {
+            task_free_stack(task->stack_base);
+            task->stack_base = NULL;
+            return NULL;
+        }
+    }
+
     // Add to ready queue
     task->next = scheduler.ready_queue[priority];
     if (scheduler.ready_queue[priority]) {
@@ -417,8 +450,13 @@ void scheduler_destroy_task(uint32_t pid) {
         task->next->prev = task->prev;
     }
 
-    // Free stack
+    // Free stack + private PML4 (shared tables stay with the master).
     task_free_stack(task->stack_base);
+    if (task->address_space.pml4_phys != 0 &&
+        task->address_space.pml4_phys != g_kernel_pml4_phys) {
+        vmm_free_pml4(task->address_space.pml4_phys, g_kernel_pml4_phys);
+        task->address_space.pml4_phys = g_kernel_pml4_phys;
+    }
 
     // Mark as zombie
     task->state = TASK_STATE_ZOMBIE;
@@ -496,13 +534,27 @@ void scheduler_schedule(void) {
         }
     }
 
-    // If no ready task, use idle task (or current task if it's the idle task)
+    /* If still unset (e.g. idle queue empty while NORMAL tasks exist), scan all queues. */
     if (!next_task) {
-        // If current task is idle or no other tasks, just return
-        if (scheduler.current_task && scheduler.current_task->pid == 0) {
-            return;
+        for (int priority = PRIORITY_REALTIME; priority >= PRIORITY_IDLE; priority--) {
+            TaskStruct* cand = scheduler.ready_queue[priority];
+            while (cand) {
+                if (cand->state == TASK_STATE_READY || cand->state == TASK_STATE_RUNNING) {
+                    if (cand != scheduler.current_task || scheduler.total_tasks <= 1) {
+                        next_task = cand;
+                        break;
+                    }
+                }
+                cand = cand->next;
+            }
+            if (next_task && next_task != scheduler.current_task) {
+                break;
+            }
         }
-        next_task = scheduler.current_task;  // Keep running current task
+    }
+
+    if (!next_task) {
+        next_task = scheduler.current_task;
     }
     
     // Fallback: if no current task, find the idle task
@@ -806,16 +858,12 @@ void task_switch(TaskStruct* from, TaskStruct* to) {
         }
     }
 
-    /*
-     * Load the next task's page-table root after saving the outgoing state.
-     * Stays a no-op while every task uses the boot identity PML4; required once
-     * per-process PML4s map different user VAs. Kernel VAs must remain valid in
-     * every such root (e.g. permanent kernel map into each user table).
-     */
+    /* Switch address space after saving outgoing state (identity + kernel shared). */
     if (to->address_space.pml4_phys != 0) {
-        uint64_t cr = vmm_get_cr3();
-        if (to->address_space.pml4_phys != cr) {
-            vmm_load_cr3(to->address_space.pml4_phys);
+        uint64_t want = to->address_space.pml4_phys & VMM_PTE_ADDR_MASK;
+        uint64_t cur = vmm_get_cr3() & VMM_PTE_ADDR_MASK;
+        if (want != cur) {
+            vmm_load_cr3(want);
         }
     }
 
@@ -837,39 +885,18 @@ void task_switch(TaskStruct* from, TaskStruct* to) {
     __asm__ volatile("sti");
 }
 
-// Task exit
-void task_exit(void) {
-    TaskStruct* current = scheduler_get_current_task();
-    if (current) {
-        current->state = TASK_STATE_ZOMBIE;
-    }
-}
-
 // Idle task - runs when no other tasks are ready
 void idle_task(void) {
     idle_cpu_has_run = true;
     while (1) {
-        /* UEFI poll path: sti;hlt can hang on latent IRQ — pause and let timer_poll run. */
+        /* UEFI poll path: sti;hlt can hang on latent IRQ. Must timer_poll here or
+         * sleepers/wait-queue wakes never advance when only idle is runnable. */
         if (timer_is_poll_mode()) {
+            timer_poll();
             __asm__ volatile("pause");
         } else {
             __asm__ volatile("sti; hlt" ::: "memory");
         }
-    }
-}
-
-// Test task function to demonstrate context switching
-void test_task_function(void) {
-    static int counter = 0;
-
-    while (1) {
-        counter++;
-
-        if (counter % 10 == 0) {
-            scheduler_yield();
-        }
-
-        for (volatile int i = 0; i < 10; i++);
     }
 }
 
@@ -924,6 +951,14 @@ TaskStruct* scheduler_create_task_with_pid(void (*function)(void), void* data, T
     // Set up initial context for the task
     setup_task_context(task);
 
+    if (priority != PRIORITY_IDLE) {
+        if (task_attach_private_as(task) != 0) {
+            task_free_stack(task->stack_base);
+            task->stack_base = NULL;
+            return NULL;
+        }
+    }
+
     // Add to ready queue
     task->next = scheduler.ready_queue[priority];
     if (scheduler.ready_queue[priority]) {
@@ -951,6 +986,12 @@ void scheduler_kill_all_except_idle(void) {
                 }
                 if (task->next) {
                     task->next->prev = task->prev;
+                }
+
+                if (task->address_space.pml4_phys != 0 &&
+                    task->address_space.pml4_phys != g_kernel_pml4_phys) {
+                    vmm_free_pml4(task->address_space.pml4_phys, g_kernel_pml4_phys);
+                    task->address_space.pml4_phys = g_kernel_pml4_phys;
                 }
                 
                 // Update task count

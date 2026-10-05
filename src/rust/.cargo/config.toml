@@ -1,9 +1,14 @@
 [build]
 target = "x86_64-unknown-none"
 
+[unstable]
+# Rebuild libcore/alloc/compiler_builtins with our rustflags (large code model).
+# Prebuilt sysroot uses kernel model (R_X86_64_32) and cannot live at
+# Popcorn's high-half VA 0xFFFF800000000000.
+build-std = ["core", "alloc", "compiler_builtins"]
+build-std-features = ["compiler-builtins-mem"]
+
 [target.x86_64-unknown-none]
-# Popcorn high-half is 0xFFFF800000000000 (needs large). We link only the
-# crate .o (not prebuilt core), so large is safe.
 rustflags = [
   "-C", "code-model=large",
   "-C", "relocation-model=static",

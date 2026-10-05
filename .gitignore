@@ -39,3 +39,8 @@ VSWorkspaceState.json
 
 # Debug scratch
 src/dbg/
+scripts/gen_kernel_map.py
+docs/kernel-map.png
+
+# Accidental output dir created when a Windows path loses its backslashes under WSL
+/C:*/

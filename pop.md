@@ -1,4 +1,8 @@
-The core idea is that each "pop" is a module that can register itself with the kernel. Here's how it works in Popcorn v0.5:
+The core idea is that each "pop" is a module that can register itself with the kernel. Here's how it works in Popcorn v0.5 / v0.7:
+
+**Rust pops (v0.7):** Shimjapii, Spinner, and Uptime live in `src/rust/popcorn_kernel/src/pops/`. They export the same `PopModule` C ABI (`name` / `message` / `pop_function`) and register via `rust_pops_register()` from `init_show_modules`. Cursor save/restore is still required (`console_get_cursor` / `console_get_color`).
+
+**Direction:** pops are UX/aggregation; durable I/O is drivers. The filesystem is no longer a pop: it is Rust FAT32 (`src/rust/popcorn_kernel/src/fs/`) on the selected block disk. Memory/CPU/clock are info drives (`mem`, `cpu`, `clock`); Sysinfo aggregates those drives. Halt/`hang` toys are gone.
 
 1. The PopModule structure (in includes/pop_module.h) defines what a pop is:
 ```c

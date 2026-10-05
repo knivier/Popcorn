@@ -4,6 +4,8 @@
 #include "../includes/keyboard_queue.h"
 #include "../includes/scheduler.h"
 #include "../includes/utils.h"
+#include "../includes/timer.h"
+#include "../includes/keyboard_map.h"
 #include <stddef.h>
 #include <stdbool.h>
 
@@ -376,15 +378,26 @@ void dolphin_new_line(void) {
 void dolphin_render(void) {
     if (!editor.active) return;
     
-    // Clear screen and redraw
-    extern char *vidptr;
     extern void console_set_cursor(unsigned int x, unsigned int y);
-    
-    // Clear content area (leave top status)
-    for (unsigned int y = 4; y < 24; y++) {
-        for (unsigned int x = 0; x < 80; x++) {
-            vidptr[(y * 80 + x) * 2] = ' ';
-            vidptr[(y * 80 + x) * 2 + 1] = 0x07;
+    extern unsigned int console_cols(void);
+    extern unsigned int console_rows(void);
+
+    /* Clear content area via console API (no raw vidptr). */
+    {
+        unsigned int cols = console_cols();
+        unsigned int rows = console_rows();
+        unsigned int y_end = (rows > 2u) ? (rows - 2u) : rows;
+        if (y_end > 24u) {
+            y_end = 24u;
+        }
+        if (cols > 80u) {
+            cols = 80u;
+        }
+        for (unsigned int y = 4; y < y_end; y++) {
+            console_set_cursor(0, y);
+            for (unsigned int x = 0; x < cols; x++) {
+                console_putchar(' ');
+            }
         }
     }
     
@@ -444,8 +457,6 @@ void dolphin_render(void) {
 
 // Handle keyboard input in editor mode
 void dolphin_handle_key(unsigned char keycode) {
-    extern unsigned char keyboard_map[128];
-
     /* PS/2 break codes have bit 7 set; kmain normally strips. Safety if not. */
     if (keycode & 0x80) {
         return;
@@ -503,6 +514,16 @@ void dolphin_handle_key(unsigned char keycode) {
         dolphin_delete_char();
         dolphin_render();
     } else if (keycode == KEY_ESC) {
+        /* UEFI builds are poll-only and deliver keys to kmain, not to the scancode
+         * queue the ':' command loop below blocks on - it would spin forever.
+         * Fall back to "save and close" so ESC can never hang the machine. */
+        if (timer_is_poll_mode()) {
+            dolphin_save();
+            if (!editor.modified) {
+                dolphin_close();
+            }
+            return;
+        }
         // Clear bottom line for command
         console_set_cursor(0, 23);
         for (int i = 0; i < 80; i++) {
@@ -515,6 +536,9 @@ void dolphin_handle_key(unsigned char keycode) {
         char cmd_buffer[64] = {0};
         unsigned int cmd_index = 0;
         bool in_command = true;
+        /* kmain's Shift tracking is blocked while we spin here, so track it locally
+         * (otherwise "q!" could never be typed). */
+        bool cmd_shift = false;
         
         // Wait for ESC key to be released (break scan code) — same bytes as IRQ path
         while (true) {
@@ -535,8 +559,16 @@ void dolphin_handle_key(unsigned char keycode) {
                 continue;
             }
             
-            // Ignore key releases (high bit set)
+            // Key releases (high bit set): only Shift matters
             if (cmd_key & 0x80) {
+                unsigned char mk = (unsigned char)(cmd_key & 0x7F);
+                if (mk == KBD_SCAN_LSHIFT || mk == KBD_SCAN_RSHIFT) {
+                    cmd_shift = false;
+                }
+                continue;
+            }
+            if (cmd_key == KBD_SCAN_LSHIFT || cmd_key == KBD_SCAN_RSHIFT) {
+                cmd_shift = true;
                 continue;
             }
             
@@ -599,17 +631,18 @@ void dolphin_handle_key(unsigned char keycode) {
                 continue;
             }
             {
-                char ch = keyboard_map[cmd_key];
-                if (ch != 0 && cmd_index < 63) {
+                char ch = kbd_scancode_to_char(cmd_key, cmd_shift, 0);
+                if (ch >= ' ' && ch < 127 && cmd_index < 63) {
                     cmd_buffer[cmd_index++] = ch;
+                    cmd_buffer[cmd_index] = '\0';
                     console_putchar(ch);
                 }
             }
         }
     } else {
-        // Regular character
-        char ch = keyboard_map[keycode];
-        if (ch != 0) {
+        // Regular character (Shift / Caps honoured via kmain's tracked state)
+        char ch = kbd_scancode_to_char(keycode, kbd_shift_active(), kbd_caps_active());
+        if (ch >= ' ' && ch < 127) {
             dolphin_insert_char(ch);
             dolphin_render();
         }

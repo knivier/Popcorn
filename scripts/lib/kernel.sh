@@ -23,15 +23,26 @@ brew_install_if_missing() {
 }
 
 ensure_rust_toolchain() {
+  # Nightly + rust-src: rebuild core/alloc with large code model (build-std).
   if [[ -f "${HOME:-}/.cargo/env" ]]; then
     # shellcheck disable=SC1091
     source "${HOME}/.cargo/env"
   fi
-  have rustc && have cargo || die "Rust required (install rustup from https://rustup.rs). Then: rustup target add x86_64-unknown-none"
-  if ! rustup target list --installed 2>/dev/null | grep -qx 'x86_64-unknown-none'; then
-    log INFO "Adding Rust target x86_64-unknown-none"
-    rustup target add x86_64-unknown-none >>"$BUILD_LOG" 2>&1 \
-      || die "rustup target add x86_64-unknown-none failed"
+  have rustup || die "rustup required (https://rustup.rs) for Popcorn Rust (nightly + rust-src)"
+  have rustc && have cargo || die "Rust required (install rustup from https://rustup.rs)"
+  local rust_dir="$POPCORN_SRC/rust"
+  if [[ -f "$rust_dir/rust-toolchain.toml" ]]; then
+    (cd "$rust_dir" && rustup show active-toolchain) >>"$BUILD_LOG" 2>&1 || true
+    if ! (cd "$rust_dir" && rustup component list --installed 2>/dev/null | grep -qx 'rust-src'); then
+      log INFO "Adding rust-src for nightly build-std"
+      (cd "$rust_dir" && rustup component add rust-src) >>"$BUILD_LOG" 2>&1 \
+        || die "rustup component add rust-src failed"
+    fi
+    if ! (cd "$rust_dir" && rustup target list --installed 2>/dev/null | grep -qx 'x86_64-unknown-none'); then
+      log INFO "Adding Rust target x86_64-unknown-none"
+      (cd "$rust_dir" && rustup target add x86_64-unknown-none) >>"$BUILD_LOG" 2>&1 \
+        || die "rustup target add x86_64-unknown-none failed"
+    fi
   fi
 }
 
@@ -39,26 +50,20 @@ build_rust_kernel() {
   ensure_rust_toolchain
   local rust_dir="$POPCORN_SRC/rust"
   local out_dir="$POPCORN_TARGET/rust"
-  local archive member
+  local archive
   mkdir -p "$out_dir" "$OBJ_DIR"
   [[ -f "$rust_dir/Cargo.toml" ]] || die "Missing Rust workspace: $rust_dir/Cargo.toml"
-  log INFO "Building Rust crate popcorn_kernel (x86_64-unknown-none)"
+  log INFO "Building Rust crate popcorn_kernel (build-std, large code model)"
   (
     cd "$rust_dir"
     CARGO_TARGET_DIR="$out_dir" cargo build --release --target x86_64-unknown-none
   ) >>"$BUILD_LOG" 2>&1 || die "cargo build failed — see $BUILD_LOG"
   archive="$out_dir/x86_64-unknown-none/release/libpopcorn_kernel.a"
   [[ -f "$archive" ]] || die "Missing $archive"
-  # Link only the crate .o — pulling prebuilt core/compiler_builtins into this
-  # high-half image breaks R_X86_64_32S boot relocations. rust_init only needs C.
-  member="$(ar t "$archive" | grep '^popcorn_kernel-' | head -n1 || true)"
-  [[ -n "$member" ]] || die "No popcorn_kernel-*.o in $archive"
-  RUST_KERNEL_OBJ="$OBJ_DIR/popcorn_kernel_rs.o"
-  (cd "$OBJ_DIR" && ar x "$archive" "$member" && mv -f "$member" "$RUST_KERNEL_OBJ") \
-    >>"$BUILD_LOG" 2>&1 || die "Failed to extract $member from Rust archive"
-  [[ -f "$RUST_KERNEL_OBJ" ]] || die "Missing $RUST_KERNEL_OBJ"
-  export RUST_KERNEL_OBJ
-  log SUCCESS "Rust object: $RUST_KERNEL_OBJ (from $archive)"
+  # Full archive OK: core/alloc/compiler_builtins rebuilt with code-model=large.
+  RUST_KERNEL_ARCHIVE="$archive"
+  export RUST_KERNEL_ARCHIVE
+  log SUCCESS "Rust archive: $RUST_KERNEL_ARCHIVE"
 }
 
 check_kernel_dependencies() {
@@ -165,46 +170,45 @@ build_kernel() {
   compile_asm "core/context_switch.asm" "$OBJ_DIR/context_switch.o"
 
   compile_c "core/kernel.c" "$OBJ_DIR/kc.o"
+  compile_c "core/idt.c" "$OBJ_DIR/idt_c.o"
+  compile_c "core/kbd.c" "$OBJ_DIR/kbd.o"
+  compile_c "core/shell.c" "$OBJ_DIR/shell.o"
   compile_c "core/console.c" "$OBJ_DIR/console.o"
   compile_c "core/utils.c" "$OBJ_DIR/utils.o"
   compile_c "core/pop_module.c" "$OBJ_DIR/pop_module.o"
-  compile_c "pops/shimjapii_pop.c" "$OBJ_DIR/shimjapii_pop.o"
-  compile_c "pops/spinner_pop.c" "$OBJ_DIR/spinner_pop.o"
-  compile_c "pops/uptime_pop.c" "$OBJ_DIR/uptime_pop.o"
-  compile_c "pops/halt_pop.c" "$OBJ_DIR/halt_pop.o"
-  compile_c "pops/filesystem_pop.c" "$OBJ_DIR/filesystem_pop.o"
+  # shimjapii / spinner / uptime / FAT32 FS are Rust (libpopcorn_kernel.a)
   compile_c "core/multiboot2.c" "$OBJ_DIR/multiboot2.o"
   compile_c "core/uefi_input.c" "$OBJ_DIR/uefi_input.o"
-  compile_c "pops/sysinfo_pop.c" "$OBJ_DIR/sysinfo_pop.o"
-  compile_c "pops/memory_pop.c" "$OBJ_DIR/memory_pop.o"
-  compile_c "pops/cpu_pop.c" "$OBJ_DIR/cpu_pop.o"
+  # sysinfo / memory / cpu pops + info drives are Rust
   compile_c "pops/dolphin_pop.c" "$OBJ_DIR/dolphin_pop.o"
   compile_c "core/timer.c" "$OBJ_DIR/timer.o"
   compile_c "core/scheduler.c" "$OBJ_DIR/scheduler.o"
   compile_c "core/exception.c" "$OBJ_DIR/exception.o"
   compile_c "core/irq.c" "$OBJ_DIR/irq.o"
   compile_c "core/device.c" "$OBJ_DIR/device.o"
+  compile_c "core/phase2_selftest.c" "$OBJ_DIR/phase2_selftest.o"
   compile_c "core/memory.c" "$OBJ_DIR/memory.o"
   compile_c "core/vmm.c" "$OBJ_DIR/vmm.o"
   compile_c "core/init.c" "$OBJ_DIR/init.o"
   compile_c "core/syscall.c" "$OBJ_DIR/syscall.o"
 
   local objs=(
-    "$OBJ_DIR/kasm.o" "$OBJ_DIR/kc.o" "$OBJ_DIR/console.o" "$OBJ_DIR/utils.o"
-    "$OBJ_DIR/pop_module.o" "$OBJ_DIR/shimjapii_pop.o" "$OBJ_DIR/idt.o"
-    "$OBJ_DIR/context_switch.o" "$OBJ_DIR/spinner_pop.o" "$OBJ_DIR/uptime_pop.o"
-    "$OBJ_DIR/halt_pop.o" "$OBJ_DIR/filesystem_pop.o" "$OBJ_DIR/multiboot2.o"
-    "$OBJ_DIR/uefi_input.o" "$OBJ_DIR/sysinfo_pop.o" "$OBJ_DIR/memory_pop.o"
-    "$OBJ_DIR/cpu_pop.o" "$OBJ_DIR/dolphin_pop.o" "$OBJ_DIR/timer.o"
+    "$OBJ_DIR/kasm.o" "$OBJ_DIR/kc.o" "$OBJ_DIR/idt_c.o" "$OBJ_DIR/kbd.o" "$OBJ_DIR/shell.o"
+    "$OBJ_DIR/console.o" "$OBJ_DIR/utils.o"
+    "$OBJ_DIR/pop_module.o" "$OBJ_DIR/idt.o"
+    "$OBJ_DIR/context_switch.o"
+    "$OBJ_DIR/multiboot2.o"
+    "$OBJ_DIR/uefi_input.o"
+    "$OBJ_DIR/dolphin_pop.o" "$OBJ_DIR/timer.o"
     "$OBJ_DIR/scheduler.o" "$OBJ_DIR/exception.o" "$OBJ_DIR/irq.o" "$OBJ_DIR/device.o"
-    "$OBJ_DIR/memory.o" "$OBJ_DIR/vmm.o"
+    "$OBJ_DIR/phase2_selftest.o" "$OBJ_DIR/memory.o" "$OBJ_DIR/vmm.o"
     "$OBJ_DIR/init.o" "$OBJ_DIR/syscall.o"
   )
   for obj in "${objs[@]}"; do
     [[ -f "$obj" ]] || die "Missing object file: $obj"
   done
-  [[ -n "${RUST_KERNEL_OBJ:-}" && -f "$RUST_KERNEL_OBJ" ]] || die "Rust object missing — build_rust_kernel failed"
-  link_kernel "${objs[@]}" "$RUST_KERNEL_OBJ"
+  [[ -n "${RUST_KERNEL_ARCHIVE:-}" && -f "$RUST_KERNEL_ARCHIVE" ]] || die "Rust archive missing — build_rust_kernel failed"
+  link_kernel "${objs[@]}" "$RUST_KERNEL_ARCHIVE"
 }
 
 create_legacy_iso() {
@@ -285,7 +289,13 @@ qemu_legacy_smoke() {
     return 1
     ;;
   esac
-  echo "PASS: GRUB ISO reached kmain"
+  case "$body" in *r*) ;; *) echo "FAIL: GRUB missing r (rust_init)"; return 1 ;; esac
+  case "$body" in *a*) ;; *) echo "FAIL: GRUB missing a (Rust alloc)"; return 1 ;; esac
+  case "$body" in *I*) ;; *) echo "FAIL: GRUB missing Phase2 I (ioctl)"; return 1 ;; esac
+  case "$body" in *B*) ;; *) echo "FAIL: GRUB missing Phase2 B (wait-queue)"; return 1 ;; esac
+  case "$body" in *S*) ;; *) echo "FAIL: GRUB missing Phase2 S (sleep)"; return 1 ;; esac
+  case "$body" in *2*) ;; *) echo "FAIL: GRUB missing Phase2 2"; return 1 ;; esac
+  echo "PASS: GRUB ISO reached kmain (+ Phase2)"
 }
 
 show_logs() {

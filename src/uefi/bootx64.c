@@ -318,9 +318,61 @@ static void* memset_local(void* dst, INT8 v, UINTN n) {
 
 typedef EFI_STATUS (EFIAPI *EFI_GOP_QUERY_MODE_FN)(void* This, UINT32 ModeNumber, UINTN* SizeOfInfo,
     EFI_GRAPHICS_OUTPUT_MODE_INFORMATION** Info);
+typedef EFI_STATUS (EFIAPI *EFI_GOP_SET_MODE_FN)(void* This, UINT32 ModeNumber);
 
 static BOOLEAN uefi_ptr_ok(UINTN p) {
     return p >= 0x1000ULL && p < 0xFFFFFFFFFFFFULL;
+}
+
+/* Prefer 1280×720 (compact VNC); else closest mode at/above 800×600. */
+static void gop_prefer_720p(EFI_GRAPHICS_OUTPUT_PROTOCOL* gop) {
+    EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE* pm;
+    EFI_GOP_QUERY_MODE_FN query;
+    EFI_GOP_SET_MODE_FN set_mode;
+    UINT32 best = 0xFFFFFFFFu;
+    UINT32 best_score = 0xFFFFFFFFu;
+    UINT32 i;
+
+    if (!gop || !gop->Mode || !gop->QueryMode || !gop->SetMode) {
+        return;
+    }
+    pm = gop->Mode;
+    query = (EFI_GOP_QUERY_MODE_FN)gop->QueryMode;
+    set_mode = (EFI_GOP_SET_MODE_FN)gop->SetMode;
+
+    for (i = 0; i < pm->MaxMode; i++) {
+        UINTN info_size = 0;
+        EFI_GRAPHICS_OUTPUT_MODE_INFORMATION* mi = NULL;
+        UINT32 score;
+        UINT32 dx;
+        UINT32 dy;
+        if (EFI_ERROR(query(gop, i, &info_size, &mi)) || !mi) {
+            continue;
+        }
+        if (mi->HorizontalResolution == 1280 && mi->VerticalResolution == 720) {
+            best = i;
+            best_score = 0;
+            break;
+        }
+        if (mi->HorizontalResolution < 800 || mi->VerticalResolution < 600) {
+            continue;
+        }
+        /* Prefer modes near 720p over jumping to a huge 1080p. */
+        dx = (mi->HorizontalResolution > 1280)
+                 ? (mi->HorizontalResolution - 1280)
+                 : (1280 - mi->HorizontalResolution);
+        dy = (mi->VerticalResolution > 720)
+                 ? (mi->VerticalResolution - 720)
+                 : (720 - mi->VerticalResolution);
+        score = dx + dy;
+        if (score < best_score) {
+            best_score = score;
+            best = i;
+        }
+    }
+    if (best != 0xFFFFFFFFu && best != pm->Mode) {
+        (void)set_mode(gop, best);
+    }
 }
 
 static BOOLEAN fill_boot_info_from_gop(EFI_SYSTEM_TABLE* st, PopcornUefiBootInfo* info) {
@@ -330,6 +382,8 @@ static BOOLEAN fill_boot_info_from_gop(EFI_SYSTEM_TABLE* st, PopcornUefiBootInfo
     if (EFI_ERROR(status) || !gop || !uefi_ptr_ok((UINTN)gop)) {
         return FALSE;
     }
+
+    gop_prefer_720p(gop);
 
     EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE* pm = gop->Mode;
     if (!pm || !uefi_ptr_ok((UINTN)pm)) {
@@ -653,7 +707,7 @@ static UINT32 mb2_align(UINT32 n) {
 static void build_multiboot_mbi(EFI_MEMORY_DESCRIPTOR* mmap, UINTN map_size, UINTN desc_size) {
     UINT8* out = (UINT8*)(UINTN)POPCORN_UEFI_MBI_PHYS;
     UINT32 total = 8;
-    UINT32 mem_upper_kb = 0;
+    UINT64 mem_upper_kb = 0;
 
     for (UINT32 i = 0; i < 65536; i++) {
         out[i] = 0;
@@ -705,7 +759,8 @@ static void build_multiboot_mbi(EFI_MEMORY_DESCRIPTOR* mmap, UINTN map_size, UIN
             if (d->Type == EFI_CONVENTIONAL_MEMORY) {
                 mb2_type = MB2_MEM_AVAILABLE;
                 if (addr >= 0x100000ULL) {
-                    mem_upper_kb += (UINT32)(len / 1024ULL);
+                    /* Sum in 64-bit KB — UINT32 overflow used to wrap toward nonsense totals. */
+                    mem_upper_kb += len / 1024ULL;
                 }
             }
             UINT8* e = out + entry_off + written * MB2_MMAP_ENTRY_SIZE;
@@ -724,7 +779,8 @@ static void build_multiboot_mbi(EFI_MEMORY_DESCRIPTOR* mmap, UINTN map_size, UIN
         tag[0] = MB2_TAG_BASIC_MEMINFO;
         tag[1] = tag_sz;
         tag[2] = 640;
-        tag[3] = mem_upper_kb;
+        /* Multiboot basic meminfo field is 32-bit KB; clamp (mmap tag has the truth). */
+        tag[3] = (mem_upper_kb > 0xFFFFFFFFULL) ? 0xFFFFFFFFu : (UINT32)mem_upper_kb;
         total += tag_sz;
     }
 
@@ -741,7 +797,7 @@ static void build_multiboot_mbi(EFI_MEMORY_DESCRIPTOR* mmap, UINTN map_size, UIN
     {
         PopcornUefiBootInfo* info = (PopcornUefiBootInfo*)(UINTN)POPCORN_UEFI_HANDOFF_PHYS;
         if (info->magic == POPCORN_UEFI_MAGIC) {
-            info->available_ram_bytes = (UINT64)mem_upper_kb * 1024ULL;
+            info->available_ram_bytes = mem_upper_kb * 1024ULL;
         }
     }
 }

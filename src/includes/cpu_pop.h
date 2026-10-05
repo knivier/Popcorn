@@ -1,4 +1,4 @@
-// src/includes/cpu_pop.h
+// src/includes/cpu_pop.h — implemented in Rust (cpu info drive + cpu pop)
 #ifndef CPU_POP_H
 #define CPU_POP_H
 

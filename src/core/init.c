@@ -6,11 +6,7 @@
 #include "../includes/pop_module.h"
 #include "../includes/multiboot2.h"
 #include "../includes/uefi_input.h"
-#include "../includes/sysinfo_pop.h"
-#include "../includes/memory_pop.h"
-#include "../includes/cpu_pop.h"
 #include "../includes/dolphin_pop.h"
-#include "../includes/spinner_pop.h"
 #include "../includes/syscall.h"
 #include "../includes/device.h"
 #include "../includes/rust_abi.h"
@@ -79,8 +75,12 @@ void init_boot_screen(void) {
     console_println_color("", CONSOLE_FG_COLOR);
     console_println_color("", CONSOLE_FG_COLOR);
     console_heartbeat_tick();
+    console_present();
 
-    if (!console_fb_active()) {
+    /* UEFI used to skip this and flash past the boot UI; pause so it is visible. */
+    if (console_fb_active()) {
+        init_boot_hold();
+    } else {
         init_wait_for_enter();
     }
 
@@ -135,6 +135,7 @@ void init_draw_header(void) {
     console_println_color("Initialization Progress:", BOOT_SUBTITLE_COLOR);
     console_draw_separator(15, BOOT_INFO_COLOR);
     console_sync_end();
+    console_present();
 }
 
 void init_draw_progress_bar(int current, int total, const char* item) {
@@ -168,6 +169,7 @@ void init_draw_progress_bar(int current, int total, const char* item) {
         console_print_color(" ", CONSOLE_FG_COLOR);
     }
     console_sync_end();
+    console_present();
 }
 
 void init_show_memory_info(void) {
@@ -267,7 +269,7 @@ void init_show_syscall_info(void) {
 
     console_set_cursor(0, 20);
     console_print_color("    Calls: ", BOOT_INFO_COLOR);
-    console_println_color("21 System Calls Registered", BOOT_SUCCESS_COLOR);
+    console_println_color("14 System Calls Registered", BOOT_SUCCESS_COLOR);
 
     console_set_cursor(0, 21);
     for (int i = 0; i < BOOT_SCREEN_WIDTH; i++) {
@@ -278,25 +280,12 @@ void init_show_syscall_info(void) {
 void init_show_modules(void) {
     init_draw_progress_bar(5, total_init_steps, "Loading Kernel Modules");
 
-    extern const PopModule spinner_module;
-    extern const PopModule uptime_module;
-    extern const PopModule halt_module;
-    extern const PopModule filesystem_module;
-    extern const PopModule sysinfo_module;
-    extern const PopModule memory_module;
-    extern const PopModule cpu_module;
+    extern void rust_pops_register(void);
     extern const PopModule dolphin_module;
-    extern const PopModule shimjapii_module;
 
-    register_pop_module(&spinner_module);
-    register_pop_module(&uptime_module);
-    register_pop_module(&filesystem_module);
-    register_pop_module(&sysinfo_module);
-    register_pop_module(&memory_module);
-    register_pop_module(&cpu_module);
+    /* Rust: shimjapii/spinner/uptime/memory/cpu/sysinfo + FAT32. Dolphin stays C. */
+    rust_pops_register();
     register_pop_module(&dolphin_module);
-    register_pop_module(&halt_module);
-    register_pop_module(&shimjapii_module);
 
     console_set_cursor(0, 18);
     console_print_color("  ✓ Kernel Modules Loaded", BOOT_SUCCESS_COLOR);
@@ -304,7 +293,7 @@ void init_show_modules(void) {
 
     console_set_cursor(0, 19);
     console_print_color("    Modules: ", BOOT_INFO_COLOR);
-    console_println_color("9 Pop Modules Registered", BOOT_SUCCESS_COLOR);
+    console_println_color("Rust pops + Dolphin + FAT32", BOOT_SUCCESS_COLOR);
 
     console_set_cursor(0, 20);
     console_print_color("    Features: ", BOOT_INFO_COLOR);
@@ -320,6 +309,7 @@ void init_wait_for_enter(void) {
     console_set_cursor(0, 22);
     console_println_color("", CONSOLE_FG_COLOR);
     console_println_color("Press ENTER to continue to console (auto-continue)...", BOOT_SUBTITLE_COLOR);
+    console_present();
 
     extern unsigned char read_port(unsigned short port);
 
@@ -337,6 +327,19 @@ void init_wait_for_enter(void) {
             if (keycode == ENTER_KEY_CODE) {
                 break;
             }
+        }
+    }
+}
+
+/* Brief beat so UEFI/GOP shows the finished progress bar before the console. */
+void init_boot_hold(void) {
+    console_set_cursor(0, 22);
+    console_println_color("", CONSOLE_FG_COLOR);
+    console_println_color("Starting console...", BOOT_SUBTITLE_COLOR);
+    console_present();
+    for (volatile uint32_t i = 0; i < 8000000u; i++) {
+        if ((i & 0x1FFFFFu) == 0u) {
+            console_present();
         }
     }
 }
@@ -376,7 +379,7 @@ void init_transition_to_console(void) {
     }
 
     console_draw_prompt_with_path(get_current_directory());
-
     console_print_status_bar();
     console_heartbeat_tick();
+    console_present();
 }

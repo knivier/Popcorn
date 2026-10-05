@@ -143,19 +143,21 @@ void scheduler_block(WaitQueue* wq);
 void scheduler_wake_one(WaitQueue* wq);
 void scheduler_wake_all(WaitQueue* wq);
 void scheduler_sleep_ms(uint32_t ms);
+/* Park a ready task onto a wait queue / arm sleep without running its entry (self-test). */
+bool scheduler_park(TaskStruct* t, WaitQueue* wq);
+bool scheduler_arm_sleep(TaskStruct* t, uint64_t sleep_until_tick);
+void scheduler_service_sleepers(void);
 
 // Task management
 void task_init(TaskStruct* task, void (*function)(void), void* data, TaskPriority priority);
 void task_set_address_space(TaskStruct* task, uint64_t pml4_phys);
 uint64_t scheduler_kernel_pml4_phys(void);
 void task_switch(TaskStruct* from, TaskStruct* to);
-void task_exit(void);
 void setup_task_context(TaskStruct* task);
 
 // Assembly functions for context switching
 void context_save(CPUContext* context);
 void context_restore(CPUContext* context);
-void context_switch_to_task(TaskStruct* task);
 
 // Stack management
 void* task_allocate_stack(uint64_t size);

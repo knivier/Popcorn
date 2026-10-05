@@ -10,13 +10,45 @@ source "$(dirname "${BASH_SOURCE[0]}")/kernel.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/img-uefi.sh"
 
 UEFI_IMG="${UEFI_IMG:-$POPCORN_TARGET/popcorn-uefi.img}"
+DATA_IMG="${DATA_IMG:-$POPCORN_TARGET/popcorn-data.img}"
+INTERNAL_IMG="${INTERNAL_IMG:-$POPCORN_TARGET/popcorn-internal.img}"
+USB_DATA_IMG="${USB_DATA_IMG:-$POPCORN_TARGET/popcorn-usb-data.img}"
 OVMF_VARS="${OVMF_VARS:-$POPCORN_TARGET/ovmf_vars.fd}"
+
+# Ensure a raw image exists (never the Windows host drive).
+ensure_raw_img() {
+  local path="$1" mib="$2" label="$3"
+  if [[ ! -f "$path" ]]; then
+    log INFO "Creating $label: $path (${mib} MiB)"
+    dd if=/dev/zero of="$path" bs=1M count="$mib" status=none 2>/dev/null \
+      || dd if=/dev/zero of="$path" bs=1048576 count="$mib" 2>/dev/null
+  fi
+}
+
+# Data disks for the picker:
+#   usb-storage (xHCI, popcorn-usb-data.img) → guest name usb0 (real USB MSC,
+#                 writable; the boot ESP usb-storage becomes usb1)
+#   virtio-blk → guest name vda   when USB MSC works, else usb0 (stand-in)
+#   NVMe       → guest name nvme0 (real NVMe, Internal, LOCKED until install … YES)
+# Boot ESP stays on USB-storage (not virtio).
+qemu_uefi_data_disk_args() {
+  ensure_raw_img "$DATA_IMG" 64 "USB/boot stand-in disk"
+  ensure_raw_img "$USB_DATA_IMG" 64 "USB mass-storage data disk"
+  ensure_raw_img "$INTERNAL_IMG" 128 "internal NVMe disk"
+  printf '%s\n' \
+    -drive "if=none,id=popmsc,format=raw,file=$USB_DATA_IMG" \
+    -device "usb-storage,bus=xhci.0,drive=popmsc" \
+    -drive "if=none,id=popusb,format=raw,file=$DATA_IMG" \
+    -device "virtio-blk-pci,drive=popusb,disable-modern=on" \
+    -drive "if=none,id=popnvme,format=raw,file=$INTERNAL_IMG" \
+    -device "nvme,drive=popnvme,serial=POPCORN1"
+}
 
 # Video for UEFI/GOP: std VGA often leaves a blank GTK window while the kernel
 # correctly paints OVMF's GOP buffer. virtio-vga (or ramfb) is what QEMU shows.
 qemu_uefi_video_args() {
-  # 1280x800 matches 80x25 @ 8x16 glyphs at 2x (640x400 → 1280x800).
-  local res="${POPCORN_QEMU_RES:-1280x800}"
+  # Temporary: 720p so VNC stays compact/readable. Override with POPCORN_QEMU_RES.
+  local res="${POPCORN_QEMU_RES:-1280x720}"
   local xres="${res%x*}"
   local yres="${res#*x}"
   if qemu-system-x86_64 -device help 2>&1 | grep -q 'name "virtio-vga"'; then
@@ -64,40 +96,44 @@ qemu_uefi_usb_args() {
   local extra=("${@:2}")
   # shellcheck disable=SC2046
   qemu-system-x86_64 \
-    -machine q35 -m 1024 -cpu max \
+    -machine q35 -m 4096 -cpu max \
     -drive "if=pflash,format=raw,readonly=on,file=$code" \
     -drive "if=pflash,format=raw,file=$OVMF_VARS" \
     -drive "if=none,id=usbstick,format=raw,file=$UEFI_IMG" \
     -device qemu-xhci,id=xhci \
     -device usb-storage,bus=xhci.0,drive=usbstick \
+    $(qemu_uefi_data_disk_args) \
     $(qemu_uefi_video_args) \
     "${extra[@]}"
 }
 
 qemu_uefi_test_stability() {
-  local code dbg
+  local code dbg serial boot_timeout
   code="$(find_edk_code || true)"
   [[ -n "$code" ]] || { echo "FAIL: edk2-x86_64-code.fd not found" >&2; exit 1; }
 
   dbg="$POPCORN_TARGET/uefi-stability.log"
+  serial="$POPCORN_TARGET/uefi-stability-serial.log"
+  boot_timeout="${POPCORN_QEMU_BOOT_TIMEOUT:-120}"
   # Fresh vars avoid stuck OVMF boot menus from prior runs.
   rm -f "$OVMF_VARS"
   ensure_ovmf_vars "$OVMF_VARS"
-  rm -f "$dbg" "$POPCORN_TARGET/uefi-stability-serial.log"
+  rm -f "$dbg" "$serial"
   qemu_kill_all
   sleep 1
 
   qemu_uefi_usb_args "$code" \
     -debugcon "file:$dbg" -global isa-debugcon.iobase=0xe9 \
-    -serial "file:$POPCORN_TARGET/uefi-stability-serial.log" \
+    -serial "file:$serial" \
     -display none -no-reboot \
     -daemonize
 
   local waited=0
-  while [[ $waited -lt 45 ]]; do
+  while [[ $waited -lt "$boot_timeout" ]]; do
     if ! pgrep -f qemu-system-x86_64 >/dev/null; then
       echo "FAIL: QEMU exited before boot completed (${waited}s)"
       echo "debugcon: $(cat "$dbg" 2>/dev/null || true)"
+      echo "serial: $(cat "$serial" 2>/dev/null || true)"
       return 1
     fi
     if [[ -f "$dbg" ]] && grep -q 'M' "$dbg" 2>/dev/null; then
@@ -112,6 +148,7 @@ qemu_uefi_test_stability() {
   if ! pgrep -f qemu-system-x86_64 >/dev/null; then
     echo "FAIL: QEMU exited after reaching kmain"
     echo "debugcon: $(cat "$dbg" 2>/dev/null || true)"
+    echo "serial: $(cat "$serial" 2>/dev/null || true)"
     return 1
   fi
 
@@ -119,7 +156,14 @@ qemu_uefi_test_stability() {
   local body
   body="$(cat "$dbg" 2>/dev/null || true)"
   echo "debugcon: $body"
-  case "$body" in *M*) ;; *) echo "FAIL: kmain loop (M) not reached"; return 1 ;; esac
+  case "$body" in
+    *M*) ;;
+    *)
+      echo "FAIL: kmain loop (M) not reached after ${boot_timeout}s"
+      echo "serial: $(cat "$serial" 2>/dev/null || true)"
+      return 1
+      ;;
+  esac
   case "$body" in *R*) ;; *) echo "FAIL: RAM parse (R) not seen"; return 1 ;; esac
   echo "PASS: guest reached kmain and stayed alive"
 }
@@ -286,7 +330,12 @@ qemu_uefi_test_debugcon() {
   case "$body" in *icd*KL*) ;; *) die "expected boot trace icd..KL" ;; esac
   case "$body" in *R*) ;; *) die "expected R (UEFI RAM / MBI parsed)" ;; esac
   case "$body" in *r*) ;; *) die "expected r (rust_init / Rust active)" ;; esac
+  case "$body" in *a*) ;; *) die "expected a (Rust GlobalAlloc / kmalloc)" ;; esac
   case "$body" in *M*) ;; *) die "expected M (kmain loop entered)" ;; esac
+  case "$body" in *I*) ;; *) die "expected I (Phase2 ioctl→device)" ;; esac
+  case "$body" in *B*) ;; *) die "expected B (Phase2 wait-queue wake)" ;; esac
+  case "$body" in *S*) ;; *) die "expected S (Phase2 sleep wake)" ;; esac
+  case "$body" in *2*) ;; *) die "expected 2 (Phase2 self-test passed)" ;; esac
   echo "PASS: debugcon boot trace"
 }
 
@@ -317,8 +366,9 @@ qemu_uefi_test_pf() {
     -daemonize
 
   local waited=0
+  # Wait for the full dump — '#PF' alone races the kill before CR2= is written.
   while [[ $waited -lt 45 ]]; do
-    if grep -q '#PF' "$dbg" 2>/dev/null || grep -q '#PF' "$serial" 2>/dev/null; then
+    if grep -q 'CR2=' "$dbg" 2>/dev/null || grep -q 'CR2=' "$serial" 2>/dev/null; then
       break
     fi
     if ! pgrep -f qemu-system-x86_64 >/dev/null; then
@@ -342,7 +392,7 @@ qemu_uefi_test_pf() {
 }
 
 qemu_uefi_smoke() {
-  echo "== stability (no -no-shutdown, 30s) =="
+  echo "== stability (no -no-shutdown, ${POPCORN_QEMU_BOOT_TIMEOUT:-120}s boot timeout) =="
   qemu_uefi_test_stability || return 1
   echo "== alive (display) =="
   qemu_uefi_test_alive || return 1
@@ -367,12 +417,13 @@ qemu_uefi_run_interactive() {
 
   # shellcheck disable=SC2046
   exec qemu-system-x86_64 \
-    -machine q35 -m 1024 -cpu max \
+    -machine q35 -m 4096 -cpu max \
     -drive "if=pflash,format=raw,readonly=on,file=$code" \
     -drive "if=pflash,format=raw,file=$OVMF_VARS" \
     -drive "if=none,id=usbstick,format=raw,file=$UEFI_IMG" \
     -device qemu-xhci,id=xhci \
     -device usb-storage,bus=xhci.0,drive=usbstick \
+    $(qemu_uefi_data_disk_args) \
     $(qemu_uefi_video_args) \
     $(qemu_uefi_display_args) \
     -serial stdio \

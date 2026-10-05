@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* IRQ handler pushes scancodes; consumers (kmain, halt, Dolphin) pop. */
+/* Scancodes from Rust /dev/kbd; consumers (kmain, Dolphin) pop. */
 bool key_queue_pop(uint8_t* out);
 
 #endif

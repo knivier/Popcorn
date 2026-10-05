@@ -1,6 +1,6 @@
 #include "../includes/device.h"
 #include "../includes/console.h"
-#include "../includes/utils.h"
+#include "../includes/driver_abi.h"
 #include <stddef.h>
 
 static Device g_devices[MAX_DEVICES];
@@ -30,7 +30,6 @@ static int name_eq(const char* a, const char* b) {
     return *a == *b;
 }
 
-/* Strip optional "/dev/" prefix for lookups. */
 static const char* strip_dev_prefix(const char* name) {
     if (!name) {
         return "";
@@ -45,14 +44,13 @@ static int64_t console_read(Device* dev, void* buf, size_t count) {
     (void)dev;
     (void)buf;
     (void)count;
-    /* Non-blocking empty for now; blocking reads use wait queues in syscall. */
     return 0;
 }
 
 static int64_t console_write(Device* dev, const void* buf, size_t count) {
     (void)dev;
     if (!buf) {
-        return -2; /* EINVAL */
+        return -2;
     }
     if (count > 4096) {
         return -2;
@@ -67,10 +65,10 @@ static int64_t console_write(Device* dev, const void* buf, size_t count) {
 static int64_t console_ioctl(Device* dev, uint64_t request, void* argp) {
     (void)dev;
     switch (request) {
-        case 0x5401: /* TCGETS */
-        case 0x5402: /* TCSETS */
+        case 0x5401:
+        case 0x5402:
             return 0;
-        case 0x540B: /* TIOCGWINSZ */
+        case 0x540B:
             if (argp) {
                 uint16_t* winsize = (uint16_t*)argp;
                 winsize[0] = 80;
@@ -90,30 +88,32 @@ static const DeviceOps console_ops = {
     .ioctl = console_ioctl,
 };
 
-static int64_t null_read(Device* dev, void* buf, size_t count) {
-    (void)dev;
-    (void)buf;
-    (void)count;
-    return 0;
+/* Bridge: C Device table entry → Rust driver by name. */
+static int64_t rust_bridge_read(Device* dev, void* buf, size_t count) {
+    if (!dev) {
+        return -2;
+    }
+    return rust_device_read(dev->name, buf, count);
 }
 
-static int64_t null_write(Device* dev, const void* buf, size_t count) {
-    (void)dev;
-    (void)buf;
-    return (int64_t)count;
+static int64_t rust_bridge_write(Device* dev, const void* buf, size_t count) {
+    if (!dev) {
+        return -2;
+    }
+    return rust_device_write(dev->name, buf, count);
 }
 
-static int64_t null_ioctl(Device* dev, uint64_t request, void* argp) {
-    (void)dev;
-    (void)request;
-    (void)argp;
-    return -2;
+static int64_t rust_bridge_ioctl(Device* dev, uint64_t request, void* argp) {
+    if (!dev) {
+        return -2;
+    }
+    return rust_device_ioctl(dev->name, request, (void*)argp);
 }
 
-static const DeviceOps null_ops = {
-    .read = null_read,
-    .write = null_write,
-    .ioctl = null_ioctl,
+static const DeviceOps rust_bridge_ops = {
+    .read = rust_bridge_read,
+    .write = rust_bridge_write,
+    .ioctl = rust_bridge_ioctl,
 };
 
 void device_init(void) {
@@ -124,8 +124,8 @@ void device_init(void) {
         g_devices[i].name[0] = '\0';
     }
     g_device_count = 0;
+    /* Console UX stays C; char/screen nodes come from Rust via device_register_rust. */
     device_register("console", &console_ops, NULL);
-    device_register("null", &null_ops, NULL);
 }
 
 Device* device_register(const char* name, const DeviceOps* ops, void* priv) {
@@ -133,6 +133,14 @@ Device* device_register(const char* name, const DeviceOps* ops, void* priv) {
         return NULL;
     }
     const char* n = strip_dev_prefix(name);
+    /* Replace existing node with same name. */
+    for (uint32_t i = 0; i < MAX_DEVICES; i++) {
+        if (g_devices[i].used && name_eq(g_devices[i].name, n)) {
+            g_devices[i].ops = ops;
+            g_devices[i].priv = priv;
+            return &g_devices[i];
+        }
+    }
     for (uint32_t i = 0; i < MAX_DEVICES; i++) {
         if (!g_devices[i].used) {
             g_devices[i].used = true;
@@ -144,6 +152,10 @@ Device* device_register(const char* name, const DeviceOps* ops, void* priv) {
         }
     }
     return NULL;
+}
+
+void device_register_rust(const char* name) {
+    device_register(name, &rust_bridge_ops, NULL);
 }
 
 Device* device_find(const char* name) {

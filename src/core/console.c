@@ -1,405 +1,127 @@
 #include "../includes/console.h"
 #include "../includes/multiboot2.h"
-#include "../includes/boot_fb.h"
 #include "../includes/utils.h"
 #include "../includes/uefi_input.h"
 #include "../includes/timer.h"
+#include "../includes/driver_abi.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
 
 #define HEARTBEAT_ROW CONSOLE_HEARTBEAT_ROW
-#define HEARTBEAT_COL 52u
 
 static volatile uint64_t console_alive_seq;
-
-// VGA Hardware Cursor Ports
-#define VGA_CTRL_PORT  0x3D4
-#define VGA_DATA_PORT  0x3D5
-#define VGA_CURSOR_LOC_LOW  0x0F
-#define VGA_CURSOR_LOC_HIGH 0x0E
 
 // External console state (defined in core/kernel.c)
 extern ConsoleState console_state;
 
 /*
- * Text backend.
- *
- * Legacy VGA text mode (BIOS/CSM machines, QEMU): vga_memory points at the real
- * VGA text buffer at 0xB8000 and writes appear directly.
- *
- * UEFI framebuffer mode (no-CSM machines like ThinkPad T14s Gen 4): there is no
- * VGA text buffer, so vga_memory points at an in-RAM shadow of the 80x25 text
- * cells and console_present() renders changed cells into GRUB's linear
- * framebuffer using an 8x16 bitmap font. All existing console/pop code keeps
- * working unchanged against vga_memory; only the present step differs.
+ * Text UX lives here; pixels / CRTC live in the Rust display drive.
+ * vga_memory is either 0xB8000 (VGA) or the Rust cell shadow (framebuffer).
  */
 static char* vga_memory = (char*)VGA_MEMORY_ADDRESS;
 
-// ---- Framebuffer text backend ----------------------------------------------
-
-#define FB_FONT_W 8u
-#define FB_FONT_H 16u
-
-static volatile uint8_t* fb_base = NULL;
-static uint8_t fb_scale_x = 1u;
-static uint8_t fb_scale_y = 1u;
-static uint32_t fb_pitch = 0;
-static uint32_t fb_width = 0;
-static uint32_t fb_height = 0;
-static uint8_t  fb_bytespp = 0;
-static uint8_t  fb_rpos = 0, fb_rsize = 8;
-static uint8_t  fb_gpos = 0, fb_gsize = 8;
-static uint8_t  fb_bpos = 0, fb_bsize = 8;
-static uint32_t fb_origin_x = 0, fb_origin_y = 0;
-static bool     fb_active = false;
-static unsigned int fb_prev_cursor = 0xFFFFFFFFu;
-static uint32_t fb_dirty_rows = 0;
-static unsigned int fb_defer_sync = 0;
-
-// Shadow of the 80x25 text cells (char, attr) used while in framebuffer mode.
-static char fb_text_shadow[VGA_MEMORY_SIZE];
-// Last cells actually drawn to the framebuffer (for dirty-cell diffing).
-static char fb_text_rendered[VGA_MEMORY_SIZE];
-
-// 16-color VGA palette -> 0xRRGGBB (index 0 = Popcorn navy, not pure black)
-static const uint32_t fb_palette[16] = {
-    POPCORN_FB_BG_RGB, 0x0000AAu, 0x00AA00u, 0x00AAAAu,
-    0xAA0000u, 0xAA00AAu, 0xAA5500u, 0xAAAAAAu,
-    0x555555u, 0x5555FFu, 0x55FF55u, 0x55FFFFu,
-    0xFF5555u, 0xFF55FFu, 0xFFFF55u, 0xFFFFFFu
-};
-
-#include "../includes/font8x16.h"
-
-static inline uint32_t fb_scale_chan(uint32_t v8, uint8_t bits) {
-    if (bits >= 8) {
-        return v8 << (bits - 8u);
-    }
-    return v8 >> (8u - bits);
+unsigned int console_cols(void) {
+    uint32_t c = rust_screen_cols();
+    return c ? (unsigned int)c : VGA_WIDTH;
 }
 
-static inline uint32_t fb_pack(uint32_t rgb) {
-    uint32_t r = (rgb >> 16) & 0xFFu;
-    uint32_t g = (rgb >> 8) & 0xFFu;
-    uint32_t b = rgb & 0xFFu;
-    r = fb_scale_chan(r, fb_rsize);
-    g = fb_scale_chan(g, fb_gsize);
-    b = fb_scale_chan(b, fb_bsize);
-    return (r << fb_rpos) | (g << fb_gpos) | (b << fb_bpos);
+unsigned int console_rows(void) {
+    uint32_t r = rust_screen_rows();
+    return r ? (unsigned int)r : VGA_HEIGHT;
 }
 
-static inline void fb_put_pixel(uint32_t x, uint32_t y, uint32_t pixel) {
-    volatile uint8_t* p = fb_base + (uint64_t)y * fb_pitch + (uint64_t)x * fb_bytespp;
-    for (uint8_t i = 0; i < fb_bytespp; i++) {
-        p[i] = (uint8_t)(pixel >> (i * 8u));
-    }
+static unsigned int console_cell_bytes(void) {
+    return console_cols() * console_rows() * 2u;
 }
 
-static uint32_t fb_cell_w(void) {
-    return (uint32_t)FB_FONT_W * (uint32_t)fb_scale_x;
-}
-
-static uint32_t fb_cell_h(void) {
-    return (uint32_t)FB_FONT_H * (uint32_t)fb_scale_y;
-}
-
-static void fb_draw_cell(unsigned int cx, unsigned int cy);
-static void fb_draw_cursor(unsigned int cx, unsigned int cy);
-static void console_fb_sync_cell(unsigned int cx, unsigned int cy);
-static void console_fb_sync_cursor(void);
-
-static void console_fb_fill_text_panel(void) {
-    if (!fb_active || !fb_base) {
-        return;
-    }
-    uint32_t x0 = fb_origin_x;
-    uint32_t y0 = fb_origin_y;
-    uint32_t rw = VGA_WIDTH * fb_cell_w();
-    uint32_t rh = VGA_HEIGHT * fb_cell_h();
-    uint32_t pix = fb_pack(POPCORN_FB_BG_RGB);
-    for (uint32_t y = y0; y < y0 + rh && y < fb_height; y++) {
-        for (uint32_t x = x0; x < x0 + rw && x < fb_width; x++) {
-            fb_put_pixel(x, y, pix);
-        }
-    }
-}
-
-static void console_fb_mark_row(unsigned int cy) {
-    if (cy < VGA_HEIGHT) {
-        fb_dirty_rows |= (1u << cy);
-    }
-}
-
-static void console_fb_sync_row(unsigned int cy) {
-    if (!fb_active || cy >= VGA_HEIGHT) {
-        return;
-    }
-    for (unsigned int cx = 0; cx < VGA_WIDTH; cx++) {
-        console_fb_sync_cell(cx, cy);
-    }
-}
-
-static void console_fb_flush_dirty_rows(void) {
-    if (!fb_active) {
-        return;
-    }
-    for (unsigned int cy = 0; cy < VGA_HEIGHT; cy++) {
-        if (fb_dirty_rows & (1u << cy)) {
-            console_fb_sync_row(cy);
-        }
-    }
-    fb_dirty_rows = 0;
-    console_fb_sync_cursor();
-}
-
-static void console_fb_sync_cell(unsigned int cx, unsigned int cy) {
-    if (!fb_active || cx >= VGA_WIDTH || cy >= VGA_HEIGHT) {
-        return;
-    }
-    unsigned int pos = (cy * VGA_WIDTH + cx) * 2u;
-    if (fb_text_rendered[pos] == vga_memory[pos] &&
-        fb_text_rendered[pos + 1] == vga_memory[pos + 1]) {
-        return;
-    }
-    fb_draw_cell(cx, cy);
-    fb_text_rendered[pos] = vga_memory[pos];
-    fb_text_rendered[pos + 1] = vga_memory[pos + 1];
-}
-
-static void console_fb_sync_cursor(void) {
-    if (!fb_active) {
-        return;
-    }
-    unsigned int cur = console_state.cursor_y * VGA_WIDTH + console_state.cursor_x;
-    if (fb_prev_cursor != cur && fb_prev_cursor != 0xFFFFFFFFu) {
-        console_fb_sync_cell(fb_prev_cursor % VGA_WIDTH, fb_prev_cursor / VGA_WIDTH);
-    }
-    fb_draw_cursor(console_state.cursor_x, console_state.cursor_y);
-    fb_prev_cursor = cur;
-}
-
-static void fb_compute_layout(void) {
-    /*
-     * Uniform integer scale keeps 8x16 glyphs proportional (no tall stretch).
-     * Native text is 640x400; on 1280x800 that is a clean 2x fill.
-     */
-    uint32_t sw = fb_width / (VGA_WIDTH * FB_FONT_W);
-    uint32_t sh = fb_height / (VGA_HEIGHT * FB_FONT_H);
-    uint32_t s = sw < sh ? sw : sh;
-    if (s < 1u) {
-        s = 1u;
-    }
-    if (s > 4u) {
-        s = 4u; /* avoid huge nearest-neighbor pixels */
-    }
-    fb_scale_x = (uint8_t)s;
-    fb_scale_y = (uint8_t)s;
-    while (fb_scale_x > 1u &&
-           (VGA_WIDTH * FB_FONT_W * (uint32_t)fb_scale_x > fb_width ||
-            VGA_HEIGHT * FB_FONT_H * (uint32_t)fb_scale_y > fb_height)) {
-        fb_scale_x--;
-        fb_scale_y = fb_scale_x;
-    }
-    uint32_t text_w = VGA_WIDTH * fb_cell_w();
-    uint32_t text_h = VGA_HEIGHT * fb_cell_h();
-    fb_origin_x = (fb_width > text_w) ? (fb_width - text_w) / 2u : 0u;
-    fb_origin_y = (fb_height > text_h) ? (fb_height - text_h) / 2u : 0u;
-}
-
-// Render one text cell (char + attr) from the shadow buffer into the framebuffer.
-static void fb_draw_cell(unsigned int cx, unsigned int cy) {
-    unsigned int pos = (cy * VGA_WIDTH + cx) * 2;
-    unsigned char ch = (unsigned char)vga_memory[pos];
-    unsigned char attr = (unsigned char)vga_memory[pos + 1];
-    uint32_t fgp = fb_pack(fb_palette[attr & 0x0Fu]);
-    uint32_t bgp = fb_pack(fb_palette[(attr >> 4) & 0x07u]);
-    const uint8_t* glyph = font8x16_basic[ch & 0x7Fu];
-    uint32_t cw = fb_cell_w();
-    uint32_t cell_h = fb_cell_h();
-    uint32_t px0 = fb_origin_x + cx * cw;
-    uint32_t py0 = fb_origin_y + cy * cell_h;
-    for (uint32_t dy = 0; dy < cell_h; dy++) {
-        for (uint32_t dx = 0; dx < cw; dx++) {
-            fb_put_pixel(px0 + dx, py0 + dy, bgp);
-        }
-    }
-    for (uint32_t row = 0; row < FB_FONT_H; row++) {
-        uint8_t bits = glyph[row];
-        for (uint32_t col = 0; col < FB_FONT_W; col++) {
-            if ((bits & (0x80u >> col)) == 0) {
-                continue;
-            }
-            uint32_t gx = px0 + col * (uint32_t)fb_scale_x;
-            uint32_t gy = py0 + row * (uint32_t)fb_scale_y;
-            for (uint32_t sy = 0; sy < (uint32_t)fb_scale_y; sy++) {
-                for (uint32_t sx = 0; sx < (uint32_t)fb_scale_x; sx++) {
-                    fb_put_pixel(gx + sx, gy + sy, fgp);
-                }
-            }
-        }
-    }
-}
-
-static void fb_draw_cursor(unsigned int cx, unsigned int cy) {
-    if (!console_state.cursor_visible) {
-        return;
-    }
-    unsigned int pos = (cy * VGA_WIDTH + cx) * 2;
-    unsigned char attr = (unsigned char)vga_memory[pos + 1];
-    uint32_t fgp = fb_pack(fb_palette[attr & 0x0Fu]);
-    uint32_t cw = fb_cell_w();
-    uint32_t cell_h = fb_cell_h();
-    uint32_t px0 = fb_origin_x + cx * cw;
-    uint32_t py0 = fb_origin_y + cy * cell_h;
-    for (uint32_t col = 0; col < cw; col++) {
-        fb_put_pixel(px0 + col, py0 + cell_h - 1u, fgp);
-        if (cell_h > 1u) {
-            fb_put_pixel(px0 + col, py0 + cell_h - 2u, fgp);
-        }
-    }
-}
-
-bool console_fb_active(void) {
-    return fb_active;
-}
-
-void console_fb_paint_background(uint32_t rgb) {
-    if (!fb_active || !fb_base) {
-        return;
-    }
-    fb_compute_layout();
-    boot_fb_solid_fill(fb_base, fb_pitch, fb_width, fb_height, fb_bytespp, rgb);
-}
-
-void console_fb_relayout(void) {
-    if (!fb_active) {
-        return;
-    }
-    fb_compute_layout();
-    console_fb_fill_text_panel();
-    for (unsigned int i = 0; i < VGA_MEMORY_SIZE; i++) {
-        fb_text_rendered[i] = (char)0xFF;
-    }
-    fb_prev_cursor = 0xFFFFFFFFu;
-}
-
-char* console_get_buffer(void) {
-    return vga_memory;
-}
-
-void console_sync_begin(void) {
-    if (fb_active) {
-        fb_defer_sync++;
-    }
-}
-
-void console_sync_end(void) {
-    if (fb_active && fb_defer_sync > 0) {
-        fb_defer_sync--;
-        if (fb_defer_sync == 0) {
-            console_fb_flush_dirty_rows();
-        }
-    }
-}
-
-// Mirror the text shadow into the linear framebuffer (no-op in VGA text mode).
-void console_present(void) {
-    if (!fb_active) {
-        return;
-    }
-    for (unsigned int cy = 0; cy < VGA_HEIGHT; cy++) {
-        console_fb_sync_row(cy);
-    }
-    console_fb_sync_cursor();
-}
-
-// Set up framebuffer text backend from the Multiboot2 framebuffer tag.
-// Falls back silently to VGA text mode if no usable framebuffer is available.
-static void console_fb_init(void) {
-    fb_active = false;
-    const FramebufferInfo* fb = multiboot2_get_framebuffer();
-    if (!fb || !fb->present) {
-        return;
-    }
-    if (fb->type == MULTIBOOT_FRAMEBUFFER_TYPE_EGA_TEXT) {
-        return;
-    }
-    if (fb->bpp < 15 || fb->bpp > 32) {
-        return;
-    }
-    if (fb->width < 320 || fb->height < 200) {
-        return;
-    }
-
-    uint32_t pitch = fb->pitch;
-    if (pitch == 0) {
-        pitch = fb->width * (uint32_t)((fb->bpp + 7) / 8);
-    }
-    /* UEFI boot path identity-maps the low 512 GiB (kernel.asm uefi_start, 1 GiB pages),
-     * so accept any framebuffer below that ceiling. */
-    uint64_t span = (uint64_t)pitch * fb->height;
-    if (fb->addr == 0 || (fb->addr + span) > (512ULL << 30)) {
-        return;
-    }
-
-    fb_base = (volatile uint8_t*)(uintptr_t)fb->addr;
-    fb_width = fb->width;
-    fb_height = fb->height;
-    fb_pitch = pitch;
-    fb_bytespp = (uint8_t)((fb->bpp + 7) / 8);
-    fb_rpos = fb->red_pos;
-    fb_rsize = fb->red_size ? fb->red_size : 8;
-    fb_gpos = fb->green_pos;
-    fb_gsize = fb->green_size ? fb->green_size : 8;
-    fb_bpos = fb->blue_pos;
-    fb_bsize = fb->blue_size ? fb->blue_size : 8;
-    /* UEFI GOP / many GRUB builds use BGRx with zero mask fields in the tag. */
-    if (fb->bpp >= 24 && fb->red_size == 0 && fb->green_size == 0 && fb->blue_size == 0) {
-        fb_rpos = 16;
-        fb_gpos = 8;
-        fb_bpos = 0;
-        fb_rsize = fb_gsize = fb_bsize = 8;
-    }
-
-    fb_active = true;
-    vga_memory = fb_text_shadow;
-
-    boot_identity_uncache_range(fb->addr, span);
-    fb_compute_layout();
-
-    /* Force full redraw on first present (no full-screen fill — very slow on 1920x1200 MMIO). */
-    for (unsigned int i = 0; i < VGA_MEMORY_SIZE; i++) {
-        fb_text_rendered[i] = (char)0xFF;
-    }
-    fb_prev_cursor = 0xFFFFFFFFu;
+static unsigned int console_line_bytes(void) {
+    return console_cols() * 2u;
 }
 
 // Double buffering support
-static char back_buffer[VGA_MEMORY_SIZE];
+static char back_buffer[CONSOLE_MAX_CELL_BYTES];
 static bool buffer_dirty = false;
 
 // Scrollback buffer
 static ScrollbackBuffer scrollback = {{0}, 0, 0};
 
+/* Live screen cells saved when leaving the bottom (so ↑/↓ can return cleanly). */
+static char live_view[CONSOLE_MAX_CELL_BYTES];
+static bool live_view_valid = false;
+
 // External variables from core/kernel.c
 extern unsigned int current_loc;
 
-// External port I/O functions
-extern void write_port(unsigned short port, unsigned char data);
-extern char read_port(unsigned short port);
-
-// Update hardware VGA cursor position
 static void update_hardware_cursor(unsigned int x, unsigned int y) {
-    unsigned short position = (y * VGA_WIDTH) + x;
-    
-    // Cursor location low byte
-    write_port(VGA_CTRL_PORT, VGA_CURSOR_LOC_LOW);
-    write_port(VGA_DATA_PORT, (unsigned char)(position & 0xFF));
-    
-    // Cursor location high byte
-    write_port(VGA_CTRL_PORT, VGA_CURSOR_LOC_HIGH);
-    write_port(VGA_DATA_PORT, (unsigned char)((position >> 8) & 0xFF));
+    rust_screen_set_cursor_visible(console_state.cursor_visible ? 1 : 0);
+    rust_screen_set_cursor((uint32_t)x, (uint32_t)y);
+}
+
+static void console_capture_live_view(void) {
+    unsigned int n = console_cell_bytes();
+    vga_memory = rust_screen_cells();
+    for (unsigned int i = 0; i < n; i++) {
+        live_view[i] = vga_memory[i];
+    }
+    live_view_valid = true;
+}
+
+static void console_restore_live_view(void) {
+    if (!live_view_valid) {
+        return;
+    }
+    unsigned int n = console_cell_bytes();
+    vga_memory = rust_screen_cells();
+    for (unsigned int i = 0; i < n; i++) {
+        vga_memory[i] = live_view[i];
+    }
+    rust_screen_invalidate();
+    console_present();
+    update_hardware_cursor(console_state.cursor_x, console_state.cursor_y);
+}
+
+bool console_fb_active(void) {
+    return rust_screen_backend() == 2;
+}
+
+void console_fb_paint_background(uint32_t rgb) {
+    rust_screen_paint_bg(rgb);
+}
+
+void console_fb_relayout(void) {
+    rust_screen_relayout();
+}
+
+char* console_get_buffer(void) {
+    return rust_screen_cells();
+}
+
+void console_sync_begin(void) {
+    rust_screen_sync_begin();
+}
+
+void console_sync_end(void) {
+    rust_screen_sync_end();
+}
+
+void console_present(void) {
+    rust_screen_present();
+}
+
+/* Hand Multiboot/UEFI framebuffer to Rust, or fall back to VGA text. */
+static void console_display_init(void) {
+    const FramebufferInfo* fb = multiboot2_get_framebuffer();
+    if (fb && fb->present) {
+        if (rust_screen_init_fb(fb->addr, fb->pitch, fb->width, fb->height, fb->bpp, fb->type,
+                                fb->red_pos, fb->red_size, fb->green_pos, fb->green_size,
+                                fb->blue_pos, fb->blue_size) == 1) {
+            vga_memory = rust_screen_cells();
+            return;
+        }
+    }
+    rust_screen_init_vga();
+    vga_memory = rust_screen_cells();
 }
 
 // Initialize the console system
@@ -410,9 +132,11 @@ void console_init(void) {
     console_state.cursor_visible = true;
     console_state.double_buffer_enabled = false;
     console_state.scroll_offset = 0;
+    console_state.wrap_enabled = true;
+    live_view_valid = false;
     
     // Initialize back buffer
-    for (unsigned int i = 0; i < VGA_MEMORY_SIZE; i += 2) {
+    for (unsigned int i = 0; i < CONSOLE_MAX_CELL_BYTES; i += 2) {
         back_buffer[i] = ' ';
         back_buffer[i + 1] = CONSOLE_BG_COLOR | CONSOLE_FG_COLOR;
     }
@@ -426,11 +150,11 @@ void console_init(void) {
 
     /* UEFI/Ventoy GRUB2 often supplies VBE (tag 7) instead of framebuffer (tag 8). */
     multiboot2_parse_framebuffer();
-    console_fb_init();
+    console_display_init();
 
     console_clear();
 
-    if (fb_active) {
+    if (console_fb_active()) {
         console_set_cursor(26, 11);
         console_println_color("POPCORN", 0x0A);
         console_present();
@@ -439,24 +163,13 @@ void console_init(void) {
 
 // Clear the entire screen
 void console_clear(void) {
-    for (unsigned int i = 0; i < VGA_MEMORY_SIZE; i += 2) {
-        vga_memory[i] = ' ';
-        vga_memory[i + 1] = CONSOLE_BG_COLOR | CONSOLE_FG_COLOR;
-    }
+    unsigned char attr = (unsigned char)(CONSOLE_BG_COLOR | CONSOLE_FG_COLOR);
+    rust_screen_clear(attr);
+    vga_memory = rust_screen_cells();
     console_state.cursor_x = 0;
     console_state.cursor_y = 0;
     current_loc = 0;
-
     update_hardware_cursor(0, 0);
-    if (fb_active) {
-        console_fb_fill_text_panel();
-        for (unsigned int i = 0; i < VGA_MEMORY_SIZE; i++) {
-            fb_text_rendered[i] = vga_memory[i];
-        }
-        fb_prev_cursor = 0xFFFFFFFFu;
-        return;
-    }
-    console_present();
 }
 
 // Set the current text color
@@ -464,21 +177,29 @@ void console_set_color(unsigned char color) {
     console_state.current_color = color;
 }
 
+unsigned char console_get_color(void) {
+    return console_state.current_color;
+}
+
 // Set cursor position
 void console_set_cursor(unsigned int x, unsigned int y) {
-    if (x >= VGA_WIDTH) x = VGA_WIDTH - 1;
-    if (y >= VGA_HEIGHT) y = VGA_HEIGHT - 1;
+    if (x >= console_cols()) x = console_cols() - 1;
+    if (y >= console_rows()) y = console_rows() - 1;
     
     console_state.cursor_x = x;
     console_state.cursor_y = y;
-    current_loc = (y * VGA_WIDTH + x) * 2;
+    current_loc = (y * console_cols() + x) * 2;
     
     update_hardware_cursor(x, y);
-    if (fb_active) {
-        console_fb_sync_cursor();
-        return;
+}
+
+void console_get_cursor(unsigned int* x, unsigned int* y) {
+    if (x) {
+        *x = console_state.cursor_x;
     }
-    console_present();
+    if (y) {
+        *y = console_state.cursor_y;
+    }
 }
 
 // Put a single character at current cursor position
@@ -490,7 +211,7 @@ void console_putchar(char c) {
     
     if (c == '\r') {
         console_state.cursor_x = 0;
-        current_loc = console_state.cursor_y * VGA_WIDTH * 2;
+        current_loc = console_state.cursor_y * console_cols() * 2;
         return;
     }
     
@@ -501,7 +222,7 @@ void console_putchar(char c) {
     
     unsigned int cx = console_state.cursor_x;
     unsigned int cy = console_state.cursor_y;
-    unsigned int pos = (cy * VGA_WIDTH + cx) * 2;
+    unsigned int pos = (cy * console_cols() + cx) * 2;
 
     /* Always keep navy/black background so typed text stays readable. */
     unsigned char attr =
@@ -514,47 +235,34 @@ void console_putchar(char c) {
         back_buffer[pos + 1] = (char)attr;
         buffer_dirty = true;
     } else {
-        vga_memory[pos] = c;
-        vga_memory[pos + 1] = (char)attr;
+        rust_screen_write_cell((uint32_t)cx, (uint32_t)cy, (uint8_t)c, attr);
     }
     
-    // Move cursor
-    console_state.cursor_x++;
-    if (console_state.cursor_x >= VGA_WIDTH) {
-        console_newline();
-    }
-    
-    current_loc = (console_state.cursor_y * VGA_WIDTH + console_state.cursor_x) * 2;
-    
-    update_hardware_cursor(console_state.cursor_x, console_state.cursor_y);
-    if (fb_active) {
-        if (fb_defer_sync) {
-            console_fb_mark_row(cy);
+    // Move cursor (soft-wrap at edge when wrap_enabled)
+    if (console_state.cursor_x + 1u >= console_cols()) {
+        if (console_state.wrap_enabled) {
+            console_newline();
         } else {
-            console_fb_sync_cell(cx, cy);
-            console_fb_sync_cursor();
+            console_state.cursor_x = console_cols() - 1u;
+            current_loc = (console_state.cursor_y * console_cols() + console_state.cursor_x) * 2;
+            update_hardware_cursor(console_state.cursor_x, console_state.cursor_y);
         }
         return;
     }
-    console_present();
+    console_state.cursor_x++;
+    
+    current_loc = (console_state.cursor_y * console_cols() + console_state.cursor_x) * 2;
+    
+    update_hardware_cursor(console_state.cursor_x, console_state.cursor_y);
 }
 
 // Print a string with current color
 void console_print(const char* str) {
-    if (fb_active) {
-        fb_defer_sync++;
-    }
+    rust_screen_sync_begin();
     while (*str) {
         console_putchar(*str++);
     }
-    if (fb_active) {
-        if (fb_defer_sync > 0) {
-            fb_defer_sync--;
-        }
-        if (fb_defer_sync == 0) {
-            console_fb_flush_dirty_rows();
-        }
-    }
+    rust_screen_sync_end();
 }
 
 // Print a string with specific color
@@ -581,124 +289,102 @@ void console_println_color(const char* str, unsigned char color) {
 void console_newline(void) {
     console_state.cursor_x = 0;
     console_state.cursor_y++;
-    
     if (console_state.cursor_y >= CONSOLE_SCROLL_ROWS) {
         console_scroll();
         console_state.cursor_y = CONSOLE_SCROLL_ROWS - 1u;
     }
-    
-    current_loc = console_state.cursor_y * VGA_WIDTH * 2;
-    
+    current_loc = console_state.cursor_y * console_cols() * 2;
     update_hardware_cursor(console_state.cursor_x, console_state.cursor_y);
-    if (fb_active) {
-        console_fb_sync_cursor();
-        return;
-    }
-    console_present();
 }
 
 // Scroll the screen up by one line (leaves heartbeat + status rows alone)
 void console_scroll(void) {
     // Save top line to scrollback before scrolling
     console_save_line(0);
+    vga_memory = rust_screen_cells();
     
     for (unsigned int y = 0; y + 1u < CONSOLE_SCROLL_ROWS; y++) {
-        for (unsigned int x = 0; x < VGA_WIDTH; x++) {
-            unsigned int src_pos = ((y + 1) * VGA_WIDTH + x) * 2;
-            unsigned int dst_pos = (y * VGA_WIDTH + x) * 2;
+        for (unsigned int x = 0; x < console_cols(); x++) {
+            unsigned int src_pos = ((y + 1) * console_cols() + x) * 2;
+            unsigned int dst_pos = (y * console_cols() + x) * 2;
             
             vga_memory[dst_pos] = vga_memory[src_pos];
             vga_memory[dst_pos + 1] = vga_memory[src_pos + 1];
         }
     }
     
-    for (unsigned int x = 0; x < VGA_WIDTH; x++) {
-        unsigned int pos = ((CONSOLE_SCROLL_ROWS - 1u) * VGA_WIDTH + x) * 2;
+    for (unsigned int x = 0; x < console_cols(); x++) {
+        unsigned int pos = ((CONSOLE_SCROLL_ROWS - 1u) * console_cols() + x) * 2;
         vga_memory[pos] = ' ';
         vga_memory[pos + 1] = CONSOLE_BG_COLOR | CONSOLE_FG_COLOR;
     }
     
     // Reset scroll offset when new content appears
     console_state.scroll_offset = 0;
-    if (fb_active) {
-        for (unsigned int y = 0; y < CONSOLE_SCROLL_ROWS; y++) {
-            console_fb_mark_row(y);
-        }
-        console_fb_flush_dirty_rows();
-        return;
+    live_view_valid = false;
+    rust_screen_invalidate();
+    rust_screen_sync_begin();
+    for (unsigned int y = 0; y < CONSOLE_SCROLL_ROWS; y++) {
+        rust_screen_mark_row((uint32_t)y);
     }
-    console_present();
+    rust_screen_sync_end();
 }
 
 // Handle backspace
 void console_backspace(void) {
+    unsigned char attr = (unsigned char)(CONSOLE_BG_COLOR | CONSOLE_FG_COLOR);
     if (console_state.cursor_x > 0) {
         console_state.cursor_x--;
-        unsigned int pos = (console_state.cursor_y * VGA_WIDTH + console_state.cursor_x) * 2;
-        vga_memory[pos] = ' ';
-        vga_memory[pos + 1] = CONSOLE_BG_COLOR | CONSOLE_FG_COLOR;
+        unsigned int pos = (console_state.cursor_y * console_cols() + console_state.cursor_x) * 2;
+        rust_screen_write_cell(console_state.cursor_x, console_state.cursor_y, ' ', attr);
         current_loc = pos;
     } else if (console_state.cursor_y > 0) {
         // Move to end of previous line if at start of line
         console_state.cursor_y--;
-        console_state.cursor_x = VGA_WIDTH - 1;
-        unsigned int pos = (console_state.cursor_y * VGA_WIDTH + console_state.cursor_x) * 2;
-        vga_memory[pos] = ' ';
-        vga_memory[pos + 1] = CONSOLE_BG_COLOR | CONSOLE_FG_COLOR;
+        console_state.cursor_x = console_cols() - 1;
+        unsigned int pos = (console_state.cursor_y * console_cols() + console_state.cursor_x) * 2;
+        rust_screen_write_cell(console_state.cursor_x, console_state.cursor_y, ' ', attr);
         current_loc = pos;
     }
     
     update_hardware_cursor(console_state.cursor_x, console_state.cursor_y);
-    if (fb_active) {
-        if (console_state.cursor_x > 0) {
-            console_fb_sync_cell(console_state.cursor_x, console_state.cursor_y);
-        } else if (console_state.cursor_y > 0) {
-            console_fb_sync_cell(VGA_WIDTH - 1, console_state.cursor_y);
-        }
-        console_fb_sync_cursor();
-        return;
-    }
-    console_present();
 }
 
 // Draw a box with borders
 void console_draw_box(unsigned int x, unsigned int y, unsigned int width, unsigned int height, unsigned char color) {
+    rust_screen_sync_begin();
     // Draw top and bottom borders
     for (unsigned int i = x; i < x + width; i++) {
-        if (i < VGA_WIDTH) {
+        if (i < console_cols()) {
             // Top border
-            if (y < VGA_HEIGHT) {
-                unsigned int pos = (y * VGA_WIDTH + i) * 2;
-                vga_memory[pos] = (i == x) ? '+' : (i == x + width - 1) ? '+' : '-';
-                vga_memory[pos + 1] = color;
+            if (y < console_rows()) {
+                char ch = (i == x) ? '+' : (i == x + width - 1) ? '+' : '-';
+                rust_screen_write_cell(i, y, (uint8_t)ch, color);
             }
             // Bottom border
-            if (y + height - 1 < VGA_HEIGHT) {
-                unsigned int pos = ((y + height - 1) * VGA_WIDTH + i) * 2;
-                vga_memory[pos] = (i == x) ? '+' : (i == x + width - 1) ? '+' : '-';
-                vga_memory[pos + 1] = color;
+            if (y + height - 1 < console_rows()) {
+                char ch = (i == x) ? '+' : (i == x + width - 1) ? '+' : '-';
+                rust_screen_write_cell(i, y + height - 1, (uint8_t)ch, color);
             }
         }
     }
     
     // Draw left and right borders
     for (unsigned int i = y; i < y + height; i++) {
-        if (i < VGA_HEIGHT) {
+        if (i < console_rows()) {
             // Left border
-            if (x < VGA_WIDTH) {
-                unsigned int pos = (i * VGA_WIDTH + x) * 2;
-                vga_memory[pos] = (i == y) ? '+' : (i == y + height - 1) ? '+' : '|';
-                vga_memory[pos + 1] = color;
+            if (x < console_cols()) {
+                char ch = (i == y) ? '+' : (i == y + height - 1) ? '+' : '|';
+                rust_screen_write_cell(x, i, (uint8_t)ch, color);
             }
             // Right border
-            if (x + width - 1 < VGA_WIDTH) {
-                unsigned int pos = (i * VGA_WIDTH + x + width - 1) * 2;
-                vga_memory[pos] = (i == y) ? '+' : (i == y + height - 1) ? '+' : '|';
-                vga_memory[pos + 1] = color;
+            if (x + width - 1 < console_cols()) {
+                char ch = (i == y) ? '+' : (i == y + height - 1) ? '+' : '|';
+                rust_screen_write_cell(x + width - 1, i, (uint8_t)ch, color);
             }
         }
     }
-    console_present();
+    rust_screen_sync_end();
 }
 
 // Draw a header with title
@@ -780,14 +466,14 @@ static void console_heartbeat_paint(uint64_t alive, uint64_t tsc_lo, uint64_t ue
     }
     line[i] = '\0';
 
-    for (j = 0; line[j] && (HEARTBEAT_COL + j) < VGA_WIDTH; j++) {
-        unsigned int cx = HEARTBEAT_COL + j;
-        unsigned int pos = (HEARTBEAT_ROW * VGA_WIDTH + cx) * 2u;
-        vga_memory[pos] = line[j];
-        vga_memory[pos + 1] = (char)(CONSOLE_BG_COLOR | CONSOLE_SUCCESS_COLOR);
-    }
-    if (fb_active) {
-        console_fb_sync_row(HEARTBEAT_ROW);
+    {
+        unsigned int hb_col = (console_cols() > 28u) ? (console_cols() - 28u) : 0u;
+        for (j = 0; line[j] && (hb_col + j) < console_cols(); j++) {
+            unsigned int cx = hb_col + j;
+            rust_screen_write_cell(
+                (uint32_t)cx, (uint32_t)HEARTBEAT_ROW, (uint8_t)line[j],
+                (uint8_t)(CONSOLE_BG_COLOR | CONSOLE_SUCCESS_COLOR));
+        }
     }
 }
 
@@ -811,21 +497,18 @@ void console_print_status_bar(void) {
     console_set_cursor(0, CONSOLE_STATUS_ROW);
     
     // Clear the line first
-    for (unsigned int i = 0; i < VGA_WIDTH; i++) {
-        unsigned int pos = (CONSOLE_STATUS_ROW * VGA_WIDTH + i) * 2;
-        vga_memory[pos] = ' ';
-        vga_memory[pos + 1] = CONSOLE_BG_COLOR | CONSOLE_FG_COLOR;
+    rust_screen_sync_begin();
+    for (unsigned int i = 0; i < console_cols(); i++) {
+        rust_screen_write_cell((uint32_t)i, (uint32_t)CONSOLE_STATUS_ROW, ' ',
+                               (uint8_t)(CONSOLE_BG_COLOR | CONSOLE_FG_COLOR));
     }
+    rust_screen_sync_end();
     
     console_set_cursor(0, CONSOLE_STATUS_ROW);
-    console_print_color("Status: Ready | help", CONSOLE_INFO_COLOR);
-
-    if (fb_active) {
-        for (unsigned int i = 0; i < VGA_WIDTH; i++) {
-            console_fb_sync_cell(i, CONSOLE_STATUS_ROW);
-        }
+    if (console_state.scroll_offset > 0) {
+        console_print_color("SCROLL ^v  hist <>  type=bottom | help", CONSOLE_WARNING_COLOR);
     } else {
-        console_present();
+        console_print_color("Ready | ^v scroll  <> hist | help", CONSOLE_INFO_COLOR);
     }
 
     // Restore cursor position
@@ -871,7 +554,7 @@ void console_center_text(const char* text, unsigned int y, unsigned char color) 
     unsigned int text_len = 0;
     while (text[text_len]) text_len++;
     
-    unsigned int x = (VGA_WIDTH - text_len) / 2;
+    unsigned int x = (console_cols() - text_len) / 2;
     console_set_cursor(x, y);
     console_print_color(text, color);
 }
@@ -879,7 +562,7 @@ void console_center_text(const char* text, unsigned int y, unsigned char color) 
 // Draw a separator line
 void console_draw_separator(unsigned int y, unsigned char color) {
     console_set_cursor(0, y);
-    for (unsigned int i = 0; i < VGA_WIDTH; i++) {
+    for (unsigned int i = 0; i < console_cols(); i++) {
         console_print_color("-", color);
     }
     console_newline();
@@ -890,7 +573,7 @@ void console_enable_double_buffer(bool enable) {
     console_state.double_buffer_enabled = enable;
     if (enable) {
         // Copy current VGA memory to back buffer
-        for (unsigned int i = 0; i < VGA_MEMORY_SIZE; i++) {
+        for (unsigned int i = 0; i < CONSOLE_MAX_CELL_BYTES; i++) {
             back_buffer[i] = vga_memory[i];
         }
     } else {
@@ -906,10 +589,12 @@ void console_swap_buffers(void) {
     }
     
     if (buffer_dirty) {
-        for (unsigned int i = 0; i < VGA_MEMORY_SIZE; i++) {
+        vga_memory = rust_screen_cells();
+        for (unsigned int i = 0; i < CONSOLE_MAX_CELL_BYTES; i++) {
             vga_memory[i] = back_buffer[i];
         }
         buffer_dirty = false;
+        rust_screen_invalidate();
         console_present();
     }
 }
@@ -923,14 +608,21 @@ void console_flush(void) {
 
 // Save current line to scrollback buffer
 void console_save_line(unsigned int y) {
-    if (y >= VGA_HEIGHT) return;
+    if (y >= console_rows()) return;
     
     unsigned int line_offset = (scrollback.current_line % SCROLLBACK_LINES) * SCROLLBACK_LINE_SIZE;
-    unsigned int vga_offset = y * VGA_WIDTH * 2;
+    unsigned int vga_offset = y * console_cols() * 2;
+    unsigned int nbytes = console_line_bytes();
+    vga_memory = rust_screen_cells();
     
-    // Copy line from VGA memory to scrollback
     for (unsigned int i = 0; i < SCROLLBACK_LINE_SIZE; i++) {
-        scrollback.buffer[line_offset + i] = vga_memory[vga_offset + i];
+        if (i < nbytes) {
+            scrollback.buffer[line_offset + i] = vga_memory[vga_offset + i];
+        } else if ((i & 1u) == 0u) {
+            scrollback.buffer[line_offset + i] = ' ';
+        } else {
+            scrollback.buffer[line_offset + i] = (char)(CONSOLE_BG_COLOR | CONSOLE_FG_COLOR);
+        }
     }
     
     scrollback.current_line++;
@@ -939,60 +631,127 @@ void console_save_line(unsigned int y) {
     }
 }
 
-// Scroll up in history (Page Up)
+void console_set_wrap(bool enabled) {
+    console_state.wrap_enabled = enabled;
+}
+
+bool console_wrap_enabled(void) {
+    return console_state.wrap_enabled;
+}
+
+/*
+ * Virtual document = scrollback lines || live scroll-region rows.
+ * offset 0 = live bottom; each ↑ increases offset by exactly one line.
+ */
+static int console_scroll_max_offset(void) {
+    return (int)scrollback.total_lines;
+}
+
+// Scroll up through saved lines (shell ↑)
 void console_scroll_up(void) {
-    if (console_state.scroll_offset >= (int)scrollback.total_lines - 1) {
-        return;  // Already at top of history
+    if (console_scroll_max_offset() <= 0) {
+        return;
     }
-    
+    if (console_state.scroll_offset == 0) {
+        console_capture_live_view();
+    }
+    if (console_state.scroll_offset >= console_scroll_max_offset()) {
+        return;
+    }
     console_state.scroll_offset++;
     console_restore_view();
 }
 
-// Scroll down in history (Page Down)
+// Scroll down toward the live prompt (shell ↓)
 void console_scroll_down(void) {
     if (console_state.scroll_offset <= 0) {
-        return;  // Already at current view
+        return;
     }
-    
     console_state.scroll_offset--;
+    if (console_state.scroll_offset == 0) {
+        console_restore_live_view();
+        console_print_status_bar();
+        return;
+    }
     console_restore_view();
 }
 
-// Restore view based on scroll offset
-void console_restore_view(void) {
+void console_scroll_to_bottom(void) {
     if (console_state.scroll_offset == 0) {
         return;
     }
-    
-    // Don't scroll beyond available history
-    if (console_state.scroll_offset > (int)scrollback.total_lines) {
-        console_state.scroll_offset = (int)scrollback.total_lines;
+    console_state.scroll_offset = 0;
+    console_restore_live_view();
+    console_print_status_bar();
+}
+
+static void console_paint_scroll_row(unsigned int y, const char* line_bytes) {
+    unsigned int vga_offset = y * console_cols() * 2;
+    unsigned int nbytes = console_line_bytes();
+    vga_memory = rust_screen_cells();
+    for (unsigned int i = 0; i < nbytes; i++) {
+        vga_memory[vga_offset + i] = line_bytes[i];
     }
-    
-    // Display history lines
-    for (unsigned int y = 0; y < VGA_HEIGHT; y++) {
-        // Calculate which history line to show at this screen position
-        int line_index = (int)scrollback.current_line - console_state.scroll_offset + (int)y - (int)VGA_HEIGHT;
-        
-        if (line_index >= 0 && line_index < (int)scrollback.current_line) {
-            // This line is in history, display it
-            unsigned int buf_index = line_index % SCROLLBACK_LINES;
-            unsigned int line_offset = buf_index * SCROLLBACK_LINE_SIZE;
-            unsigned int vga_offset = y * VGA_WIDTH * 2;
-            
-            // Copy from scrollback to VGA
-            for (unsigned int i = 0; i < SCROLLBACK_LINE_SIZE; i++) {
-                vga_memory[vga_offset + i] = scrollback.buffer[line_offset + i];
-            }
+}
+
+static void console_paint_blank_row(unsigned int y) {
+    for (unsigned int i = 0; i < console_cols(); i++) {
+        rust_screen_write_cell(i, y, ' ',
+                               (uint8_t)(CONSOLE_BG_COLOR | CONSOLE_FG_COLOR));
+    }
+}
+
+// Paint scrollback window for scroll_offset > 0 (one line step per offset).
+void console_restore_view(void) {
+    if (console_state.scroll_offset == 0) {
+        console_restore_live_view();
+        return;
+    }
+    if (!live_view_valid) {
+        console_capture_live_view();
+    }
+
+    int max_off = console_scroll_max_offset();
+    if (console_state.scroll_offset > max_off) {
+        console_state.scroll_offset = max_off;
+    }
+    if (console_state.scroll_offset <= 0) {
+        console_restore_live_view();
+        return;
+    }
+
+    /*
+     * Window end (exclusive) in the virtual stream
+     * [scrollback 0 .. total) + [live rows 0 .. SCROLL_ROWS).
+     */
+    int total = (int)scrollback.total_lines;
+    int end = total + (int)CONSOLE_SCROLL_ROWS - console_state.scroll_offset;
+    int start = end - (int)CONSOLE_SCROLL_ROWS;
+
+    for (unsigned int y = 0; y < CONSOLE_SCROLL_ROWS; y++) {
+        int idx = start + (int)y;
+        if (idx < 0) {
+            console_paint_blank_row(y);
+        } else if (idx < total) {
+            /* idx 0 = oldest retained line; map through the ring. */
+            unsigned int abs_line =
+                (scrollback.total_lines < SCROLLBACK_LINES)
+                    ? (unsigned int)idx
+                    : (scrollback.current_line - scrollback.total_lines + (unsigned int)idx);
+            unsigned int buf_index = abs_line % SCROLLBACK_LINES;
+            const char* src = &scrollback.buffer[buf_index * SCROLLBACK_LINE_SIZE];
+            console_paint_scroll_row(y, src);
         } else {
-            // Line not in history, clear it
-            unsigned int vga_offset = y * VGA_WIDTH * 2;
-            for (unsigned int i = 0; i < VGA_WIDTH; i++) {
-                vga_memory[vga_offset + i * 2] = ' ';
-                vga_memory[vga_offset + i * 2 + 1] = CONSOLE_BG_COLOR | CONSOLE_FG_COLOR;
+            int live_row = idx - total;
+            if (live_row >= 0 && live_row < (int)CONSOLE_SCROLL_ROWS) {
+                const char* src = &live_view[(unsigned int)live_row * console_line_bytes()];
+                console_paint_scroll_row(y, src);
+            } else {
+                console_paint_blank_row(y);
             }
         }
     }
+    rust_screen_invalidate();
     console_present();
+    console_print_status_bar();
 }

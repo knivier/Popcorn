@@ -139,22 +139,6 @@ void timer_set_tick_handler(void (*handler)(void)) {
     
 }
 
-// Delay for specified milliseconds
-void timer_delay_ms(uint32_t ms) {
-    uint64_t start_ticks = global_timer.ticks;
-    uint64_t target_ticks = start_ticks + timer_ms_to_ticks(ms);
-    
-    while (global_timer.ticks < target_ticks) {
-        // Busy wait - in a real system this would yield CPU
-        __asm__ volatile("pause");
-    }
-}
-
-// Convert ticks to milliseconds
-uint64_t timer_ticks_to_ms(uint64_t ticks) {
-    return (ticks * 1000) / global_timer.frequency;
-}
-
 // Convert milliseconds to ticks
 uint64_t timer_ms_to_ticks(uint64_t ms) {
     return (ms * global_timer.frequency) / 1000;
