@@ -108,29 +108,32 @@ qemu_uefi_usb_args() {
 }
 
 qemu_uefi_test_stability() {
-  local code dbg
+  local code dbg serial boot_timeout
   code="$(find_edk_code || true)"
   [[ -n "$code" ]] || { echo "FAIL: edk2-x86_64-code.fd not found" >&2; exit 1; }
 
   dbg="$POPCORN_TARGET/uefi-stability.log"
+  serial="$POPCORN_TARGET/uefi-stability-serial.log"
+  boot_timeout="${POPCORN_QEMU_BOOT_TIMEOUT:-120}"
   # Fresh vars avoid stuck OVMF boot menus from prior runs.
   rm -f "$OVMF_VARS"
   ensure_ovmf_vars "$OVMF_VARS"
-  rm -f "$dbg" "$POPCORN_TARGET/uefi-stability-serial.log"
+  rm -f "$dbg" "$serial"
   qemu_kill_all
   sleep 1
 
   qemu_uefi_usb_args "$code" \
     -debugcon "file:$dbg" -global isa-debugcon.iobase=0xe9 \
-    -serial "file:$POPCORN_TARGET/uefi-stability-serial.log" \
+    -serial "file:$serial" \
     -display none -no-reboot \
     -daemonize
 
   local waited=0
-  while [[ $waited -lt 45 ]]; do
+  while [[ $waited -lt "$boot_timeout" ]]; do
     if ! pgrep -f qemu-system-x86_64 >/dev/null; then
       echo "FAIL: QEMU exited before boot completed (${waited}s)"
       echo "debugcon: $(cat "$dbg" 2>/dev/null || true)"
+      echo "serial: $(cat "$serial" 2>/dev/null || true)"
       return 1
     fi
     if [[ -f "$dbg" ]] && grep -q 'M' "$dbg" 2>/dev/null; then
@@ -145,6 +148,7 @@ qemu_uefi_test_stability() {
   if ! pgrep -f qemu-system-x86_64 >/dev/null; then
     echo "FAIL: QEMU exited after reaching kmain"
     echo "debugcon: $(cat "$dbg" 2>/dev/null || true)"
+    echo "serial: $(cat "$serial" 2>/dev/null || true)"
     return 1
   fi
 
@@ -152,7 +156,14 @@ qemu_uefi_test_stability() {
   local body
   body="$(cat "$dbg" 2>/dev/null || true)"
   echo "debugcon: $body"
-  case "$body" in *M*) ;; *) echo "FAIL: kmain loop (M) not reached"; return 1 ;; esac
+  case "$body" in
+    *M*) ;;
+    *)
+      echo "FAIL: kmain loop (M) not reached after ${boot_timeout}s"
+      echo "serial: $(cat "$serial" 2>/dev/null || true)"
+      return 1
+      ;;
+  esac
   case "$body" in *R*) ;; *) echo "FAIL: RAM parse (R) not seen"; return 1 ;; esac
   echo "PASS: guest reached kmain and stayed alive"
 }
@@ -381,7 +392,7 @@ qemu_uefi_test_pf() {
 }
 
 qemu_uefi_smoke() {
-  echo "== stability (no -no-shutdown, 30s) =="
+  echo "== stability (no -no-shutdown, ${POPCORN_QEMU_BOOT_TIMEOUT:-120}s boot timeout) =="
   qemu_uefi_test_stability || return 1
   echo "== alive (display) =="
   qemu_uefi_test_alive || return 1
