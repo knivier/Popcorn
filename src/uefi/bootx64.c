@@ -707,7 +707,7 @@ static UINT32 mb2_align(UINT32 n) {
 static void build_multiboot_mbi(EFI_MEMORY_DESCRIPTOR* mmap, UINTN map_size, UINTN desc_size) {
     UINT8* out = (UINT8*)(UINTN)POPCORN_UEFI_MBI_PHYS;
     UINT32 total = 8;
-    UINT32 mem_upper_kb = 0;
+    UINT64 mem_upper_kb = 0;
 
     for (UINT32 i = 0; i < 65536; i++) {
         out[i] = 0;
@@ -759,7 +759,8 @@ static void build_multiboot_mbi(EFI_MEMORY_DESCRIPTOR* mmap, UINTN map_size, UIN
             if (d->Type == EFI_CONVENTIONAL_MEMORY) {
                 mb2_type = MB2_MEM_AVAILABLE;
                 if (addr >= 0x100000ULL) {
-                    mem_upper_kb += (UINT32)(len / 1024ULL);
+                    /* Sum in 64-bit KB — UINT32 overflow used to wrap toward nonsense totals. */
+                    mem_upper_kb += len / 1024ULL;
                 }
             }
             UINT8* e = out + entry_off + written * MB2_MMAP_ENTRY_SIZE;
@@ -778,7 +779,8 @@ static void build_multiboot_mbi(EFI_MEMORY_DESCRIPTOR* mmap, UINTN map_size, UIN
         tag[0] = MB2_TAG_BASIC_MEMINFO;
         tag[1] = tag_sz;
         tag[2] = 640;
-        tag[3] = mem_upper_kb;
+        /* Multiboot basic meminfo field is 32-bit KB; clamp (mmap tag has the truth). */
+        tag[3] = (mem_upper_kb > 0xFFFFFFFFULL) ? 0xFFFFFFFFu : (UINT32)mem_upper_kb;
         total += tag_sz;
     }
 
@@ -795,7 +797,7 @@ static void build_multiboot_mbi(EFI_MEMORY_DESCRIPTOR* mmap, UINTN map_size, UIN
     {
         PopcornUefiBootInfo* info = (PopcornUefiBootInfo*)(UINTN)POPCORN_UEFI_HANDOFF_PHYS;
         if (info->magic == POPCORN_UEFI_MAGIC) {
-            info->available_ram_bytes = (UINT64)mem_upper_kb * 1024ULL;
+            info->available_ram_bytes = mem_upper_kb * 1024ULL;
         }
     }
 }

@@ -198,8 +198,12 @@ void multiboot2_parse(void) {
         volatile PopcornUefiBootInfo* u = uefi_handoff_ptr();
         strncpy_safe(sys_info.bootloader_name, "Popcorn UEFI", sizeof(sys_info.bootloader_name));
         sys_info.mem_lower = 640;
-        sys_info.mem_upper = (uint32_t)(u->available_ram_bytes / 1024ULL);
+        /* Prefer full handoff bytes; mem_upper is KB and may clamp at 32-bit. */
         sys_info.total_memory = u->available_ram_bytes;
+        {
+            uint64_t kb = u->available_ram_bytes / 1024ULL;
+            sys_info.mem_upper = (kb > 0xFFFFFFFFULL) ? 0xFFFFFFFFu : (uint32_t)kb;
+        }
         sys_info.valid = true;
         multiboot2_info_ptr = POPCORN_UEFI_MBI_PHYS;
     }
@@ -287,15 +291,15 @@ const char* multiboot2_get_command_line(void) {
  * Get total memory in bytes
  */
 uint64_t multiboot2_get_total_memory(void) {
-    if (!sys_info.valid || sys_info.total_memory == 0) {
-        // mem_upper is in KB, starting from 1MB
-        if (sys_info.mem_upper > 0) {
-            return (1024ULL * 1024) + ((uint64_t)sys_info.mem_upper * 1024);
-        }
-        // If still nothing, return a minimal amount
-        return 1024ULL * 1024;  // 1MB minimum
+    /* Prefer conventional RAM from handoff / basic meminfo — NOT the sum of
+     * every mmap entry (reserved MMIO windows make laptops look like 64GiB+). */
+    if (sys_info.valid && sys_info.total_memory > 0) {
+        return sys_info.total_memory + (1024ULL * 1024);
     }
-    return sys_info.total_memory;
+    if (sys_info.mem_upper > 0) {
+        return (1024ULL * 1024) + ((uint64_t)sys_info.mem_upper * 1024);
+    }
+    return 1024ULL * 1024;
 }
 
 /*

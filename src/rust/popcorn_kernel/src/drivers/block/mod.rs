@@ -175,9 +175,19 @@ pub fn init() {
     /* Real USB MSC first: it claims usb0, so virtio[0] must not. Failure is
      * non-fatal and leaves virtio[0] as the usb0 stand-in. */
     let usb_n = match usb_msc::probe_all() {
-        Ok(n) => n,
-        Err("no xhci controller") | Err("no usb mass-storage device") => 0,
+        Ok(n) => {
+            crate::console_ffi::println_color(
+                "USB MSC: ok",
+                crate::console_ffi::COLOR_LIGHT_CYAN,
+            );
+            n
+        }
         Err(e) => {
+            /* Always surface this on real hardware — silent miss looks like "only ram0". */
+            crate::console_ffi::print_color(
+                "USB MSC: ",
+                crate::console_ffi::COLOR_YELLOW,
+            );
             crate::console_ffi::println_color(e, crate::console_ffi::COLOR_YELLOW);
             0
         }

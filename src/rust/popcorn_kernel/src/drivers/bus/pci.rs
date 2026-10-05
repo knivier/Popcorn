@@ -1,7 +1,7 @@
-//! PCI config space — bus-0 scan, BAR read, virtio find.
+//! PCI config space — multi-bus scan (bridge recursion), BAR read, virtio find.
 //!
-//! Only bus 0 is walked (no bridge recursion): devices behind PCIe root ports
-//! (e.g. a laptop's NVMe) are not seen yet, which is the safe direction.
+//! ThinkPads put xHCI/NVMe behind PCIe root ports (secondary buses). Bus-0-only
+//! scans miss them; we walk type-1 bridges so real hardware can see USB/NVMe.
 
 use crate::console_ffi::{print_color, println_color, u64_to_dec, COLOR_LIGHT_CYAN, COLOR_WHITE};
 use crate::drivers::io::{inl, outl};
@@ -64,13 +64,20 @@ pub struct PciAddr {
     pub func: u8,
 }
 
-/// Walk every present function on bus 0. `f(addr, id_reg, class_reg)` returns
-/// `false` to stop. Single-function slots are not probed past function 0.
-fn scan(mut f: impl FnMut(PciAddr, u32, u32) -> bool) {
+/// Walk every present function on `bus`, then recurse into PCI-PCI bridges.
+/// `visited` is a 256-bit bus bitmap (4×u64) to stop cycles.
+fn scan_bus(bus: u8, visited: &mut [u64; 4], f: &mut impl FnMut(PciAddr, u32, u32) -> bool) -> bool {
+    let vi = (bus >> 6) as usize;
+    let bit = 1u64 << (bus & 63);
+    if visited[vi] & bit != 0 {
+        return true;
+    }
+    visited[vi] |= bit;
+
     for slot in 0u8..32 {
         let mut multi = false;
         for func in 0u8..8 {
-            let id = cfg_read32(0, slot, func, 0);
+            let id = cfg_read32(bus, slot, func, 0);
             if id & 0xFFFF == 0xFFFF {
                 if func == 0 {
                     break;
@@ -78,22 +85,37 @@ fn scan(mut f: impl FnMut(PciAddr, u32, u32) -> bool) {
                 continue;
             }
             if func == 0 {
-                multi = (cfg_read32(0, slot, 0, 0x0C) >> 16) & 0x80 != 0;
+                multi = (cfg_read32(bus, slot, 0, 0x0C) >> 16) & 0x80 != 0;
             }
-            let class_reg = cfg_read32(0, slot, func, 0x08);
-            let addr = PciAddr {
-                bus: 0,
-                slot,
-                func,
-            };
+            let class_reg = cfg_read32(bus, slot, func, 0x08);
+            let addr = PciAddr { bus, slot, func };
             if !f(addr, id, class_reg) {
-                return;
+                return false;
+            }
+            /* Type-1 PCI-PCI bridge → walk secondary bus. */
+            let class = (class_reg >> 24) as u8;
+            let subclass = (class_reg >> 16) as u8;
+            if class == 0x06 && subclass == 0x04 {
+                let buses = cfg_read32(bus, slot, func, 0x18);
+                let secondary = ((buses >> 8) & 0xFF) as u8;
+                if secondary != 0 && secondary != bus {
+                    if !scan_bus(secondary, visited, f) {
+                        return false;
+                    }
+                }
             }
             if func == 0 && !multi {
                 break;
             }
         }
     }
+    true
+}
+
+/// Walk all reachable PCI buses (bus 0 + bridges). `f` returns `false` to stop.
+fn scan(mut f: impl FnMut(PciAddr, u32, u32) -> bool) {
+    let mut visited = [0u64; 4];
+    let _ = scan_bus(0, &mut visited, &mut f);
 }
 
 /// I/O BAR base (legacy virtio), or `None` if the BAR is not I/O space.
@@ -237,9 +259,9 @@ fn print_hex16(v: u16) {
     print_color(core::str::from_utf8(&buf[..4]).unwrap_or("????"), COLOR_WHITE);
 }
 
-/// Scan PCI bus 0 and print present devices (vendor:device @ bus:slot.func).
+/// Scan all reachable PCI buses and print present devices.
 pub fn scan_bus0_print() {
-    println_color("PCI bus 0:", COLOR_LIGHT_CYAN);
+    println_color("PCI:", COLOR_LIGHT_CYAN);
     let mut found = 0u32;
     scan(|addr, id, class_reg| {
         let vendor = (id & 0xFFFF) as u16;
@@ -251,8 +273,11 @@ pub fn scan_bus0_print() {
         print_hex16(vendor);
         print_color(":", COLOR_WHITE);
         print_hex16(device);
-        print_color(" @ 0:", COLOR_WHITE);
+        print_color(" @ ", COLOR_WHITE);
         let mut num = [0u8; 4];
+        let n = u64_to_dec(addr.bus as u64, &mut num);
+        print_color(core::str::from_utf8(&num[..n]).unwrap_or("?"), COLOR_WHITE);
+        print_color(":", COLOR_WHITE);
         let n = u64_to_dec(addr.slot as u64, &mut num);
         print_color(core::str::from_utf8(&num[..n]).unwrap_or("?"), COLOR_WHITE);
         print_color(".", COLOR_WHITE);

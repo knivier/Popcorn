@@ -83,6 +83,14 @@ fn err_code(e: fat32::FsError, fallback: i32) -> i32 {
 
 /// Mount (or format) FAT32 on the currently selected disk.
 pub fn init() {
+    if crate::drivers::block::selected_id() == usize::MAX {
+        set_err(ERR_INVALID_OPERATION);
+        println_color(
+            "FAT32: no disk selected (USB MSC not found? try: disk list)",
+            COLOR_WHITE,
+        );
+        return;
+    }
     match fat32::mount_or_format() {
         Ok(()) => {
             set_err(ERR_SUCCESS);
@@ -92,6 +100,13 @@ pub fn init() {
             set_err(ERR_INVALID_OPERATION);
             println_color(
                 "FAT32: disk holds other data - not formatting it (use a blank disk)",
+                COLOR_WHITE,
+            );
+        }
+        Err(fat32::FsError::NoSpace) => {
+            set_err(ERR_NO_SPACE);
+            println_color(
+                "FAT32: disk too small to format (need ~33MiB+)",
                 COLOR_WHITE,
             );
         }

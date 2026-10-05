@@ -42,25 +42,19 @@ pub extern "C" fn sysinfo_print_full() {
     unsafe { crate::console_ffi::console_newline() };
     cpuinfo::print_compact_for_sysinfo();
 
-    // Drive-backed memory summary
+    /* Prefer conventional RAM (available). total_physical includes MMIO reserved. */
     meminfo::calculate_stats();
     let st = unsafe { *meminfo::memory_pop_get_stats() };
     unsafe { crate::console_ffi::console_newline() };
     println_color("--- Memory Information ---", COLOR_LIGHT_MAGENTA);
-    print_color("Drive mem: ", COLOR_LIGHT_CYAN);
-    let reply = meminfo::cmd("stats");
-    println_color(&reply, COLOR_WHITE);
-    print_color("Total (boot): ", COLOR_LIGHT_CYAN);
-    let total = unsafe { multiboot2_get_total_memory() };
+    print_color("RAM (available): ", COLOR_LIGHT_CYAN);
     let mut buf = [0u8; 64];
+    format_mb(st.total_available, &mut buf);
+    println_color(cstr(&buf), COLOR_WHITE);
+    print_color("Boot handoff: ", COLOR_LIGHT_CYAN);
+    let total = unsafe { multiboot2_get_total_memory() };
     format_mb(total, &mut buf);
-    print_color(cstr(&buf), COLOR_WHITE);
-    print_color("  Lower: ", COLOR_LIGHT_CYAN);
-    print_u32(unsafe { multiboot2_get_memory_lower() }, COLOR_WHITE);
-    print_color(" KB  Upper: ", COLOR_LIGHT_CYAN);
-    print_u32(unsafe { multiboot2_get_memory_upper() }, COLOR_WHITE);
-    println_color(" KB", COLOR_WHITE);
-    let _ = st;
+    println_color(cstr(&buf), COLOR_WHITE);
 
     unsafe { crate::console_ffi::console_newline() };
     clock::print_summary();

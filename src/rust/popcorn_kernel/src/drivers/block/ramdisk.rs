@@ -11,11 +11,8 @@ static mut DATA: Option<Vec<u8>> = None;
 pub fn init() -> Result<(u64, u32), &'static str> {
     unsafe {
         if DATA.is_none() {
-            let mut v = vec![0u8; (SECTORS as usize) * (SECTOR_SIZE as usize)];
-            // Marker so reads aren't all-zero before first write.
-            if let Some(b) = v.get_mut(0..8) {
-                b.copy_from_slice(b"POPCORN\0");
-            }
+            /* Leave blank — a POPCORN marker looked like "foreign data" to FAT. */
+            let v = vec![0u8; (SECTORS as usize) * (SECTOR_SIZE as usize)];
             DATA = Some(v);
         }
     }
