@@ -69,7 +69,9 @@ find_edk_code() {
     /opt/homebrew/share/qemu/edk2-x86_64-code.fd \
     /opt/homebrew/Cellar/qemu/*/share/qemu/edk2-x86_64-code.fd \
     /usr/share/qemu/edk2-x86_64-code.fd \
+    /usr/share/OVMF/OVMF_CODE_4M.fd \
     /usr/share/edk2/x64/OVMF_CODE.fd \
+    /usr/share/edk2/ovmf/OVMF_CODE_4M.fd \
     /usr/share/edk2/ovmf/OVMF_CODE.fd \
     /usr/share/OVMF/OVMF_CODE.fd; do
     if [[ -f "$p" ]]; then
@@ -86,6 +88,8 @@ ensure_ovmf_vars() {
   if [[ ! -f "$vars" ]]; then
     local template=""
     for template in \
+      /usr/share/OVMF/OVMF_VARS_4M.fd \
+      /usr/share/edk2/ovmf/OVMF_VARS_4M.fd \
       /usr/share/edk2/ovmf/OVMF_VARS.fd \
       /usr/share/OVMF/OVMF_VARS.fd \
       /usr/share/edk2/x64/OVMF_VARS.fd; do
