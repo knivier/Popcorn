@@ -46,9 +46,8 @@ void init_boot_screen(void) {
     multiboot2_parse_framebuffer();
     console_init();
     boot_stage('c');
-    if (console_fb_active()) {
-        console_fb_relayout();
-    }
+    /* One layout compute at handoff; avoid re-painting the full panel here
+     * (that flashed blank frames over the boot UI). */
 
     idt_init();
     boot_stage('d');
@@ -337,19 +336,12 @@ void init_boot_hold(void) {
     console_println_color("", CONSOLE_FG_COLOR);
     console_println_color("Starting console...", BOOT_SUBTITLE_COLOR);
     console_present();
-    for (volatile uint32_t i = 0; i < 8000000u; i++) {
-        if ((i & 0x1FFFFFu) == 0u) {
-            console_present();
-        }
+    /* Short pause without re-presenting (that caused visible color flashes). */
+    for (volatile uint32_t i = 0; i < 4000000u; i++) {
     }
 }
 
 void init_transition_to_console(void) {
-    if (console_fb_active()) {
-        console_fb_paint_background(POPCORN_FB_BG_RGB);
-        console_fb_relayout();
-    }
-
     console_clear();
     console_draw_header("Popcorn Kernel v0.5");
     console_heartbeat_tick();

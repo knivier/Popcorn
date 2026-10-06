@@ -1,8 +1,8 @@
 //! Minimal FAT32 (mount / format / file + directory ops) on the selected disk.
 //!
 //! Safety rules:
-//! - Auto-format happens only on a provably blank disk (`block::selected_is_blank`);
-//!   any MBR/GPT/ESP/NTFS/ext4 content makes `mount_or_format` refuse.
+//! - Boot never auto-formats. Blank disks stay unmounted until `disk wipe … YES`.
+//! - Any MBR/GPT/ESP/NTFS/ext4 content makes mount refuse.
 //! - The mounted volume is bound to the disk it was mounted from; if the selected
 //!   disk changes the volume reads as "not mounted" instead of writing FAT
 //!   structures onto another device.
@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 use core::ffi::c_char;
 use core::ptr::addr_of_mut;
 
-use crate::console_ffi::{println_color, COLOR_LIGHT_GREEN, COLOR_WHITE};
+use crate::console_ffi::{print_color, println_color, COLOR_LIGHT_GREEN, COLOR_WHITE};
 use crate::drivers::block;
 
 const ATTR_READ_ONLY: u8 = 0x01;
@@ -33,7 +33,7 @@ const MAX_PATH: usize = 128;
 /// Deepest directory recursion for `listsys` / `search` (guards cyclic dirs).
 const MAX_DEPTH: u32 = 16;
 /// Largest volume we format (keeps `sectors as u32` and FAT zeroing sane).
-const MAX_FORMAT_SECTORS: u64 = 1 << 20; /* 512 MiB */
+const MAX_FORMAT_SECTORS: u64 = 1 << 19; /* 256 MiB — keeps USB FAT clears short */
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FsError {
@@ -179,29 +179,23 @@ fn format_fat32(disk_sectors: u64) -> Result<Fat32, FsError> {
         return Err(FsError::NoSpace);
     }
     let bps: u16 = 512;
-    let spc: u8 = 1; /* 512 B clusters → enough for FAT32 on 64 MiB */
     let reserved: u16 = 32;
     let fats: u8 = 2;
     let root_cluster: u32 = 2;
 
-    /* Smallest FAT size that can describe the clusters left after the FATs.
-     * spf only grows and `need` only shrinks as spf grows, so this settles in
-     * two steps with `need <= spf` (the old fixed loop could stop on a stale
-     * cluster_count). */
-    let mut spf = 1u32;
-    let mut cluster_count;
-    loop {
-        let data_lba = reserved as u64 + (fats as u64) * (spf as u64);
-        cluster_count = (sectors.saturating_sub(data_lba) / spc as u64) as u32;
-        let need = ((cluster_count as u64 + 2) * 4 + 511) / 512;
-        if need <= spf as u64 {
-            break;
+    /* Prefer larger clusters (fewer FAT sector writes on USB), but FAT32 needs
+     * ≥65525 clusters after reserved+FAT overhead — so fall back to smaller spc. */
+    let mut spc = pick_spc(sectors);
+    let (spf, cluster_count) = loop {
+        let (spf, cluster_count) = fit_fat(sectors, reserved, fats, spc)?;
+        if cluster_count >= 65525 {
+            break (spf, cluster_count);
         }
-        spf = need as u32;
-    }
-    if cluster_count < 65525 {
-        return Err(FsError::NoSpace);
-    }
+        if spc == 1 {
+            return Err(FsError::NoSpace);
+        }
+        spc >>= 1;
+    };
 
     let mut sec = [0u8; 512];
     sec[0] = 0xEB;
@@ -246,11 +240,16 @@ fn format_fat32(disk_sectors: u64) -> Result<Fat32, FsError> {
     let fat_lba = reserved as u64;
     let data_lba = fat_lba + (fats as u64) * (spf as u64);
 
-    /* Clear FATs */
+    /* Clear FATs — progress so a USB format does not look like a freeze. */
     let zero = [0u8; 512];
-    for i in 0..(spf as u64) * (fats as u64) {
+    let fat_secs = (spf as u64) * (fats as u64);
+    for i in 0..fat_secs {
         wr(fat_lba + i, &zero)?;
+        if (i & 63) == 0 {
+            print_color(".", COLOR_WHITE);
+        }
     }
+    println_color("", COLOR_WHITE);
 
     let mut fs = Fat32 {
         bps,
@@ -289,6 +288,43 @@ fn format_fat32(disk_sectors: u64) -> Result<Fat32, FsError> {
     wr(0, &sec)?;
 
     Ok(fs)
+}
+
+fn fit_fat(sectors: u64, reserved: u16, fats: u8, spc: u8) -> Result<(u32, u32), FsError> {
+    let mut spf = 1u32;
+    let mut cluster_count;
+    loop {
+        let data_lba = reserved as u64 + (fats as u64) * (spf as u64);
+        cluster_count = (sectors.saturating_sub(data_lba) / spc as u64) as u32;
+        let need = ((cluster_count as u64 + 2) * 4 + 511) / 512;
+        if need <= spf as u64 {
+            break;
+        }
+        spf = need as u32;
+        if spf > 4096 {
+            return Err(FsError::NoSpace);
+        }
+    }
+    Ok((spf, cluster_count))
+}
+
+/// Choose sectors-per-cluster so the FAT stays small enough for USB format.
+fn pick_spc(sectors: u64) -> u8 {
+    /* Target ~≤512 FAT sectors: spf≈sectors/(spc*128) ≤ 512 → spc ≥ sectors/65536 */
+    let mut spc: u32 = 1;
+    let min_spc = ((sectors / 65_536).max(1) as u32).min(64);
+    while spc < min_spc {
+        spc <<= 1;
+    }
+    /* Leave headroom for reserved+FAT so cluster_count stays ≥65525. */
+    while spc > 1 && (sectors.saturating_sub(4096) / spc as u64) < 65_525 {
+        spc >>= 1;
+    }
+    if spc == 0 {
+        1
+    } else {
+        spc as u8
+    }
 }
 
 impl Fat32 {
@@ -632,11 +668,8 @@ fn sfn_display(ent: &[u8; 32]) -> String {
     s
 }
 
-/// Mount the selected disk, or format it **only if it is provably blank**.
-///
-/// Anything that is not a valid FAT32 BPB *and* not an all-zero MBR/GPT head
-/// (GPT, MBR with partitions, ESP, NTFS, ext4, a half-written volume, ...) is
-/// refused with `NotFat` — it is never reformatted automatically.
+/// Mount the selected disk. Never auto-formats — blank/foreign disks stay
+/// unmounted so boot cannot hang writing a FAT over USB.
 pub fn mount_or_format() -> Result<(), FsError> {
     unmount();
     let (sectors, _) = block::selected_capacity().ok_or(FsError::Io)?;
@@ -648,12 +681,19 @@ pub fn mount_or_format() -> Result<(), FsError> {
         return Ok(());
     }
 
-    if !block::selected_is_blank() {
-        return Err(FsError::NotFat);
-    }
+    /* Blank or foreign: refuse. Caller must `disk wipe <name> YES`. */
+    Err(FsError::NotFat)
+}
 
+/// Format the selected disk as Popcorn FAT32 (caller must have wiped it).
+pub fn force_format() -> Result<(), FsError> {
+    unmount();
+    let (sectors, _) = block::selected_capacity().ok_or(FsError::Io)?;
     let mut fat = format_fat32(sectors)?;
-    seed_defaults(&mut fat)?;
+    /* Seed files are nice-to-have; a failed README must not undo a good format. */
+    if seed_defaults(&mut fat).is_err() {
+        println_color("FAT32: volume ok (default files skipped)", COLOR_WHITE);
+    }
     unsafe { *addr_of_mut!(FS) = Some(fat) };
     println_color("FAT32 formatted on selected disk", COLOR_LIGHT_GREEN);
     Ok(())

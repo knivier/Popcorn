@@ -13,6 +13,7 @@
 extern bool write_file(const char* name, const char* content);
 extern const char* read_file(const char* name);
 extern bool delete_file(const char* name);
+extern int get_last_filesystem_error(void);
 
 // External console state
 extern ConsoleState console_state;
@@ -221,7 +222,22 @@ void dolphin_save(void) {
         }
     } else {
         console_set_cursor(0, 22);
-        console_print_error("Failed to save (filesystem full, name too long, or content too large)");
+        int err = get_last_filesystem_error();
+        if (err == 9) {
+            console_print_error("Save failed: no Popcorn FAT volume on selected disk");
+            console_println_color(
+                "Tip: disk list → disk wipe usb0 YES  (then dol -save)",
+                CONSOLE_INFO_COLOR);
+        } else if (err == 8 || err == 2) {
+            console_print_error("Save failed: bad name (use 8.3 like NOTE.TXT)");
+        } else if (err == 6) {
+            console_print_error("Save failed: no space / content too large");
+        } else {
+            console_print_error("Save failed (disk locked or I/O error)");
+            console_println_color(
+                "Tip: disk wipe <usbN> YES, then disk use <usbN>",
+                CONSOLE_INFO_COLOR);
+        }
     }
 }
 

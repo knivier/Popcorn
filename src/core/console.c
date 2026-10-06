@@ -152,13 +152,10 @@ void console_init(void) {
     multiboot2_parse_framebuffer();
     console_display_init();
 
+    /* Clear once; boot UI draws next. No interim splash — it flashed over
+     * the real startup text on GOP panels. */
     console_clear();
-
-    if (console_fb_active()) {
-        console_set_cursor(26, 11);
-        console_println_color("POPCORN", 0x0A);
-        console_present();
-    }
+    console_present();
 }
 
 // Clear the entire screen

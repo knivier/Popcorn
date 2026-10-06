@@ -80,6 +80,7 @@ static mut DISKS: Option<Vec<DiskEntry>> = None;
 static SELECTED: AtomicUsize = AtomicUsize::new(usize::MAX);
 /// Pending install target index, or MAX if none.
 static PENDING_INSTALL: AtomicUsize = AtomicUsize::new(usize::MAX);
+static PENDING_WIPE: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 /* Static names for registered disks (immortal). */
 static mut NAME_USB0: &str = "usb0";
@@ -111,7 +112,7 @@ fn is_writable(d: &DiskEntry) -> bool {
 
 /// Needs the `install <name>` / `install <name> YES` handshake before writes.
 fn needs_unlock(d: &DiskEntry) -> bool {
-    d.class == DiskClass::Internal || d.protected
+    (d.class == DiskClass::Internal || d.protected) && !d.install_unlocked
 }
 
 fn publish_disk(d: &DiskEntry) {
@@ -150,6 +151,7 @@ pub fn init() {
     t.clear();
     SELECTED.store(usize::MAX, Ordering::Release);
     PENDING_INSTALL.store(usize::MAX, Ordering::Release);
+    PENDING_WIPE.store(usize::MAX, Ordering::Release);
 
     if let Ok((sectors, ssize)) = ramdisk::init() {
         let d = DiskEntry {
@@ -194,9 +196,12 @@ pub fn init() {
     };
     let mut usb_real = false;
     if usb_n > 0 {
-        /* usb0 = first non-foreign disk (blank / Popcorn data), else the first
-         * (which then registers as `protected`, i.e. locked until install YES). */
-        let primary = (0..usb_n).find(|&i| !usb_msc::is_boot_like(i)).unwrap_or(0);
+        /* Prefer a Popcorn volume as usb0, else blank (install target), else first. */
+        let primary = (0..usb_n)
+            .find(|&i| usb_msc::is_ours(i))
+            .or_else(|| (0..usb_n).find(|&i| usb_msc::is_blank(i)))
+            .or_else(|| (0..usb_n).find(|&i| !usb_msc::is_boot_like(i)))
+            .unwrap_or(0);
         let mut order: Vec<usize> = Vec::new();
         order.push(primary);
         for i in 0..usb_n {
@@ -216,7 +221,9 @@ pub fn init() {
                     sectors,
                     sector_size: ssize,
                     backend: Backend::UsbMsc(i),
-                    is_boot: n == 0,
+                    /* Only a real Popcorn volume is the default boot/data disk.
+                     * Blank sticks are writable but must not auto-format on boot. */
+                    is_boot: usb_msc::is_ours(i),
                     install_unlocked: false,
                     protected: usb_msc::is_boot_like(i),
                 };
@@ -396,7 +403,7 @@ pub fn install(name: &str, confirm_yes: bool) -> Result<bool, &'static str> {
         .iter()
         .position(|d| d.name == name)
         .ok_or("unknown disk")?;
-    if !needs_unlock(&t[idx]) {
+    if !(t[idx].class == DiskClass::Internal || t[idx].protected) {
         return Err("install only for internal/protected disks");
     }
     if matches!(t[idx].backend, Backend::Stub) {
@@ -412,7 +419,7 @@ pub fn install(name: &str, confirm_yes: bool) -> Result<bool, &'static str> {
     }
     if PENDING_INSTALL.load(Ordering::Acquire) != idx {
         /* YES without an arm for *this* disk: refuse (never self-arm). */
-        return Err("not armed: run `install <name>` first, then `install <name> YES`");
+        return Err("not armed: run `disk install <name>` then `disk install <name> YES`");
     }
     t[idx].install_unlocked = true;
     if let Backend::Nvme(_) = t[idx].backend {
@@ -420,6 +427,76 @@ pub fn install(name: &str, confirm_yes: bool) -> Result<bool, &'static str> {
     }
     SELECTED.store(idx, Ordering::Release);
     PENDING_INSTALL.store(usize::MAX, Ordering::Release);
+    Ok(true)
+}
+
+/// Quick-wipe + Popcorn FAT32 format.
+/// `disk wipe <name> YES` is enough confirmation (YES in the command is the
+/// confirm). A prior bare `disk wipe <name>` still arms if preferred.
+/// Returns Ok(true) if wiped+formatted, Ok(false) if armed.
+pub fn wipe(name: &str, confirm_yes: bool) -> Result<bool, &'static str> {
+    let t = table();
+    let idx = t
+        .iter()
+        .position(|d| d.name == name)
+        .ok_or("unknown disk")?;
+    if matches!(t[idx].backend, Backend::Stub | Backend::Ram) {
+        return Err("cannot wipe ram/stub disks");
+    }
+    if t[idx].sectors < 68_000 {
+        return Err("disk too small for FAT32 (~33MiB+)");
+    }
+    if !confirm_yes {
+        PENDING_WIPE.store(idx, Ordering::Release);
+        return Ok(false);
+    }
+    /* Same-line YES is confirmation enough; prior arm is optional. */
+    let armed = PENDING_WIPE.load(Ordering::Acquire);
+    if armed != usize::MAX && armed != idx {
+        return Err("another disk is armed — wipe that name, or wipe this one without a prior arm");
+    }
+
+    /* Allow writes through the foreign-data gate for this operation. */
+    t[idx].install_unlocked = true;
+    t[idx].protected = false; /* wipe owns this stick for the duration */
+    if let Backend::Nvme(_) = t[idx].backend {
+        nvme::set_write_enabled(true);
+    }
+    SELECTED.store(idx, Ordering::Release);
+    crate::fs::fat32::unmount();
+
+    let sectors = t[idx].sectors;
+    let ss = t[idx].sector_size as usize;
+    let zero = alloc::vec![0u8; ss];
+    /* Quick wipe: destroy partition table / BPB head. Last-sector GPT backup
+     * is best-effort — failing it must not abort the format (USB end-LBA
+     * writes often time out on real sticks). */
+    crate::console_ffi::println_color(
+        "wipe: clearing partition tables...",
+        crate::console_ffi::COLOR_WHITE,
+    );
+    for lba in 0..PROTECT_ZONE.min(sectors) {
+        if raw_write(&t[idx], lba, &zero) < 0 {
+            return Err("wipe write failed (USB rejected head write)");
+        }
+    }
+    if sectors > PROTECT_ZONE {
+        let _ = raw_write(&t[idx], sectors - 1, &zero);
+    }
+
+    crate::console_ffi::println_color(
+        "wipe: formatting FAT32...",
+        crate::console_ffi::COLOR_WHITE,
+    );
+    match crate::fs::fat32::force_format() {
+        Ok(()) => {}
+        Err(_) => return Err("FAT32 format failed after wipe"),
+    }
+
+    t[idx].protected = false;
+    t[idx].install_unlocked = true;
+    t[idx].is_boot = true; /* Popcorn volume — prefer for auto-select next time */
+    PENDING_WIPE.store(usize::MAX, Ordering::Release);
     Ok(true)
 }
 
@@ -569,12 +646,15 @@ pub fn write_selected(lba: u64, buf: &[u8]) -> i64 {
         return -2;
     }
     if d.class != DiskClass::Ram {
-        let in_zone = lba < PROTECT_ZONE
-            || (d.sectors > PROTECT_ZONE && lba >= d.sectors - PROTECT_ZONE);
-        /* Unlocked Internal/protected disks and the MBR/GPT head+tail of any
-         * disk are off limits while the disk holds data that is not ours. */
-        if (needs_unlock(d) || in_zone) && holds_foreign_data(d) {
-            return -6;
+        /* Foreign disks (ESP, NTFS, …): block head/tail unless the user has
+         * explicitly `install … YES`'d this disk — then FAT updates in the
+         * reserved/FAT region must be allowed or every file write fails. */
+        if holds_foreign_data(d) && !d.install_unlocked {
+            let in_zone = lba < PROTECT_ZONE
+                || (d.sectors > PROTECT_ZONE && lba >= d.sectors - PROTECT_ZONE);
+            if needs_unlock(d) || in_zone {
+                return -6;
+            }
         }
     }
     raw_write(d, lba, buf)
@@ -644,6 +724,20 @@ pub extern "C" fn rust_disk_install(name: *const core::ffi::c_char, yes: i32) ->
         crate::fs::remount_selected();
     }
     rc
+}
+
+/// Returns 0 wiped+formatted, 1 need YES, -1 error.
+#[no_mangle]
+pub extern "C" fn rust_disk_wipe(name: *const core::ffi::c_char, yes: i32) -> i32 {
+    cstr_map(name, |s| match wipe(s, yes != 0) {
+        Ok(true) => 0,
+        Ok(false) => 1,
+        Err(e) => {
+            crate::console_ffi::print_color("wipe: ", crate::console_ffi::COLOR_YELLOW);
+            crate::console_ffi::println_color(e, crate::console_ffi::COLOR_YELLOW);
+            -1
+        }
+    })
 }
 
 /// Run `f` on the NUL-terminated disk name (max 31 bytes, valid UTF-8).

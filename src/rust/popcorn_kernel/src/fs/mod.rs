@@ -99,7 +99,7 @@ pub fn init() {
         Err(fat32::FsError::NotFat) => {
             set_err(ERR_INVALID_OPERATION);
             println_color(
-                "FAT32: disk holds other data - not formatting it (use a blank disk)",
+                "FAT32: no Popcorn volume (blank/foreign — use: disk wipe <name> YES)",
                 COLOR_WHITE,
             );
         }
@@ -147,6 +147,20 @@ pub extern "C" fn write_file(name: *const c_char, content: *const c_char) -> boo
         }
         return false;
     };
+    /* If nothing is mounted yet (e.g. just selected a wiped disk), try once. */
+    match fat32::write_file(n, c.as_bytes()) {
+        Ok(()) => {
+            set_err(ERR_SUCCESS);
+            return true;
+        }
+        Err(fat32::FsError::NotMounted) => {
+            remount_selected();
+        }
+        Err(e) => {
+            set_err(err_code(e, ERR_INVALID_OPERATION));
+            return false;
+        }
+    }
     match fat32::write_file(n, c.as_bytes()) {
         Ok(()) => {
             set_err(ERR_SUCCESS);
