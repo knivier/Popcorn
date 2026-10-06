@@ -13,13 +13,14 @@ Build (from repo root):
 Artifacts (all under `target/`):
 
 - `target/BOOTX64.EFI`
-- `target/popcorn-uefi.img` — flash to USB (Balena Etcher)
+- `target/popcorn-uefi.img` — **the only file to flash** (Balena Etcher)
+- `target/UNSAFE/` — QEMU scratch + auto-install test images. **Do not flash.**
 - `target/uefi_usb/EFI/BOOT/BOOTX64.EFI` — manual FAT32 copy layout
 
 Hardware:
 
-1. Flash `target/popcorn-uefi.img` to a USB stick, or format FAT32 and copy the ESP layout from `target/uefi_usb/` plus kernel.
-2. Boot the USB in UEFI mode.
+1. Flash **only** `target/popcorn-uefi.img` (built with `./scripts/core.sh all`, never `test-install`).
+2. Boot the USB in UEFI mode. The shell must come up with no install. Use `disk install usb0 YES` to format a USB stick. NVMe writes stay off until `disk master nvme0 YES`.
 
 QEMU (interactive):
 

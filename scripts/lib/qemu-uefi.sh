@@ -10,14 +10,25 @@ source "$(dirname "${BASH_SOURCE[0]}")/kernel.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/img-uefi.sh"
 
 UEFI_IMG="${UEFI_IMG:-$POPCORN_TARGET/popcorn-uefi.img}"
-DATA_IMG="${DATA_IMG:-$POPCORN_TARGET/popcorn-data.img}"
-INTERNAL_IMG="${INTERNAL_IMG:-$POPCORN_TARGET/popcorn-internal.img}"
-USB_DATA_IMG="${USB_DATA_IMG:-$POPCORN_TARGET/popcorn-usb-data.img}"
+# QEMU scratch disks — never flash these.
+UNSAFE_DIR="${UNSAFE_DIR:-$POPCORN_TARGET/UNSAFE}"
+DATA_IMG="${DATA_IMG:-$UNSAFE_DIR/UNSAFE-qemu-virtio.img}"
+INTERNAL_IMG="${INTERNAL_IMG:-$UNSAFE_DIR/UNSAFE-qemu-nvme.img}"
+USB_DATA_IMG="${USB_DATA_IMG:-$UNSAFE_DIR/UNSAFE-qemu-usb-data.img}"
 OVMF_VARS="${OVMF_VARS:-$POPCORN_TARGET/ovmf_vars.fd}"
 
 # Ensure a raw image exists (never the Windows host drive).
 ensure_raw_img() {
   local path="$1" mib="$2" label="$3"
+  mkdir -p "$(dirname "$path")"
+  if [[ ! -f "$UNSAFE_DIR/DO-NOT-FLASH.txt" ]]; then
+    mkdir -p "$UNSAFE_DIR"
+    cat > "$UNSAFE_DIR/DO-NOT-FLASH.txt" <<'EOF'
+UNSAFE — QEMU-only images. Do not flash any file in this directory to USB or a real disk.
+The only flashable artifact is ../popcorn-uefi.img after a normal ./scripts/core.sh all
+(without POPCORN_TEST_INSTALL).
+EOF
+  fi
   if [[ ! -f "$path" ]]; then
     log INFO "Creating $label: $path (${mib} MiB)"
     dd if=/dev/zero of="$path" bs=1M count="$mib" status=none 2>/dev/null \
@@ -25,12 +36,10 @@ ensure_raw_img() {
   fi
 }
 
-# Data disks for the picker:
-#   usb-storage (xHCI, popcorn-usb-data.img) → guest name usb0 (real USB MSC,
-#                 writable; the boot ESP usb-storage becomes usb1)
-#   virtio-blk → guest name vda   when USB MSC works, else usb0 (stand-in)
-#   NVMe       → guest name nvme0 (real NVMe, Internal, LOCKED until install … YES)
-# Boot ESP stays on USB-storage (not virtio).
+# Data disks for the picker (all under target/UNSAFE — never flash):
+#   usb-storage (xHCI, UNSAFE-qemu-usb-data.img) → guest usb MSC
+#   virtio-blk → guest vda / usb0 stand-in
+#   NVMe       → guest nvme0 (Internal, writes impossible)
 qemu_uefi_data_disk_args() {
   ensure_raw_img "$DATA_IMG" 64 "USB/boot stand-in disk"
   ensure_raw_img "$USB_DATA_IMG" 64 "USB mass-storage data disk"
@@ -403,6 +412,93 @@ qemu_uefi_smoke() {
   echo "== GRUB ISO =="
   qemu_legacy_smoke || return 1
   echo "PASS: UEFI QEMU smoke"
+}
+
+# Boot with POPCORN_TEST_INSTALL kernel (QEMU hypervisor only): runs
+# rust_test_disk_install during init onto USB/virtio, never NVMe.
+# expects debugcon 'I', then verifies BOOT/KERNEL on the USB data image via mtools.
+qemu_uefi_test_install() {
+  local code dbg serial boot_timeout
+  code="$(find_edk_code || true)"
+  [[ -n "$code" ]] || { echo "FAIL: edk2-x86_64-code.fd not found" >&2; exit 1; }
+
+  dbg="$POPCORN_TARGET/uefi-install-test.log"
+  serial="$POPCORN_TARGET/uefi-install-serial.log"
+  boot_timeout="${POPCORN_QEMU_BOOT_TIMEOUT:-180}"
+
+  rm -f "$OVMF_VARS" "$USB_DATA_IMG"
+  ensure_ovmf_vars "$OVMF_VARS"
+  ensure_raw_img "$USB_DATA_IMG" 64 "USB mass-storage data disk"
+  rm -f "$dbg" "$serial"
+  qemu_kill_all
+  sleep 1
+
+  qemu_uefi_usb_args "$code" \
+    -debugcon "file:$dbg" -global isa-debugcon.iobase=0xe9 \
+    -serial "file:$serial" \
+    -display none -no-reboot \
+    -daemonize
+
+  local waited=0
+  while [[ $waited -lt "$boot_timeout" ]]; do
+    if [[ -f "$dbg" ]] && grep -q 'I' "$dbg" 2>/dev/null; then
+      break
+    fi
+    if [[ -f "$dbg" ]] && grep -q 'i' "$dbg" 2>/dev/null && grep -q 'M' "$dbg" 2>/dev/null; then
+      # reached kmain but install selftest failed
+      break
+    fi
+    if ! pgrep -f qemu-system-x86_64 >/dev/null; then
+      echo "FAIL: QEMU exited early (${waited}s)"
+      echo "debugcon: $(cat "$dbg" 2>/dev/null || true)"
+      echo "serial: $(cat "$serial" 2>/dev/null || true)"
+      return 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  sleep 2
+  qemu_kill_all
+  local body
+  body="$(cat "$dbg" 2>/dev/null || true)"
+  echo "debugcon: $body"
+  case "$body" in
+    *I*) ;;
+    *)
+      echo "FAIL: install selftest marker I not seen (got fail=i if present)"
+      echo "serial: $(cat "$serial" 2>/dev/null || true)"
+      return 1
+      ;;
+  esac
+
+  # Verify FAT contents on the data image the guest installed onto.
+  if have mdir; then
+    echo "== mdir BOOT =="
+    if ! mdir -i "$USB_DATA_IMG" ::/BOOT; then
+      echo "FAIL: mdir ::/BOOT failed on $USB_DATA_IMG"
+      return 1
+    fi
+    if ! mdir -i "$USB_DATA_IMG" ::/BOOT | grep -qi KERNEL; then
+      echo "FAIL: KERNEL missing under ::/BOOT"
+      return 1
+    fi
+    if ! mdir -i "$USB_DATA_IMG" ::/EFI/BOOT | grep -qi BOOTX64; then
+      echo "FAIL: BOOTX64.EFI missing under ::/EFI/BOOT"
+      return 1
+    fi
+  else
+    # Fallback: look for POPCORN OEM + ELF magic somewhere in the image.
+    if ! grep -aob $'POPCORN ' "$USB_DATA_IMG" >/dev/null; then
+      echo "FAIL: POPCORN OEM BPB not found on data image"
+      return 1
+    fi
+    if ! grep -aob $'\x7fELF' "$USB_DATA_IMG" >/dev/null; then
+      echo "FAIL: ELF kernel not found on data image"
+      return 1
+    fi
+  fi
+  echo "PASS: disk install selftest (BOOT/KERNEL present on data USB image)"
 }
 
 qemu_uefi_run_interactive() {

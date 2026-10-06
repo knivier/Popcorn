@@ -66,8 +66,8 @@ popcorn/
 └── target/            # ALL build outputs (gitignored)
     ├── kernel
     ├── BOOTX64.EFI
-    ├── popcorn-uefi.img
-    └── …
+    ├── popcorn-uefi.img   # ONLY flash this
+    └── UNSAFE/            # QEMU-only; never flash
 ```
 
 ## Dependencies

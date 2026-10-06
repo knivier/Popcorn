@@ -349,6 +349,37 @@ void init_transition_to_console(void) {
     console_newline();
     /* After clear so "Rust active" stays on the interactive console. */
     rust_init();
+#if defined(POPCORN_TEST_INSTALL)
+    {
+        unsigned int a, b, c, d;
+        int hypervisor;
+        int qemu_fw;
+        unsigned char sig[4];
+        unsigned short fwsel = 0;
+        extern int rust_test_disk_install(void);
+        __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1), "c"(0));
+        hypervisor = (c & (1u << 31)) != 0;
+        /* FW_CFG_SIGNATURE at 0x510/0x511 is "QEMU" only in QEMU. */
+        __asm__ volatile("outw %0, %1" : : "a"(fwsel), "Nd"((unsigned short)0x510));
+        for (int i = 0; i < 4; i++) {
+            __asm__ volatile("inb %1, %0" : "=a"(sig[i]) : "Nd"((unsigned short)0x511));
+        }
+        qemu_fw = sig[0] == 'Q' && sig[1] == 'E' && sig[2] == 'M' && sig[3] == 'U';
+        if (!hypervisor || !qemu_fw) {
+            console_println_color(
+                "REFUSING auto-install selftest (not QEMU) — this build is not for hardware.",
+                CONSOLE_ERROR_COLOR);
+        } else {
+            console_println_color("Running disk install selftest (QEMU only)...", CONSOLE_WARNING_COLOR);
+            if (rust_test_disk_install() != 0) {
+                console_print_error("disk install selftest FAILED");
+            } else {
+                console_print_success("disk install selftest PASSED");
+            }
+        }
+        console_present();
+    }
+#endif
     if (multiboot2_is_uefi_boot()) {
         console_println_color("Boot: UEFI native loader (GOP framebuffer)", CONSOLE_INFO_COLOR);
         console_println_color("Keyboard: PS/2 poll (ExitBootServices)", CONSOLE_INFO_COLOR);

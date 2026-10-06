@@ -2,6 +2,10 @@
 //! on top of the polled xHCI driver. 512-byte sectors, one sector per call.
 //!
 //! Layout of each device's 4 KiB DMA page: CBW @0, CSW @64, data @512.
+//!
+//! Timer IRQs must not run the scheduler mid-BOT (corrupts xHCI rings).
+//! Full CLI for the whole transfer also hung ThinkPad EC watchdogs during
+//! `disk install` kernel writes — use irq_quiet instead (EOI, no schedule).
 
 use alloc::vec::Vec;
 use core::ptr::addr_of_mut;
@@ -14,6 +18,27 @@ const CSW_SIG: u32 = 0x5342_5355; /* "USBS" */
 const OFF_CBW: u64 = 0;
 const OFF_CSW: u64 = 64;
 const OFF_DATA: u64 = 512;
+
+extern "C" {
+    fn irq_quiet_enter();
+    fn irq_quiet_leave();
+}
+
+/// Defer scheduler for one BOT command; keep IF=1 so PIC/EOI still run.
+struct IrqQuietGuard;
+
+impl IrqQuietGuard {
+    fn new() -> Self {
+        unsafe { irq_quiet_enter() };
+        Self
+    }
+}
+
+impl Drop for IrqQuietGuard {
+    fn drop(&mut self) {
+        unsafe { irq_quiet_leave() };
+    }
+}
 
 struct Disk {
     /// Index of the device inside the xHCI MSC list.
@@ -44,6 +69,7 @@ fn be32(b: &[u8], o: usize) -> u32 {
 
 /// One BOT command. Data (if any) lives at the device's data offset.
 fn bot(xi: usize, tag: u32, cdb: &[u8], data_len: u32, data_in: bool) -> Result<(), &'static str> {
+    let _irq = IrqQuietGuard::new();
     let (virt, phys) = xhci::msc_io_buf(xi).ok_or("usb msc: no io buffer")?;
     if cdb.is_empty() || cdb.len() > 16 || data_len as usize > SECTOR {
         return Err("usb msc: bad command");

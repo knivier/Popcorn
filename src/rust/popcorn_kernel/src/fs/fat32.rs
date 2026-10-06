@@ -29,6 +29,8 @@ const ATTR_LONG_NAME: u8 = ATTR_READ_ONLY | ATTR_HIDDEN | ATTR_SYSTEM | ATTR_VOL
 const FAT_EOC: u32 = 0x0FFF_FFFF;
 const FAT_MASK: u32 = 0x0FFF_FFFF;
 pub const MAX_CONTENT: usize = 64 * 1024;
+/// Boot payloads (kernel ~800 KiB + EFI) staged in RAM during `disk install`.
+pub const MAX_INSTALL_FILE: usize = 2 * 1024 * 1024;
 const MAX_PATH: usize = 128;
 /// Deepest directory recursion for `listsys` / `search` (guards cyclic dirs).
 const MAX_DEPTH: u32 = 16;
@@ -61,6 +63,12 @@ struct Fat32 {
     cwd_path: String,
     /// Block-layer index of the disk this volume was mounted from.
     disk: usize,
+    /// Next cluster to try in `alloc_cluster` (avoids O(n²) FAT rescans).
+    free_hint: u32,
+    /// Cached primary-FAT sector index (`u32::MAX` = empty).
+    fat_c_si: u32,
+    fat_c_dirty: bool,
+    fat_c_sec: [u8; 512],
 }
 
 static mut FS: Option<Fat32> = None;
@@ -78,7 +86,12 @@ fn fs() -> Result<&'static mut Fat32, FsError> {
 
 /// Forget the mounted volume (called when the selected disk changes).
 pub fn unmount() {
-    unsafe { *addr_of_mut!(FS) = None };
+    unsafe {
+        if let Some(ref mut f) = *addr_of_mut!(FS) {
+            let _ = f.fat_flush();
+        }
+        *addr_of_mut!(FS) = None;
+    }
 }
 
 fn rd(lba: u64, buf: &mut [u8]) -> Result<(), FsError> {
@@ -168,6 +181,10 @@ fn parse_bpb(sec: &[u8], disk_sectors: u64) -> Result<Fat32, FsError> {
         cwd: root_cluster,
         cwd_path: String::from("/"),
         disk: block::selected_id(),
+        free_hint: 3,
+        fat_c_si: u32::MAX,
+        fat_c_dirty: false,
+        fat_c_sec: [0u8; 512],
     })
 }
 
@@ -264,12 +281,17 @@ fn format_fat32(disk_sectors: u64) -> Result<Fat32, FsError> {
         cwd: root_cluster,
         cwd_path: String::from("/"),
         disk: block::selected_id(),
+        free_hint: 3,
+        fat_c_si: u32::MAX,
+        fat_c_dirty: false,
+        fat_c_sec: [0u8; 512],
     };
 
     /* Media / EOC entries */
     fs.fat_set(0, 0x0FFF_FFF8)?;
     fs.fat_set(1, 0x0FFF_FFFF)?;
     fs.fat_set(2, FAT_EOC)?;
+    fs.fat_flush()?;
 
     /* Empty root cluster */
     fs.zero_cluster(2)?;
@@ -338,15 +360,35 @@ impl Fat32 {
         self.data_lba + (cluster as u64 - 2) * self.spc as u64
     }
 
-    fn fat_get(&self, cluster: u32) -> Result<u32, FsError> {
+    fn fat_flush(&mut self) -> Result<(), FsError> {
+        if !self.fat_c_dirty || self.fat_c_si == u32::MAX {
+            return Ok(());
+        }
+        let si = self.fat_c_si as u64;
+        for f in 0..self.fats as u64 {
+            wr(self.fat_lba + f * self.spf as u64 + si, &self.fat_c_sec)?;
+        }
+        self.fat_c_dirty = false;
+        Ok(())
+    }
+
+    fn fat_load(&mut self, si: u32) -> Result<(), FsError> {
+        if self.fat_c_si == si {
+            return Ok(());
+        }
+        self.fat_flush()?;
+        rd(self.fat_lba + si as u64, &mut self.fat_c_sec)?;
+        self.fat_c_si = si;
+        Ok(())
+    }
+
+    fn fat_get(&mut self, cluster: u32) -> Result<u32, FsError> {
         if cluster as u64 >= self.cluster_count as u64 + 2 {
             return Err(FsError::Io);
         }
         let off = cluster as u64 * 4;
-        let lba = self.fat_lba + off / 512;
-        let mut sec = [0u8; 512];
-        rd(lba, &mut sec)?;
-        Ok(le32(&sec, (off % 512) as usize) & FAT_MASK)
+        self.fat_load((off / 512) as u32)?;
+        Ok(le32(&self.fat_c_sec, (off % 512) as usize) & FAT_MASK)
     }
 
     fn fat_set(&mut self, cluster: u32, value: u32) -> Result<(), FsError> {
@@ -355,14 +397,9 @@ impl Fat32 {
         }
         let off = cluster as u64 * 4;
         let idx = (off % 512) as usize;
-        let val = value & FAT_MASK;
-        for f in 0..self.fats as u64 {
-            let lba = self.fat_lba + f * self.spf as u64 + off / 512;
-            let mut sec = [0u8; 512];
-            rd(lba, &mut sec)?;
-            put32(&mut sec, idx, val);
-            wr(lba, &sec)?;
-        }
+        self.fat_load((off / 512) as u32)?;
+        put32(&mut self.fat_c_sec, idx, value & FAT_MASK);
+        self.fat_c_dirty = true;
         Ok(())
     }
 
@@ -379,20 +416,27 @@ impl Fat32 {
     }
 
     fn alloc_cluster(&mut self) -> Result<u32, FsError> {
-        /* Scan one FAT sector at a time (128 entries per read, not one read per cluster). */
-        let mut sec = [0u8; 512];
-        let mut loaded = u64::MAX;
-        for c in 2..self.cluster_count + 2 {
-            let off = c as u64 * 4;
-            let lba = self.fat_lba + off / 512;
-            if lba != loaded {
-                rd(lba, &mut sec)?;
-                loaded = lba;
-            }
-            if le32(&sec, (off % 512) as usize) & FAT_MASK == 0 {
-                self.fat_set(c, FAT_EOC)?;
-                self.zero_cluster(c)?;
-                return Ok(c);
+        /* Scan via the FAT sector cache — no per-cluster USB RMW storm. */
+        let start = self.free_hint.max(2);
+        for pass in 0..2u8 {
+            let (from, to) = if pass == 0 {
+                (start, self.cluster_count + 2)
+            } else {
+                (2, start)
+            };
+            let mut c = from;
+            while c < to {
+                let off = c as u64 * 4;
+                let si = (off / 512) as u32;
+                self.fat_load(si)?;
+                let idx = (off % 512) as usize;
+                if le32(&self.fat_c_sec, idx) & FAT_MASK == 0 {
+                    put32(&mut self.fat_c_sec, idx, FAT_EOC);
+                    self.fat_c_dirty = true;
+                    self.free_hint = c.saturating_add(1);
+                    return Ok(c);
+                }
+                c += 1;
             }
         }
         Err(FsError::NoSpace)
@@ -409,7 +453,7 @@ impl Fat32 {
             self.fat_set(cluster, 0)?;
             cluster = next;
         }
-        Ok(())
+        self.fat_flush()
     }
 
     fn read_cluster(&self, cluster: u32, out: &mut [u8]) -> Result<(), FsError> {
@@ -428,21 +472,23 @@ impl Fat32 {
         if !self.valid_cluster(cluster) {
             return Err(FsError::Io);
         }
-        let need = (self.spc as usize) * 512;
-        let mut tmp = vec![0u8; need];
-        let n = data.len().min(need);
-        tmp[..n].copy_from_slice(&data[..n]);
+        /* No heap: large-cluster Vec allocs during install exhausted the block
+         * table / fragmented under IRQ and contributed to hard resets. */
         let base = self.cluster_lba(cluster);
+        let mut sec = [0u8; 512];
         for i in 0..self.spc as u64 {
-            wr(
-                base + i,
-                &tmp[(i as usize) * 512..(i as usize + 1) * 512],
-            )?;
+            sec.fill(0);
+            let off = (i as usize) * 512;
+            if off < data.len() {
+                let n = (data.len() - off).min(512);
+                sec[..n].copy_from_slice(&data[off..off + n]);
+            }
+            wr(base + i, &sec)?;
         }
         Ok(())
     }
 
-    fn write_dirent(&self, dir_cluster: u32, index: usize, ent: &[u8; 32]) -> Result<(), FsError> {
+    fn write_dirent(&mut self, dir_cluster: u32, index: usize, ent: &[u8; 32]) -> Result<(), FsError> {
         let bpc = (self.spc as usize) * 512;
         let ents_per_cluster = bpc / 32;
         let mut cluster = dir_cluster;
@@ -470,7 +516,7 @@ impl Fat32 {
         }
     }
 
-    fn read_dirent(&self, dir_cluster: u32, index: usize) -> Result<[u8; 32], FsError> {
+    fn read_dirent(&mut self, dir_cluster: u32, index: usize) -> Result<[u8; 32], FsError> {
         let bpc = (self.spc as usize) * 512;
         let ents_per_cluster = bpc / 32;
         let mut cluster = dir_cluster;
@@ -499,7 +545,7 @@ impl Fat32 {
     }
 
     fn for_each_entry<F: FnMut(usize, &[u8; 32]) -> bool>(
-        &self,
+        &mut self,
         dir_cluster: u32,
         mut f: F,
     ) -> Result<(), FsError> {
@@ -688,6 +734,9 @@ pub fn mount_or_format() -> Result<(), FsError> {
 /// Format the selected disk as Popcorn FAT32 (caller must have wiped it).
 pub fn force_format() -> Result<(), FsError> {
     unmount();
+    if block::selected_is_internal() && !block::selected_master_unlocked() {
+        return Err(FsError::Io);
+    }
     let (sectors, _) = block::selected_capacity().ok_or(FsError::Io)?;
     let mut fat = format_fat32(sectors)?;
     /* Seed files are nice-to-have; a failed README must not undo a good format. */
@@ -719,8 +768,90 @@ fn seed_defaults(fat: &mut Fat32) -> Result<(), FsError> {
     Ok(())
 }
 
+fn ensure_dir(fat: &mut Fat32, parent: u32, name: &str) -> Result<u32, FsError> {
+    if let Ok(c) = find_dir_cluster(fat, parent, name) {
+        return Ok(c);
+    }
+    mkdir_at(fat, parent, name)?;
+    find_dir_cluster(fat, parent, name)
+}
+
+fn resolve_dir(fat: &mut Fat32, parts: &[&str]) -> Result<u32, FsError> {
+    let mut dir = fat.root_cluster;
+    for p in parts {
+        dir = find_dir_cluster(fat, dir, p)?;
+    }
+    Ok(dir)
+}
+
+/// Read a file from a directory path on the currently mounted volume (binary-safe).
+pub fn read_binary(dir_parts: &[&str], name: &str) -> Result<alloc::vec::Vec<u8>, FsError> {
+    let fat = fs()?;
+    let dir = resolve_dir(fat, dir_parts)?;
+    let (_idx, ent) = find_in_dir(fat, dir, name)?;
+    if ent[11] & ATTR_DIRECTORY != 0 {
+        return Err(FsError::NotFound);
+    }
+    let size = le32(&ent, 28) as usize;
+    if size == 0 {
+        return Ok(alloc::vec::Vec::new());
+    }
+    if size > MAX_INSTALL_FILE {
+        return Err(FsError::NoSpace);
+    }
+    let clu = Fat32::clus_from_ent(&ent);
+    let mut buf = alloc::vec![0u8; size];
+    let n = read_chain(fat, clu, size, &mut buf)?;
+    buf.truncate(n);
+    Ok(buf)
+}
+
+/// Write UEFI removable layout onto the mounted Popcorn volume:
+/// `EFI/BOOT/BOOTX64.EFI` and `BOOT/KERNEL` (loader also accepts the latter path).
+pub fn write_boot_layout(efi: &[u8], kernel: &[u8]) -> Result<(), FsError> {
+    let fat = fs()?;
+    if efi.is_empty() || kernel.is_empty() {
+        return Err(FsError::Io);
+    }
+    if efi.len() > MAX_INSTALL_FILE || kernel.len() > MAX_INSTALL_FILE {
+        return Err(FsError::NoSpace);
+    }
+    println_color("install: [3/4] writing EFI/BOOT/BOOTX64.EFI...", COLOR_WHITE);
+    let efi_dir = ensure_dir(fat, fat.root_cluster, "EFI")?;
+    let efi_boot = ensure_dir(fat, efi_dir, "BOOT")?;
+    write_file_at_limited(fat, efi_boot, "BOOTX64.EFI", efi, MAX_INSTALL_FILE)?;
+
+    println_color("install: [4/4] writing BOOT/KERNEL (progress dots)...", COLOR_WHITE);
+    let boot_dir = ensure_dir(fat, fat.root_cluster, "BOOT")?;
+    write_file_at_limited(fat, boot_dir, "KERNEL", kernel, MAX_INSTALL_FILE)?;
+    fat.fat_flush()?;
+    println_color("", COLOR_WHITE);
+
+    write_file_at(
+        fat,
+        fat.root_cluster,
+        "SYSTEM.INF",
+        b"Popcorn installed volume (UEFI bootable FAT32)",
+    )?;
+
+    /* Verify both payloads landed before claiming success. */
+    let efi_check = read_binary(&["EFI", "BOOT"], "BOOTX64.EFI")?;
+    let kern_check = read_binary(&["BOOT"], "KERNEL")?;
+    if efi_check.len() != efi.len() || kern_check.len() != kernel.len() {
+        return Err(FsError::Io);
+    }
+    Ok(())
+}
+
+/// True if the mounted volume has `EFI/BOOT/BOOTX64.EFI`.
+pub fn has_boot_loader() -> bool {
+    read_binary(&["EFI", "BOOT"], "BOOTX64.EFI")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+}
+
 fn find_in_dir(
-    fat: &Fat32,
+    fat: &mut Fat32,
     dir: u32,
     name: &str,
 ) -> Result<(usize, [u8; 32]), FsError> {
@@ -739,7 +870,7 @@ fn find_in_dir(
     found.ok_or(FsError::NotFound)
 }
 
-fn find_dir_cluster(fat: &Fat32, dir: u32, name: &str) -> Result<u32, FsError> {
+fn find_dir_cluster(fat: &mut Fat32, dir: u32, name: &str) -> Result<u32, FsError> {
     let (.., ent) = find_in_dir(fat, dir, name)?;
     if ent[11] & ATTR_DIRECTORY == 0 {
         return Err(FsError::NotFound);
@@ -762,7 +893,8 @@ fn mkdir_at(fat: &mut Fat32, parent: u32, name: &str) -> Result<(), FsError> {
     if find_in_dir(fat, parent, name).is_ok() {
         return Err(FsError::Exists);
     }
-    let clu = fat.alloc_cluster()?; /* returned zeroed */
+    let clu = fat.alloc_cluster()?;
+    fat.zero_cluster(clu)?; /* directories must start empty */
 
     /* Build the new directory completely before linking it into the parent, so a
      * failure part-way never leaves a visible half-made directory. */
@@ -795,7 +927,17 @@ fn mkdir_at(fat: &mut Fat32, parent: u32, name: &str) -> Result<(), FsError> {
 }
 
 fn write_file_at(fat: &mut Fat32, dir: u32, name: &str, data: &[u8]) -> Result<(), FsError> {
-    if data.len() > MAX_CONTENT {
+    write_file_at_limited(fat, dir, name, data, MAX_CONTENT)
+}
+
+fn write_file_at_limited(
+    fat: &mut Fat32,
+    dir: u32,
+    name: &str,
+    data: &[u8],
+    max: usize,
+) -> Result<(), FsError> {
+    if data.len() > max {
         return Err(FsError::NoSpace);
     }
     reject_dot_name(name)?;
@@ -831,8 +973,9 @@ fn write_file_at(fat: &mut Fat32, dir: u32, name: &str, data: &[u8]) -> Result<(
         .find_free_dirent(dir)
         .and_then(|g| fat.write_dirent(dir, g, &ent));
     if let Err(e) = linked {
-        let _ = fat.free_chain(first);
-        return Err(e);
+        /* Avoid free_chain storm after a large payload write. */
+        let _ = e;
+        return Err(FsError::Io);
     }
     Ok(())
 }
@@ -842,34 +985,60 @@ fn write_chain(fat: &mut Fat32, data: &[u8]) -> Result<u32, FsError> {
     if data.is_empty() {
         return Ok(0);
     }
+    extern "C" {
+        fn boot_serial_putc(c: u8);
+    }
     let bpc = (fat.spc as usize) * 512;
-    let mut first = 0u32;
-    let mut prev = 0u32;
-    let mut off = 0usize;
-    while off < data.len() {
-        let step = (|| {
-            let c = fat.alloc_cluster()?;
-            if first == 0 {
-                first = c;
-            } else {
-                fat.fat_set(prev, c)?;
+    let nclu = (data.len() + bpc - 1) / bpc;
+    /* Pre-allocate the full chain, then write payloads. Separating FAT updates
+     * from data writes keeps each USB BOT short under the IRQ quiet guard. */
+    let mut clusters = alloc::vec::Vec::with_capacity(nclu);
+    for _ in 0..nclu {
+        match fat.alloc_cluster() {
+            Ok(c) => clusters.push(c),
+            Err(e) => {
+                for &c in &clusters {
+                    let _ = fat.fat_set(c, 0);
+                }
+                let _ = fat.fat_flush();
+                return Err(e);
             }
-            prev = c;
-            let chunk = &data[off..(off + bpc).min(data.len())];
-            fat.write_cluster(c, chunk)
-        })();
-        if let Err(e) = step {
-            if first != 0 {
-                let _ = fat.free_chain(first);
+        }
+    }
+    for i in 0..nclu.saturating_sub(1) {
+        if let Err(e) = fat.fat_set(clusters[i], clusters[i + 1]) {
+            for &c in &clusters {
+                let _ = fat.fat_set(c, 0);
             }
+            let _ = fat.fat_flush();
             return Err(e);
         }
-        off += bpc;
     }
-    Ok(first)
+    fat.fat_flush()?;
+    for (i, &c) in clusters.iter().enumerate() {
+        let off = i * bpc;
+        let chunk = &data[off..data.len().min(off + bpc)];
+        if let Err(e) = fat.write_cluster(c, chunk) {
+            /* Do not free_chain here — that storms the USB and can reset the
+             * machine after a partial install. Leave orphans; format retries. */
+            return Err(e);
+        }
+        if data.len() > 64 * 1024 && (i & 15) == 0 {
+            print_color(".", COLOR_WHITE);
+            unsafe { boot_serial_putc(b'.') };
+        }
+        /* Brief pause every 32 clusters so flaky USB controllers can settle. */
+        if data.len() > 64 * 1024 && (i & 31) == 31 {
+            unsafe {
+                boot_serial_putc(b'K');
+                crate::console_ffi::util_delay(2);
+            }
+        }
+    }
+    Ok(clusters[0])
 }
 
-fn read_chain(fat: &Fat32, mut cluster: u32, size: usize, out: &mut [u8]) -> Result<usize, FsError> {
+fn read_chain(fat: &mut Fat32, mut cluster: u32, size: usize, out: &mut [u8]) -> Result<usize, FsError> {
     if size == 0 || cluster < 2 {
         return Ok(0);
     }
@@ -1067,7 +1236,7 @@ pub fn search(name: &str) -> Result<*const c_char, FsError> {
 }
 
 fn search_rec(
-    fat: &Fat32,
+    fat: &mut Fat32,
     dir: u32,
     prefix: &str,
     sfn: &[u8; 11],
@@ -1150,7 +1319,7 @@ pub fn list_hierarchy() -> Result<(), FsError> {
     list_rec(fat, fat.root_cluster, "/", 0)
 }
 
-fn list_rec(fat: &Fat32, dir: u32, prefix: &str, depth: u32) -> Result<(), FsError> {
+fn list_rec(fat: &mut Fat32, dir: u32, prefix: &str, depth: u32) -> Result<(), FsError> {
     if depth > MAX_DEPTH {
         return Err(FsError::Io); /* cyclic or absurdly deep directory tree */
     }

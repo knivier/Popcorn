@@ -7,7 +7,6 @@
 #include <stdbool.h>
 
 /* PIC EOI only — PS/2 ports + queue live in the Rust kbd drive. */
-extern void write_port(unsigned short port, unsigned char data);
 
 static Device* kbd_dev(void) {
     return device_find("kbd");
@@ -39,7 +38,7 @@ void keyboard_poll_ps2(void) {
 
 void keyboard_handler_main(void) {
     rust_kbd_irq();
-    write_port(0x20, 0x20); /* master PIC EOI */
+    pic_send_eoi(1);
 }
 
 bool key_queue_pop(uint8_t* out)

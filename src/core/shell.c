@@ -102,7 +102,7 @@ static const char* available_commands[] = {
     "drive", "drive list", "init_drive", "drive info", "drive cmd", "dev", "dev list",
     "catalog", "catalog list",
     "disk", "disk list", "disk use", "disk info", "disk read", "disk write",
-    "disk install", "disk wipe",
+    "disk install", "disk wipe", "disk master",
     "wrap", "wrap on", "wrap off",
     NULL
 };
@@ -189,8 +189,9 @@ void execute_command(const char *command) {
         console_println_color("Devices", CONSOLE_HEADER_COLOR);
         console_println("  drive list   init_drive <name>   dev list   catalog");
         console_println("  disk list | use <name> | info | read <lba> | write <lba> <data>");
-        console_println("  disk install <name> [YES]   unlock locked disk (no wipe)");
-        console_println("  disk wipe <name> [YES]      quick-wipe + FAT32 format");
+        console_println("  disk install <name> [YES]   USB/virtio (or NVMe after disk master)");
+        console_println("  disk wipe <name> [YES]      FAT32 format; NVMe needs disk master first");
+        console_println("  disk master <name> YES      unlock internal/NVMe writes this boot only");
         console_println_color("Editor / keys", CONSOLE_HEADER_COLOR);
         console_println("  dol -new|-open|-save|-help");
         console_println("  Up/Down scroll   Left/Right history");
@@ -797,6 +798,44 @@ void execute_command(const char *command) {
         } else {
             console_print_error("disk use failed (unknown or LOCKED — disk install/wipe)");
         }
+    } else if (strncmp(command, "disk master ", 12) == 0) {
+        const char* p = command + 12;
+        char name[32];
+        int ni = 0;
+        while (*p && *p != ' ' && ni < (int)sizeof(name) - 1) {
+            name[ni++] = *p++;
+        }
+        name[ni] = '\0';
+        while (*p == ' ') {
+            p++;
+        }
+        int yes = (p[0] == 'Y' || p[0] == 'y')
+               && (p[1] == 'E' || p[1] == 'e')
+               && (p[2] == 'S' || p[2] == 's')
+               && (p[3] == '\0' || p[3] == ' ');
+        if (name[0] == '\0') {
+            console_print_error("Usage: disk master <name> YES");
+        } else if (!yes) {
+            int rc = rust_disk_master(name, 0);
+            if (rc == 1) {
+                console_println_color(
+                    "Will ENABLE writes to internal/NVMe until reboot (can destroy the OS disk).",
+                    CONSOLE_WARNING_COLOR);
+                console_println_color(
+                    "Confirm: disk master <name> YES",
+                    CONSOLE_INFO_COLOR);
+            } else {
+                console_print_error("disk master failed (see master: reason above)");
+            }
+        } else {
+            console_print_warning("Unlocking internal/NVMe writes for this boot...");
+            int rc = rust_disk_master(name, 1);
+            if (rc == 0) {
+                console_print_success("master unlocked — writes allowed until reboot");
+            } else {
+                console_print_error("disk master failed (see master: reason above)");
+            }
+        }
     } else if (strncmp(command, "disk install ", 13) == 0) {
         const char* p = command + 13;
         char name[32];
@@ -808,17 +847,31 @@ void execute_command(const char *command) {
         while (*p == ' ') {
             p++;
         }
-        int yes = (strcmp(p, "YES") == 0);
+        int yes = (p[0] == 'Y' || p[0] == 'y')
+               && (p[1] == 'E' || p[1] == 'e')
+               && (p[2] == 'S' || p[2] == 's')
+               && (p[3] == '\0' || p[3] == ' ');
         if (name[0] == '\0') {
-            console_print_error("Usage: disk install <name> [YES]");
-        } else {
-            int rc = rust_disk_install(name, yes);
-            if (rc == 0) {
-                console_print_success("unlocked + selected (no wipe — existing FS kept)");
-            } else if (rc == 1) {
-                console_println_color("Armed. Confirm: disk install <name> YES", CONSOLE_INFO_COLOR);
+            console_print_error("Usage: disk install <name> YES");
+        } else if (!yes) {
+            int rc = rust_disk_install(name, 0);
+            if (rc == 1) {
+                console_println_color(
+                    "Will ERASE target, format Popcorn FAT32, copy bootloader+kernel.",
+                    CONSOLE_WARNING_COLOR);
+                console_println_color(
+                    "Confirm: disk install <name> YES",
+                    CONSOLE_INFO_COLOR);
             } else {
-                console_print_error("disk install failed (locked disks only, or no driver)");
+                console_print_error("disk install failed (see install: reason above)");
+            }
+        } else {
+            console_print_warning("Installing Popcorn onto disk (ERASES target)...");
+            int rc = rust_disk_install(name, 1);
+            if (rc == 0) {
+                console_print_success("installed — reboot from this disk; dol/ls work on it now");
+            } else {
+                console_print_error("disk install failed (see install: reason above)");
             }
         }
     } else if (strncmp(command, "disk wipe ", 10) == 0) {

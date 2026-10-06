@@ -463,13 +463,16 @@ static EFI_STATUS read_file_from_root(EFI_BOOT_SERVICES_PARTIAL* bs, EFI_FILE_PR
     void** out_buf, UINTN* out_size) {
     static const CHAR16* paths[] = {
         (const CHAR16*)L"\\boot\\kernel",
+        (const CHAR16*)L"\\BOOT\\KERNEL",
         (const CHAR16*)L"\\kernel",
+        (const CHAR16*)L"\\KERNEL",
         (const CHAR16*)L"\\EFI\\BOOT\\kernel",
+        (const CHAR16*)L"\\EFI\\BOOT\\KERNEL",
     };
 
     EFI_FILE_PROTOCOL* file = NULL;
     EFI_STATUS status = EFI_NOT_FOUND;
-    for (UINTN i = 0; i < 3; i++) {
+    for (UINTN i = 0; i < 6; i++) {
         status = root->Open(root, &file, (CHAR16_P)paths[i], 1, 0);
         if (!EFI_ERROR(status) && file) {
             break;
@@ -544,52 +547,61 @@ static EFI_STATUS read_kernel_try_volume(EFI_BOOT_SERVICES_PARTIAL* bs, EFI_HAND
     return read_file_from_root(bs, root, out_buf, out_size);
 }
 
+static int kernel_is_auto_install(const void* buf, UINTN size) {
+    /* Split so a safe kernel that embeds this detector is not flagged. */
+    static const char a[] = "rust_test_disk";
+    static const char b[] = "_install";
+    const unsigned char* p = (const unsigned char*)buf;
+    const UINTN na = sizeof(a) - 1;
+    const UINTN nb = sizeof(b) - 1;
+    const UINTN n = na + nb;
+    if (!p || size < n) {
+        return 0;
+    }
+    for (UINTN i = 0; i + n <= size; i++) {
+        UINTN j;
+        for (j = 0; j < na; j++) {
+            if (p[i + j] != (unsigned char)a[j]) {
+                break;
+            }
+        }
+        if (j != na) {
+            continue;
+        }
+        for (j = 0; j < nb; j++) {
+            if (p[i + na + j] != (unsigned char)b[j]) {
+                break;
+            }
+        }
+        if (j == nb) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static EFI_STATUS read_kernel_file(EFI_HANDLE image, EFI_SYSTEM_TABLE* st, void** out_buf, UINTN* out_size) {
     EFI_BOOT_SERVICES_PARTIAL* bs = st->BootServices;
 
+    /* ONLY the volume that loaded BOOTX64.EFI. Scanning every FAT disk used to
+     * pick leftover Popcorn on NVMe and run that kernel instead of the USB. */
     EFI_LOADED_IMAGE_PROTOCOL* loaded = NULL;
     EFI_STATUS status = bs->HandleProtocol(image, &gEfiLoadedImageGuid, (void**)&loaded);
-    if (!EFI_ERROR(status) && loaded && loaded->DeviceHandle) {
-        status = read_kernel_try_volume(bs, loaded->DeviceHandle, out_buf, out_size);
-        if (!EFI_ERROR(status)) {
-            return EFI_SUCCESS;
-        }
-    }
-
-    UINTN buf_size = 0;
-    status = bs->LocateHandle(EFI_LOCATE_BY_PROTOCOL, (EFI_GUID*)&gEfiSimpleFileSystemGuid, NULL,
-        &buf_size, NULL);
-    if (status != EFI_BUFFER_TOO_SMALL || buf_size == 0) {
+    if (EFI_ERROR(status) || !loaded || !loaded->DeviceHandle) {
         return EFI_NOT_FOUND;
     }
-
-    EFI_HANDLE* handles = NULL;
-    status = bs->AllocatePool(EFI_LOADER_DATA, buf_size, (void**)&handles);
+    status = read_kernel_try_volume(bs, loaded->DeviceHandle, out_buf, out_size);
     if (EFI_ERROR(status)) {
         return status;
     }
-
-    status = bs->LocateHandle(EFI_LOCATE_BY_PROTOCOL, (EFI_GUID*)&gEfiSimpleFileSystemGuid, NULL,
-        &buf_size, handles);
-    if (EFI_ERROR(status)) {
-        bs->FreePool(handles);
-        return status;
+    if (kernel_is_auto_install(*out_buf, *out_size)) {
+        bs->FreePool(*out_buf);
+        *out_buf = NULL;
+        *out_size = 0;
+        print_err(st, L"REFUSING kernel: auto-install selftest (unsafe image)");
+        return EFI_LOAD_ERROR;
     }
-
-    UINTN count = buf_size / sizeof(EFI_HANDLE);
-    if (count > 8) {
-        count = 8;
-    }
-    for (UINTN i = 0; i < count; i++) {
-        status = read_kernel_try_volume(bs, handles[i], out_buf, out_size);
-        if (!EFI_ERROR(status)) {
-            bs->FreePool(handles);
-            return EFI_SUCCESS;
-        }
-    }
-
-    bs->FreePool(handles);
-    return EFI_NOT_FOUND;
+    return EFI_SUCCESS;
 }
 
 static BOOLEAN load_elf_segments(void* kernel_buf, UINTN kernel_size, EFI_BOOT_SERVICES_PARTIAL* bs) {
@@ -858,7 +870,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* system_table) {
     if (system_table->ConOut) {
         system_table->ConOut->ClearScreen(system_table->ConOut);
     }
-    print(system_table, L"Popcorn UEFI Loader v8\r\n");
+    print(system_table, L"Popcorn UEFI Loader v9\r\n");
 
     void* kernel_buf = NULL;
     UINTN kernel_size = 0;
