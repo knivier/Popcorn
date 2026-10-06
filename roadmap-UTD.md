@@ -178,6 +178,8 @@ Do this before expanding storage.
 - [x] Add spurious IRQ15 detection
 - [x] Record unexpected IRQ count
 
+DONE!
+
 ## 2.2 PIT correction
 
 - [ ] Define exactly what one `global_timer.tick` means
