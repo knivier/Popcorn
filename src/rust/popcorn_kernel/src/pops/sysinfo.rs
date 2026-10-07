@@ -32,7 +32,7 @@ pub extern "C" fn sysinfo_print_full() {
     separator();
 
     print_color("Kernel: ", COLOR_LIGHT_CYAN);
-    print_color("Popcorn v0.5", COLOR_LIGHT_GREEN);
+    print_color("Popcorn v0.7", COLOR_LIGHT_GREEN);
     print_color("  Architecture: ", COLOR_LIGHT_CYAN);
     println_color("x86_64 (64-bit long mode)", COLOR_WHITE);
 

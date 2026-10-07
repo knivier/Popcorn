@@ -359,7 +359,7 @@ void execute_command(const char *command) {
         }
     } else if (strcmp(command, "clear") == 0) {
         console_clear();
-        console_draw_header("Popcorn Kernel v0.5");
+        console_draw_header("Popcorn Kernel v0.7");
         console_print_success("Screen cleared!");
     } else if (strcmp(command, "uptime") == 0) {
         console_newline();
@@ -889,7 +889,7 @@ void execute_command(const char *command) {
                 EditorState* state = dolphin_get_state();
                 state->active = false;
                 console_clear();
-                console_draw_header("Popcorn Kernel v0.5");
+                console_draw_header("Popcorn Kernel v0.7");
                 console_println_color("Dolphin editor closed (unsaved changes discarded)", CONSOLE_WARNING_COLOR);
                 console_newline();
                 console_draw_prompt_with_path(get_current_directory());

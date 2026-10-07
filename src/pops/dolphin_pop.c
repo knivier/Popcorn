@@ -257,7 +257,7 @@ void dolphin_close(void) {
     
     // Properly restore console
     console_clear();
-    console_draw_header("Popcorn Kernel v0.5");
+    console_draw_header("Popcorn Kernel v0.7");
     console_print_success("Dolphin editor closed");
     console_print_color("File: ", CONSOLE_INFO_COLOR);
     console_println_color(editor.filename, CONSOLE_FG_COLOR);
@@ -609,7 +609,7 @@ void dolphin_handle_key(unsigned char keycode) {
                     (cmd_buffer[0] == 'q' && cmd_buffer[1] == 'u' && cmd_buffer[2] == 'i' && cmd_buffer[3] == 't')) {
                     editor.active = false;
                     console_clear();
-                    console_draw_header("Popcorn Kernel v0.5");
+                    console_draw_header("Popcorn Kernel v0.7");
                     console_println_color("Dolphin closed (changes discarded)", CONSOLE_WARNING_COLOR);
                     console_newline();
                     extern const char* get_current_directory(void);

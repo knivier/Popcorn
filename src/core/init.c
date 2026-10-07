@@ -106,7 +106,7 @@ void init_draw_header(void) {
     console_print_color("=", BOOT_TITLE_COLOR);
 
     console_set_cursor(15, 2);
-    console_println_color("POPCORN KERNEL v0.5", BOOT_TITLE_COLOR);
+    console_println_color("POPCORN KERNEL v0.7", BOOT_TITLE_COLOR);
     console_heartbeat_tick();
 
     console_set_cursor(0, 3);
@@ -343,7 +343,7 @@ void init_boot_hold(void) {
 
 void init_transition_to_console(void) {
     console_clear();
-    console_draw_header("Popcorn Kernel v0.5");
+    console_draw_header("Popcorn Kernel v0.7");
     console_heartbeat_tick();
     console_println_color("Welcome to Popcorn Kernel!", CONSOLE_SUCCESS_COLOR);
     console_newline();
