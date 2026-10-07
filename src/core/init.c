@@ -6,7 +6,6 @@
 #include "../includes/pop_module.h"
 #include "../includes/multiboot2.h"
 #include "../includes/uefi_input.h"
-#include "../includes/dolphin_pop.h"
 #include "../includes/syscall.h"
 #include "../includes/device.h"
 #include "../includes/rust_abi.h"
@@ -280,11 +279,9 @@ void init_show_modules(void) {
     init_draw_progress_bar(5, total_init_steps, "Loading Kernel Modules");
 
     extern void rust_pops_register(void);
-    extern const PopModule dolphin_module;
 
-    /* Rust: shimjapii/spinner/uptime/memory/cpu/sysinfo + FAT32. Dolphin stays C. */
+    /* All pops (incl. Dolphin) + FAT32 live in Rust. */
     rust_pops_register();
-    register_pop_module(&dolphin_module);
 
     console_set_cursor(0, 18);
     console_print_color("  ✓ Kernel Modules Loaded", BOOT_SUCCESS_COLOR);
@@ -292,7 +289,7 @@ void init_show_modules(void) {
 
     console_set_cursor(0, 19);
     console_print_color("    Modules: ", BOOT_INFO_COLOR);
-    console_println_color("Rust pops + Dolphin + FAT32", BOOT_SUCCESS_COLOR);
+    console_println_color("Rust pops + FAT32", BOOT_SUCCESS_COLOR);
 
     console_set_cursor(0, 20);
     console_print_color("    Features: ", BOOT_INFO_COLOR);

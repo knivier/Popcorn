@@ -27,7 +27,7 @@ pub extern "C" fn sysinfo_print_full() {
     let _ = crate::drivers::init_drive("cpu");
     let _ = crate::drivers::init_drive("clock");
 
-    unsafe { crate::console_ffi::console_newline() };
+    crate::console_ffi::newline();
     println_color("=== SYSTEM INFORMATION ===", COLOR_LIGHT_MAGENTA);
     separator();
 
@@ -39,13 +39,13 @@ pub extern "C" fn sysinfo_print_full() {
     print_color("Bootloader: ", COLOR_LIGHT_CYAN);
     println_color(bootloader_name(), COLOR_WHITE);
 
-    unsafe { crate::console_ffi::console_newline() };
+    crate::console_ffi::newline();
     cpuinfo::print_compact_for_sysinfo();
 
     /* Prefer conventional RAM (available). total_physical includes MMIO reserved. */
     meminfo::calculate_stats();
     let st = unsafe { *meminfo::memory_pop_get_stats() };
-    unsafe { crate::console_ffi::console_newline() };
+    crate::console_ffi::newline();
     println_color("--- Memory Information ---", COLOR_LIGHT_MAGENTA);
     print_color("RAM (available): ", COLOR_LIGHT_CYAN);
     let mut buf = [0u8; 64];
@@ -56,10 +56,10 @@ pub extern "C" fn sysinfo_print_full() {
     format_mb(total, &mut buf);
     println_color(cstr(&buf), COLOR_WHITE);
 
-    unsafe { crate::console_ffi::console_newline() };
+    crate::console_ffi::newline();
     clock::print_summary();
 
-    unsafe { crate::console_ffi::console_newline() };
+    crate::console_ffi::newline();
     println_color("--- Display Information ---", COLOR_LIGHT_MAGENTA);
     let be = unsafe { rust_screen_backend() };
     print_color("Mode: ", COLOR_LIGHT_CYAN);
@@ -77,7 +77,7 @@ pub extern "C" fn sysinfo_print_full() {
     print_u32(unsafe { rust_screen_cols() }, COLOR_WHITE);
     print_color("x", COLOR_WHITE);
     print_u32(unsafe { rust_screen_rows() }, COLOR_WHITE);
-    unsafe { crate::console_ffi::console_newline() };
+    crate::console_ffi::newline();
 
     separator();
 }

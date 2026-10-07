@@ -29,8 +29,6 @@ extern ConsoleState console_state;
 extern unsigned int current_loc;
 extern void write_port(unsigned short port, unsigned char data);
 
-extern const PopModule dolphin_module;
-
 int get_tick_count(void);
 
 void printTerm(const char *str, unsigned char color) {
@@ -884,16 +882,7 @@ void execute_command(const char *command) {
         } else if (strcmp(command + 4, "-close") == 0 || strcmp(command + 4, "-quit") == 0) {
             dolphin_close();
         } else if (strcmp(command + 4, "-quit!") == 0) {
-            // Force quit without saving
-            if (dolphin_is_active()) {
-                EditorState* state = dolphin_get_state();
-                state->active = false;
-                console_clear();
-                console_draw_header("Popcorn Kernel v0.7");
-                console_println_color("Dolphin editor closed (unsaved changes discarded)", CONSOLE_WARNING_COLOR);
-                console_newline();
-                console_draw_prompt_with_path(get_current_directory());
-            }
+            dolphin_force_quit();
         } else if (strcmp(command + 4, "-help") == 0) {
             dolphin_help();
         } else {

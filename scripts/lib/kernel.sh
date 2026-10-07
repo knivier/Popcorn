@@ -201,8 +201,7 @@ build_kernel() {
   # shimjapii / spinner / uptime / FAT32 FS are Rust (libpopcorn_kernel.a)
   compile_c "core/multiboot2.c" "$OBJ_DIR/multiboot2.o"
   compile_c "core/uefi_input.c" "$OBJ_DIR/uefi_input.o"
-  # sysinfo / memory / cpu pops + info drives are Rust
-  compile_c "pops/dolphin_pop.c" "$OBJ_DIR/dolphin_pop.o"
+  # All pops (incl. Dolphin) are Rust (libpopcorn_kernel.a)
   compile_c "core/timer.c" "$OBJ_DIR/timer.o"
   compile_c "core/scheduler.c" "$OBJ_DIR/scheduler.o"
   compile_c "core/exception.c" "$OBJ_DIR/exception.o"
@@ -221,7 +220,7 @@ build_kernel() {
     "$OBJ_DIR/context_switch.o"
     "$OBJ_DIR/multiboot2.o"
     "$OBJ_DIR/uefi_input.o"
-    "$OBJ_DIR/dolphin_pop.o" "$OBJ_DIR/timer.o"
+    "$OBJ_DIR/timer.o"
     "$OBJ_DIR/scheduler.o" "$OBJ_DIR/exception.o" "$OBJ_DIR/irq.o" "$OBJ_DIR/device.o"
     "$OBJ_DIR/phase2_selftest.o" "$OBJ_DIR/memory.o" "$OBJ_DIR/vmm.o"
     "$OBJ_DIR/init.o" "$OBJ_DIR/syscall.o"

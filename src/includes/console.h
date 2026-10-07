@@ -4,6 +4,16 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/*
+ * Console text UX (this file + console.c).
+ * Pixels / CRTC live in the Rust display drive; Rust pops write via console_ffi.
+ *
+ * Writing surface (prefer these):
+ *   console_print / _color / println / println_color / putchar / newline
+ *   console_print_error / _success / _info / _warning
+ *   console_clear / set_cursor / draw_header / draw_prompt*
+ */
+
 /* Legacy VGA text defaults (also used when no GOP). */
 #define VGA_WIDTH 80
 #define VGA_HEIGHT 25

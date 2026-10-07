@@ -44,12 +44,4 @@ void init_boot_hold(void);
 void init_clear_boot_screen(void);
 void init_transition_to_console(void);
 
-// External functions
-extern void console_init(void);
-extern void console_clear(void);
-extern void console_set_cursor(unsigned int x, unsigned int y);
-extern void console_print_color(const char* str, unsigned char color);
-extern void console_println_color(const char* str, unsigned char color);
-extern void console_draw_separator(unsigned int y, unsigned char color);
-
 #endif // INIT_H

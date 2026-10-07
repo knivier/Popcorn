@@ -15,7 +15,6 @@ use core::ffi::c_char;
 use core::slice;
 
 extern "C" {
-    fn console_println_color(s: *const u8, color: u8);
     fn boot_serial_putc(c: u8);
 }
 
@@ -44,10 +43,8 @@ fn cstr<'a>(p: *const c_char) -> &'a str {
 
 #[no_mangle]
 pub extern "C" fn rust_init() {
-    const MSG: &[u8] = b"Rust active\0";
-    const COLOR_LIGHT_GREEN: u8 = 0x0A;
+    console_ffi::println_color("Rust active", console_ffi::COLOR_LIGHT_GREEN);
     unsafe {
-        console_println_color(MSG.as_ptr(), COLOR_LIGHT_GREEN);
         boot_serial_putc(b'r');
     }
 

@@ -1,6 +1,7 @@
 //! Pop modules implemented in Rust (same C `PopModule` ABI).
 
 mod registry;
+mod dolphin;
 mod shimjapii;
 mod spinner;
 mod uptime;
