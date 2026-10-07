@@ -61,8 +61,13 @@ build_rust_kernel() {
   log INFO "Building Rust crate popcorn_kernel (build-std, large code model)"
   (
     cd "$rust_dir"
-    CARGO_TARGET_DIR="$out_dir" cargo build --release --target x86_64-unknown-none \
-      -p popcorn_kernel "${extra[@]}"
+    if ((${#extra[@]})); then
+      CARGO_TARGET_DIR="$out_dir" cargo build --release --target x86_64-unknown-none \
+        -p popcorn_kernel "${extra[@]}"
+    else
+      CARGO_TARGET_DIR="$out_dir" cargo build --release --target x86_64-unknown-none \
+        -p popcorn_kernel
+    fi
   ) >>"$BUILD_LOG" 2>&1 || die "cargo build failed — see $BUILD_LOG"
   archive="$out_dir/x86_64-unknown-none/release/libpopcorn_kernel.a"
   [[ -f "$archive" ]] || die "Missing $archive"

@@ -16,6 +16,7 @@ use core::ffi::c_char;
 use core::ptr::addr_of_mut;
 
 use crate::console_ffi::{print_color, println_color, COLOR_LIGHT_GREEN, COLOR_WHITE};
+use crate::drivers::backends::clock;
 use crate::drivers::block;
 
 const ATTR_READ_ONLY: u8 = 0x01;
@@ -903,6 +904,7 @@ fn mkdir_at(fat: &mut Fat32, parent: u32, name: &str) -> Result<(), FsError> {
         dot[..11].copy_from_slice(b".          ");
         dot[11] = ATTR_DIRECTORY;
         Fat32::put_clus(&mut dot, clu);
+        clock::stamp_fat_dirent(&mut dot);
         fat.write_dirent(clu, 0, &dot)?;
         let mut dotdot = [0u8; 32];
         dotdot[..11].copy_from_slice(b"..         ");
@@ -911,12 +913,14 @@ fn mkdir_at(fat: &mut Fat32, parent: u32, name: &str) -> Result<(), FsError> {
             &mut dotdot,
             if parent == fat.root_cluster { 0 } else { parent },
         );
+        clock::stamp_fat_dirent(&mut dotdot);
         fat.write_dirent(clu, 1, &dotdot)?;
 
         let mut ent = [0u8; 32];
         ent[..11].copy_from_slice(&sfn);
         ent[11] = ATTR_DIRECTORY;
         Fat32::put_clus(&mut ent, clu);
+        clock::stamp_fat_dirent(&mut ent);
         let di = fat.find_free_dirent(parent)?;
         fat.write_dirent(parent, di, &ent)
     })();
@@ -954,6 +958,7 @@ fn write_file_at_limited(
         Fat32::put_clus(&mut neu, first);
         put32(&mut neu, 28, data.len() as u32);
         neu[11] = ATTR_ARCHIVE;
+        clock::stamp_fat_dirent(&mut neu);
         if let Err(e) = fat.write_dirent(dir, idx, &neu) {
             let _ = fat.free_chain(first);
             return Err(e);
@@ -969,6 +974,7 @@ fn write_file_at_limited(
     ent[11] = ATTR_ARCHIVE;
     Fat32::put_clus(&mut ent, first);
     put32(&mut ent, 28, data.len() as u32);
+    clock::stamp_fat_dirent(&mut ent);
     let linked = fat
         .find_free_dirent(dir)
         .and_then(|g| fat.write_dirent(dir, g, &ent));

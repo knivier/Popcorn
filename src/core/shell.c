@@ -94,18 +94,172 @@ static const char* available_commands[] = {
     "help", "halp", "clear", "uptime", "stop",
     "write", "read", "delete", "rm", "mkdir", "go", "back",
     "ls", "search", "cp", "listsys", "sysinfo",
-    "mem", "mem -map", "mem -use", "mem -stats", "mem -info", "mem -debug",
-    "cpu", "cpu -hz", "cpu -info",
+    "mem", "mem -help", "mem -map", "mem -use", "mem -stats", "mem -info", "mem -debug",
+    "cpu", "cpu -help", "cpu -hz", "cpu -info",
+    "cl", "cl -help", "cl -gettime", "cl -getime",
     "tasks", "timer", "syscalls",
-    "mon", "mon -debug", "mon -list", "mon -kill", "mon -ultramon",
-    "dol", "dol -new", "dol -open", "dol -save", "dol -close", "dol -help",
-    "drive", "drive list", "init_drive", "drive info", "drive cmd", "dev", "dev list",
-    "catalog", "catalog list",
-    "disk", "disk list", "disk use", "disk info", "disk read", "disk write",
-    "disk install", "disk wipe", "disk master",
-    "wrap", "wrap on", "wrap off",
+    "mon", "mon -help", "mon -debug", "mon -list", "mon -kill", "mon -ultramon",
+    "dol", "dol -help", "dol -new", "dol -open", "dol -save", "dol -close",
+    "drive", "drive -help", "drive -list", "drive -load", "drive -info", "drive -cmd",
+    "drv", "drv -help", "drv -list", "drv -load", "drv -info", "drv -cmd",
+    "dev", "dev -help", "dev -list",
+    "catalog", "catalog -help", "catalog -list",
+    "disk", "disk -help", "disk -list", "disk -use", "disk -info",
+    "disk -read", "disk -write", "disk -install", "disk -wipe", "disk -master",
+    "wrap", "wrap -help", "wrap -on", "wrap -off",
     NULL
 };
+
+/* True for "-help" / "help" (bare command defaults are per-family). */
+static int is_help_arg(const char* args) {
+    return args != NULL
+        && (strcmp(args, "-help") == 0 || strcmp(args, "help") == 0);
+}
+
+/* Match dashed option, or undashed alias (list <-> -list). */
+static int opt_is(const char* args, const char* dashed) {
+    if (!args || !dashed || dashed[0] != '-') {
+        return 0;
+    }
+    if (strcmp(args, dashed) == 0) {
+        return 1;
+    }
+    /* undashed alias of "-foo" → "foo" */
+    return strcmp(args, dashed + 1) == 0;
+}
+
+static int opt_starts(const char* args, const char* dashed_prefix) {
+    size_t n;
+    if (!args || !dashed_prefix || dashed_prefix[0] != '-') {
+        return 0;
+    }
+    n = 0;
+    while (dashed_prefix[n]) {
+        n++;
+    }
+    if (strncmp(args, dashed_prefix, n) == 0) {
+        return 1;
+    }
+    /* undashed: "-use " → "use " */
+    return strncmp(args, dashed_prefix + 1, n - 1) == 0;
+}
+
+static const char* opt_arg(const char* args, const char* dashed_prefix) {
+    size_t n = 0;
+    while (dashed_prefix[n]) {
+        n++;
+    }
+    if (strncmp(args, dashed_prefix, n) == 0) {
+        return args + n;
+    }
+    if (strncmp(args, dashed_prefix + 1, n - 1) == 0) {
+        return args + (n - 1);
+    }
+    return args;
+}
+
+static void help_mem(void) {
+    console_newline();
+    console_println_color("mem", CONSOLE_HEADER_COLOR);
+    console_println("  mem -help");
+    console_println("  mem -map     physical map");
+    console_println("  mem -use     usage summary");
+    console_println("  mem -stats   allocator stats");
+    console_println("  mem -info    kernel heap");
+    console_println("  mem -debug   debug dump");
+}
+
+static void help_cpu(void) {
+    console_newline();
+    console_println_color("cpu", CONSOLE_HEADER_COLOR);
+    console_println("  cpu -help");
+    console_println("  cpu -info    CPUID summary");
+    console_println("  cpu -hz      frequency estimate");
+}
+
+static void help_cl(void) {
+    console_newline();
+    console_println_color("cl (clock)", CONSOLE_HEADER_COLOR);
+    console_println("  cl -help");
+    console_println("  cl -gettime  local date/time from CMOS RTC");
+}
+
+static void help_mon(void) {
+    console_newline();
+    console_println_color("mon (tasks)", CONSOLE_HEADER_COLOR);
+    console_println("  mon -help");
+    console_println("  mon -list              list tasks");
+    console_println("  mon -debug [pid]       start/debug task");
+    console_println("  mon -kill [pid]        kill task");
+    console_println("  mon -ultramon          kill all but idle");
+}
+
+static void help_drive(void) {
+    console_newline();
+    console_println_color("drive / drv", CONSOLE_HEADER_COLOR);
+    console_println("  drive -help");
+    console_println("  drive -list                 list drives");
+    console_println("  drive -load <name>          init one drive");
+    console_println("  drive -info <name>          drive status");
+    console_println("  drive -cmd <name> <cmd>     run drive command");
+}
+
+static void help_dev(void) {
+    console_newline();
+    console_println_color("dev", CONSOLE_HEADER_COLOR);
+    console_println("  dev -help");
+    console_println("  dev -list    list /dev nodes");
+}
+
+static void help_catalog(void) {
+    console_newline();
+    console_println_color("catalog", CONSOLE_HEADER_COLOR);
+    console_println("  catalog -help");
+    console_println("  catalog -list    drives, devices, pops, irqs, syscalls");
+}
+
+static void help_disk(void) {
+    console_newline();
+    console_println_color("disk", CONSOLE_HEADER_COLOR);
+    console_println("  disk -help");
+    console_println("  disk -list");
+    console_println("  disk -use <name>");
+    console_println("  disk -info");
+    console_println("  disk -read <lba>");
+    console_println("  disk -write <lba> <hex|text>");
+    console_println("  disk -wipe <name> [YES]       FAT32 format");
+    console_println("  disk -install <name> [YES]    erase + install Popcorn");
+    console_println("  disk -master <name> [YES]     unlock internal/NVMe writes");
+}
+
+static void help_wrap(void) {
+    console_newline();
+    console_println_color("wrap", CONSOLE_HEADER_COLOR);
+    console_println("  wrap -help");
+    console_println("  wrap -on");
+    console_println("  wrap -off");
+}
+
+static int parse_yes_token(const char* p) {
+    return (p[0] == 'Y' || p[0] == 'y')
+        && (p[1] == 'E' || p[1] == 'e')
+        && (p[2] == 'S' || p[2] == 's')
+        && (p[3] == '\0' || p[3] == ' ');
+}
+
+static void parse_name_rest(const char* p, char* name, int name_sz, const char** rest_out) {
+    int ni = 0;
+    while (*p && *p != ' ' && ni < name_sz - 1) {
+        name[ni++] = *p++;
+    }
+    name[ni] = '\0';
+    while (*p == ' ') {
+        p++;
+    }
+    if (rest_out) {
+        *rest_out = p;
+    }
+}
 
 /* Parse number from string */
 int parse_number(const char* str, uint32_t* result) {
@@ -180,27 +334,29 @@ void execute_command(const char *command) {
     if (strcmp(command, "help") == 0 || strcmp(command, "halp") == 0) {
         console_newline();
         console_println_color("Shell", CONSOLE_HEADER_COLOR);
-        console_println("  clear   uptime   stop   wrap on|off");
+        console_println("  clear   uptime   stop   wrap -on|-off");
         console_println_color("Files", CONSOLE_HEADER_COLOR);
         console_println("  ls  write  read  rm  mkdir  go  back  search  cp  listsys");
-        console_println_color("System", CONSOLE_HEADER_COLOR);
-        console_println("  sysinfo   mem   cpu   tasks   timer   syscalls");
-        console_println("  mon -list|-debug|-kill|-ultramon");
-        console_println_color("Devices", CONSOLE_HEADER_COLOR);
-        console_println("  drive list   init_drive <name>   dev list   catalog");
-        console_println("  disk list | use <name> | info | read <lba> | write <lba> <data>");
-        console_println("  disk install <name> [YES]   USB/virtio (or NVMe after disk master)");
-        console_println("  disk wipe <name> [YES]      FAT32 format; NVMe needs disk master first");
-        console_println("  disk master <name> YES      unlock internal/NVMe writes this boot only");
+        console_println_color("System (use <cmd> -help)", CONSOLE_HEADER_COLOR);
+        console_println("  sysinfo   mem   cpu   cl   tasks   timer   syscalls   mon");
+        console_println_color("Devices (use <cmd> -help)", CONSOLE_HEADER_COLOR);
+        console_println("  drive   drv   dev   catalog   disk");
         console_println_color("Editor / keys", CONSOLE_HEADER_COLOR);
-        console_println("  dol -new|-open|-save|-help");
+        console_println("  dol -help|-new|-open|-save|-close");
         console_println("  Up/Down scroll   Left/Right history");
-    } else if (strcmp(command, "wrap") == 0 || strcmp(command, "wrap on") == 0) {
-        console_set_wrap(true);
-        console_print_success("wrap on");
-    } else if (strcmp(command, "wrap off") == 0) {
-        console_set_wrap(false);
-        console_print_success("wrap off");
+    } else if (strncmp(command, "wrap ", 5) == 0 || strcmp(command, "wrap") == 0) {
+        const char* args = (command[4] == ' ') ? command + 5 : "";
+        if (args[0] == '\0' || is_help_arg(args)) {
+            help_wrap();
+        } else if (opt_is(args, "-on")) {
+            console_set_wrap(true);
+            console_print_success("wrap on");
+        } else if (opt_is(args, "-off")) {
+            console_set_wrap(false);
+            console_print_success("wrap off");
+        } else {
+            console_print_error("Unknown wrap option. Try: wrap -help");
+        }
     } else if (strcmp(command, "clear") == 0) {
         console_clear();
         console_draw_header("Popcorn Kernel v0.5");
@@ -525,24 +681,23 @@ void execute_command(const char *command) {
         console_newline();
     } else if (strcmp(command, "sysinfo") == 0) {
         sysinfo_print_full();
-    } else if (strncmp(command, "mem ", 4) == 0) {
-        // Memory commands: mem -map, mem -use, mem -stats, mem -info, mem -debug
-        if (strcmp(command + 4, "-map") == 0) {
-            memory_print_map();
-        } else if (strcmp(command + 4, "-use") == 0) {
+    } else if (strncmp(command, "mem ", 4) == 0 || strcmp(command, "mem") == 0) {
+        const char* args = (command[3] == ' ') ? command + 4 : "";
+        if (is_help_arg(args)) {
+            help_mem();
+        } else if (args[0] == '\0' || opt_is(args, "-use")) {
             memory_print_usage();
-        } else if (strcmp(command + 4, "-stats") == 0) {
+        } else if (opt_is(args, "-map")) {
+            memory_print_map();
+        } else if (opt_is(args, "-stats")) {
             memory_print_stats();
-        } else if (strcmp(command + 4, "-info") == 0) {
+        } else if (opt_is(args, "-info")) {
             kernel_memory_print_stats();
-        } else if (strcmp(command + 4, "-debug") == 0) {
+        } else if (opt_is(args, "-debug")) {
             memory_debug_print();
         } else {
-            console_print_error("Unknown mem option. Use: -map, -use, -stats, -info, or -debug");
+            console_print_error("Unknown mem option. Try: mem -help");
         }
-    } else if (strcmp(command, "mem") == 0) {
-        // Default: show usage
-        memory_print_usage();
     } else if (strcmp(command, "tasks") == 0) {
         char buffer[64];
         console_newline();
@@ -611,11 +766,11 @@ void execute_command(const char *command) {
     } else if (strcmp(command, "syscalls") == 0) {
         extern void syscall_print_table(void);
         syscall_print_table();
-    } else if (strncmp(command, "mon ", 4) == 0) {
-        // Task monitor commands: mon -debug, mon -list, mon -kill, mon -ultramon
-        const char* args = command + 4;
-        
-        if (strcmp(args, "-debug") == 0) {
+    } else if (strncmp(command, "mon ", 4) == 0 || strcmp(command, "mon") == 0) {
+        const char* args = (command[3] == ' ') ? command + 4 : "";
+        if (args[0] == '\0' || is_help_arg(args)) {
+            help_mon();
+        } else if (strcmp(args, "-debug") == 0) {
             // Start a debug task
             extern TaskStruct* scheduler_create_task(void (*function)(void), void* data, TaskPriority priority);
             extern void debug_task_function(void);
@@ -695,20 +850,29 @@ void execute_command(const char *command) {
             console_println_color("Remaining tasks:", CONSOLE_INFO_COLOR);
             scheduler_print_tasks();
         } else {
-            console_print_error("Unknown mon option. Use: -debug, -debug [pid], -list, -kill [pid], or -ultramon");
+            console_print_error("Unknown mon option. Try: mon -help");
         }
-    } else if (strncmp(command, "cpu ", 4) == 0) {
-        // CPU commands: cpu -hz, cpu -info
-        if (strcmp(command + 4, "-hz") == 0) {
-            cpu_print_frequency();
-        } else if (strcmp(command + 4, "-info") == 0) {
+    } else if (strncmp(command, "cpu ", 4) == 0 || strcmp(command, "cpu") == 0) {
+        const char* args = (command[3] == ' ') ? command + 4 : "";
+        if (is_help_arg(args)) {
+            help_cpu();
+        } else if (args[0] == '\0' || opt_is(args, "-info")) {
             cpu_print_info();
+        } else if (opt_is(args, "-hz")) {
+            cpu_print_frequency();
         } else {
-            console_print_error("Unknown cpu option. Use: -hz or -info");
+            console_print_error("Unknown cpu option. Try: cpu -help");
         }
-    } else if (strcmp(command, "cpu") == 0) {
-        // Default: show info
-        cpu_print_info();
+    } else if (strncmp(command, "cl ", 3) == 0 || strcmp(command, "cl") == 0) {
+        extern void clock_print_gettime(void);
+        const char* args = (command[2] == ' ') ? command + 3 : "";
+        if (is_help_arg(args)) {
+            help_cl();
+        } else if (args[0] == '\0' || opt_is(args, "-gettime") || opt_is(args, "-getime")) {
+            clock_print_gettime();
+        } else {
+            console_print_error("Unknown cl option. Try: cl -help");
+        }
     } else if (strncmp(command, "dol ", 4) == 0) {
         // Dolphin text editor commands
         if (strncmp(command + 4, "-new ", 5) == 0) {
@@ -733,306 +897,303 @@ void execute_command(const char *command) {
         } else if (strcmp(command + 4, "-help") == 0) {
             dolphin_help();
         } else {
-            console_print_error("Unknown dol option. Use: -new, -open, -save, -close, -help");
+            console_print_error("Unknown dol option. Try: dol -help");
         }
     } else if (strcmp(command, "dol") == 0) {
-        // Default: show help
         dolphin_help();
-    } else if (strcmp(command, "drive") == 0 || strcmp(command, "drive list") == 0
-               || strcmp(command, "drv") == 0 || strcmp(command, "drv list") == 0) {
-        char buf[256];
-        list_drives(buf, sizeof(buf));
-        console_println_color(buf, CONSOLE_INFO_COLOR);
+    } else if (strncmp(command, "drive ", 6) == 0 || strcmp(command, "drive") == 0
+               || strncmp(command, "drv ", 4) == 0 || strcmp(command, "drv") == 0) {
+        const char* args;
+        if (command[0] == 'd' && command[1] == 'r' && command[2] == 'i') {
+            args = (command[5] == ' ') ? command + 6 : "";
+        } else {
+            args = (command[3] == ' ') ? command + 4 : "";
+        }
+        if (args[0] == '\0' || is_help_arg(args)) {
+            help_drive();
+        } else if (opt_is(args, "-list")) {
+            char buf[256];
+            list_drives(buf, sizeof(buf));
+            console_println_color(buf, CONSOLE_INFO_COLOR);
+        } else if (opt_starts(args, "-load ")) {
+            const char* name = opt_arg(args, "-load ");
+            if (init_drive(name) == 0) {
+                console_print_success("drive ready");
+            } else {
+                console_print_error("drive -load failed");
+            }
+        } else if (opt_starts(args, "-info ")) {
+            char buf[128];
+            drive_cmd(opt_arg(args, "-info "), "info", buf, sizeof(buf));
+            console_println_color(buf, CONSOLE_INFO_COLOR);
+        } else if (opt_starts(args, "-cmd ")) {
+            const char* rest = opt_arg(args, "-cmd ");
+            char tmp[128];
+            size_t n = 0;
+            while (rest[n] && rest[n] != ' ' && n + 1 < sizeof(tmp)) {
+                tmp[n] = rest[n];
+                n++;
+            }
+            tmp[n] = '\0';
+            const char* cmd = rest[n] == ' ' ? rest + n + 1 : "status";
+            char buf[128];
+            drive_cmd(tmp, cmd, buf, sizeof(buf));
+            console_println_color(buf, CONSOLE_INFO_COLOR);
+        } else if (strncmp(args, "init_drive ", 11) == 0) {
+            /* legacy typo path */
+            if (init_drive(args + 11) == 0) {
+                console_print_success("drive ready");
+            } else {
+                console_print_error("drive -load failed");
+            }
+        } else {
+            console_print_error("Unknown drive option. Try: drive -help");
+        }
     } else if (strncmp(command, "init_drive ", 11) == 0) {
-        const char* name = command + 11;
-        if (init_drive(name) == 0) {
+        if (init_drive(command + 11) == 0) {
             console_print_success("drive ready");
         } else {
-            console_print_error("init_drive failed");
+            console_print_error("drive -load failed");
         }
-    } else if (strncmp(command, "drv load ", 9) == 0) {
-        /* Alias for older name. */
-        if (init_drive(command + 9) == 0) {
-            console_print_success("drive ready");
+        console_println_color("Tip: drive -load <name>", CONSOLE_INFO_COLOR);
+    } else if (strncmp(command, "dev ", 4) == 0 || strcmp(command, "dev") == 0) {
+        const char* args = (command[3] == ' ') ? command + 4 : "";
+        if (args[0] == '\0' || is_help_arg(args)) {
+            help_dev();
+        } else if (opt_is(args, "-list")) {
+            char buf[256];
+            list_devices(buf, sizeof(buf));
+            console_println_color(buf, CONSOLE_INFO_COLOR);
         } else {
-            console_print_error("init_drive failed");
+            console_print_error("Unknown dev option. Try: dev -help");
         }
-    } else if (strncmp(command, "drive info ", 11) == 0) {
-        char buf[128];
-        drive_cmd(command + 11, "info", buf, sizeof(buf));
-        console_println_color(buf, CONSOLE_INFO_COLOR);
-    } else if (strncmp(command, "drv info ", 9) == 0) {
-        char buf[128];
-        drive_cmd(command + 9, "info", buf, sizeof(buf));
-        console_println_color(buf, CONSOLE_INFO_COLOR);
-    } else if (strncmp(command, "drive cmd ", 10) == 0 || strncmp(command, "drv cmd ", 8) == 0) {
-        const char* rest = command[0] == 'd' && command[1] == 'r' && command[2] == 'i'
-                               ? command + 10
-                               : command + 8;
-        char tmp[128];
-        size_t n = 0;
-        while (rest[n] && rest[n] != ' ' && n + 1 < sizeof(tmp)) {
-            tmp[n] = rest[n];
-            n++;
-        }
-        tmp[n] = '\0';
-        const char* cmd = rest[n] == ' ' ? rest + n + 1 : "status";
-        char buf[128];
-        drive_cmd(tmp, cmd, buf, sizeof(buf));
-        console_println_color(buf, CONSOLE_INFO_COLOR);
-    } else if (strcmp(command, "dev") == 0 || strcmp(command, "dev list") == 0) {
-        char buf[256];
-        list_devices(buf, sizeof(buf));
-        console_println_color(buf, CONSOLE_INFO_COLOR);
-    } else if (strcmp(command, "catalog") == 0 || strcmp(command, "catalog list") == 0) {
-        char buf[512];
-        rust_catalog_list(CATALOG_KIND_ALL, buf, sizeof(buf));
-        console_println_color(buf, CONSOLE_INFO_COLOR);
-    } else if (strcmp(command, "disk") == 0 || strcmp(command, "disk list") == 0) {
-        char buf[384];
-        rust_disk_list(buf, sizeof(buf));
-        console_println_color(buf, CONSOLE_INFO_COLOR);
-    } else if (strncmp(command, "disk use ", 9) == 0) {
-        if (rust_disk_use(command + 9) == 0) {
-            console_print_success("disk selected");
+    } else if (strncmp(command, "catalog ", 8) == 0 || strcmp(command, "catalog") == 0) {
+        const char* args = (command[7] == ' ') ? command + 8 : "";
+        if (args[0] == '\0' || is_help_arg(args)) {
+            help_catalog();
+        } else if (opt_is(args, "-list")) {
+            char buf[512];
+            rust_catalog_list(CATALOG_KIND_ALL, buf, sizeof(buf));
+            console_println_color(buf, CONSOLE_INFO_COLOR);
         } else {
-            console_print_error("disk use failed (unknown or LOCKED — disk install/wipe)");
+            console_print_error("Unknown catalog option. Try: catalog -help");
         }
-    } else if (strncmp(command, "disk master ", 12) == 0) {
-        const char* p = command + 12;
-        char name[32];
-        int ni = 0;
-        while (*p && *p != ' ' && ni < (int)sizeof(name) - 1) {
-            name[ni++] = *p++;
-        }
-        name[ni] = '\0';
-        while (*p == ' ') {
-            p++;
-        }
-        int yes = (p[0] == 'Y' || p[0] == 'y')
-               && (p[1] == 'E' || p[1] == 'e')
-               && (p[2] == 'S' || p[2] == 's')
-               && (p[3] == '\0' || p[3] == ' ');
-        if (name[0] == '\0') {
-            console_print_error("Usage: disk master <name> YES");
-        } else if (!yes) {
-            int rc = rust_disk_master(name, 0);
-            if (rc == 1) {
-                console_println_color(
-                    "Will ENABLE writes to internal/NVMe until reboot (can destroy the OS disk).",
-                    CONSOLE_WARNING_COLOR);
-                console_println_color(
-                    "Confirm: disk master <name> YES",
-                    CONSOLE_INFO_COLOR);
+    } else if (strncmp(command, "disk ", 5) == 0 || strcmp(command, "disk") == 0) {
+        const char* args = (command[4] == ' ') ? command + 5 : "";
+        if (args[0] == '\0' || is_help_arg(args)) {
+            help_disk();
+        } else if (opt_is(args, "-list")) {
+            char buf[384];
+            rust_disk_list(buf, sizeof(buf));
+            console_println_color(buf, CONSOLE_INFO_COLOR);
+        } else if (opt_starts(args, "-use ")) {
+            if (rust_disk_use(opt_arg(args, "-use ")) == 0) {
+                console_print_success("disk selected");
             } else {
-                console_print_error("disk master failed (see master: reason above)");
+                console_print_error("disk -use failed (unknown or LOCKED)");
+            }
+        } else if (opt_is(args, "-info")) {
+            char buf[192];
+            rust_disk_info(buf, sizeof(buf));
+            console_println_color(buf, CONSOLE_INFO_COLOR);
+        } else if (opt_starts(args, "-master ")) {
+            const char* p = opt_arg(args, "-master ");
+            char name[32];
+            const char* rest = NULL;
+            parse_name_rest(p, name, (int)sizeof(name), &rest);
+            int yes = parse_yes_token(rest ? rest : "");
+            if (name[0] == '\0') {
+                console_print_error("Usage: disk -master <name> YES");
+            } else if (!yes) {
+                int rc = rust_disk_master(name, 0);
+                if (rc == 1) {
+                    console_println_color(
+                        "Will ENABLE writes to internal/NVMe until reboot (can destroy the OS disk).",
+                        CONSOLE_WARNING_COLOR);
+                    console_println_color(
+                        "Confirm: disk -master <name> YES",
+                        CONSOLE_INFO_COLOR);
+                } else {
+                    console_print_error("disk -master failed (see master: reason above)");
+                }
+            } else {
+                console_print_warning("Unlocking internal/NVMe writes for this boot...");
+                int rc = rust_disk_master(name, 1);
+                if (rc == 0) {
+                    console_print_success("master unlocked; writes allowed until reboot");
+                } else {
+                    console_print_error("disk -master failed (see master: reason above)");
+                }
+            }
+        } else if (opt_starts(args, "-install ")) {
+            const char* p = opt_arg(args, "-install ");
+            char name[32];
+            const char* rest = NULL;
+            parse_name_rest(p, name, (int)sizeof(name), &rest);
+            int yes = parse_yes_token(rest ? rest : "");
+            if (name[0] == '\0') {
+                console_print_error("Usage: disk -install <name> YES");
+            } else if (!yes) {
+                int rc = rust_disk_install(name, 0);
+                if (rc == 1) {
+                    console_println_color(
+                        "Will ERASE target, format Popcorn FAT32, copy bootloader+kernel.",
+                        CONSOLE_WARNING_COLOR);
+                    console_println_color(
+                        "Confirm: disk -install <name> YES",
+                        CONSOLE_INFO_COLOR);
+                } else {
+                    console_print_error("disk -install failed (see install: reason above)");
+                }
+            } else {
+                console_print_warning("Installing Popcorn onto disk (ERASES target)...");
+                int rc = rust_disk_install(name, 1);
+                if (rc == 0) {
+                    console_print_success("installed; reboot from this disk");
+                } else {
+                    console_print_error("disk -install failed (see install: reason above)");
+                }
+            }
+        } else if (opt_starts(args, "-wipe ")) {
+            const char* p = opt_arg(args, "-wipe ");
+            char name[32];
+            const char* rest = NULL;
+            parse_name_rest(p, name, (int)sizeof(name), &rest);
+            int yes = parse_yes_token(rest ? rest : "");
+            if (name[0] == '\0') {
+                console_print_error("Usage: disk -wipe <name> YES");
+            } else if (!yes) {
+                int rc = rust_disk_wipe(name, 0);
+                if (rc == 1) {
+                    console_println_color(
+                        "Armed. Confirm with: disk -wipe <name> YES",
+                        CONSOLE_INFO_COLOR);
+                } else {
+                    console_print_error("disk -wipe failed (see wipe: reason above)");
+                }
+            } else {
+                console_print_warning("Wiping + formatting (USB: may take ~10s)...");
+                int rc = rust_disk_wipe(name, 1);
+                if (rc == 0) {
+                    console_print_success("wiped + FAT32 ready; try: ls  or  dol -new note");
+                } else {
+                    console_print_error("disk -wipe failed (see wipe: reason above)");
+                }
+            }
+        } else if (opt_starts(args, "-read ")) {
+            uint32_t lba32 = 0;
+            if (!parse_number(opt_arg(args, "-read "), &lba32)) {
+                console_print_error("Usage: disk -read <lba>");
+            } else {
+                uint8_t sec[512];
+                int rc = rust_disk_read((uint64_t)lba32, sec, sizeof(sec));
+                if (rc < 0) {
+                    console_print_error("disk -read failed (select a disk first?)");
+                } else {
+                    char ascii[17];
+                    char hex[33];
+                    int ai = 0;
+                    int hi = 0;
+                    const char* hx = "0123456789ABCDEF";
+                    for (int i = 0; i < 16; i++) {
+                        uint8_t b = sec[i];
+                        ascii[ai++] = (b >= 32 && b < 127) ? (char)b : '.';
+                        hex[hi++] = hx[b >> 4];
+                        hex[hi++] = hx[b & 0xF];
+                    }
+                    ascii[ai] = '\0';
+                    hex[hi] = '\0';
+                    console_print_color("text ", CONSOLE_INFO_COLOR);
+                    console_println_color(ascii, CONSOLE_FG_COLOR);
+                    console_print_color("hex  ", CONSOLE_INFO_COLOR);
+                    console_println_color(hex, CONSOLE_FG_COLOR);
+                }
+            }
+        } else if (opt_starts(args, "-write ")) {
+            const char* p = opt_arg(args, "-write ");
+            uint32_t lba32 = 0;
+            if (!parse_number(p, &lba32)) {
+                console_print_error("Usage: disk -write <lba> <hex|text>");
+            } else {
+                while (*p >= '0' && *p <= '9') {
+                    p++;
+                }
+                while (*p == ' ') {
+                    p++;
+                }
+                uint8_t sec[512];
+                for (int i = 0; i < 512; i++) {
+                    sec[i] = 0;
+                }
+                int ok = 1;
+                if (*p) {
+                    int all_hex = 1;
+                    for (const char* q = p; *q; q++) {
+                        char c = *q;
+                        if (c == ' ') {
+                            continue;
+                        }
+                        int hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+                                  (c >= 'A' && c <= 'F');
+                        if (!hex) {
+                            all_hex = 0;
+                            break;
+                        }
+                    }
+                    int bi = 0;
+                    if (all_hex) {
+                        while (*p && bi < 512) {
+                            while (*p == ' ') {
+                                p++;
+                            }
+                            if (!*p) {
+                                break;
+                            }
+                            char c1 = *p++;
+                            while (*p == ' ') {
+                                p++;
+                            }
+                            char c2 = *p ? *p++ : '0';
+                            int h1 = (c1 >= '0' && c1 <= '9') ? c1 - '0'
+                                     : (c1 >= 'a' && c1 <= 'f') ? c1 - 'a' + 10
+                                     : (c1 >= 'A' && c1 <= 'F') ? c1 - 'A' + 10
+                                     : -1;
+                            int h2 = (c2 >= '0' && c2 <= '9') ? c2 - '0'
+                                     : (c2 >= 'a' && c2 <= 'f') ? c2 - 'a' + 10
+                                     : (c2 >= 'A' && c2 <= 'F') ? c2 - 'A' + 10
+                                     : -1;
+                            if (h1 < 0 || h2 < 0) {
+                                console_print_error("bad hex (use DEADBEEF or text like POPCORN)");
+                                ok = 0;
+                                break;
+                            }
+                            sec[bi++] = (uint8_t)((h1 << 4) | h2);
+                        }
+                    } else {
+                        while (*p && bi < 512) {
+                            sec[bi++] = (uint8_t)*p++;
+                        }
+                    }
+                }
+                if (ok) {
+                    int rc = rust_disk_write((uint64_t)lba32, sec, sizeof(sec));
+                    if (rc == -5) {
+                        console_print_error("disk LOCKED; use disk -install/-wipe <name> YES");
+                    } else if (rc == -6) {
+                        console_print_error("refused: sector is in the MBR/GPT zone of a disk holding other data");
+                    } else if (rc < 0) {
+                        console_print_error("disk -write refused (disk -use <name> first?)");
+                    } else {
+                        console_print_success("sector written");
+                    }
+                }
             }
         } else {
-            console_print_warning("Unlocking internal/NVMe writes for this boot...");
-            int rc = rust_disk_master(name, 1);
-            if (rc == 0) {
-                console_print_success("master unlocked — writes allowed until reboot");
-            } else {
-                console_print_error("disk master failed (see master: reason above)");
-            }
-        }
-    } else if (strncmp(command, "disk install ", 13) == 0) {
-        const char* p = command + 13;
-        char name[32];
-        int ni = 0;
-        while (*p && *p != ' ' && ni < (int)sizeof(name) - 1) {
-            name[ni++] = *p++;
-        }
-        name[ni] = '\0';
-        while (*p == ' ') {
-            p++;
-        }
-        int yes = (p[0] == 'Y' || p[0] == 'y')
-               && (p[1] == 'E' || p[1] == 'e')
-               && (p[2] == 'S' || p[2] == 's')
-               && (p[3] == '\0' || p[3] == ' ');
-        if (name[0] == '\0') {
-            console_print_error("Usage: disk install <name> YES");
-        } else if (!yes) {
-            int rc = rust_disk_install(name, 0);
-            if (rc == 1) {
-                console_println_color(
-                    "Will ERASE target, format Popcorn FAT32, copy bootloader+kernel.",
-                    CONSOLE_WARNING_COLOR);
-                console_println_color(
-                    "Confirm: disk install <name> YES",
-                    CONSOLE_INFO_COLOR);
-            } else {
-                console_print_error("disk install failed (see install: reason above)");
-            }
-        } else {
-            console_print_warning("Installing Popcorn onto disk (ERASES target)...");
-            int rc = rust_disk_install(name, 1);
-            if (rc == 0) {
-                console_print_success("installed — reboot from this disk; dol/ls work on it now");
-            } else {
-                console_print_error("disk install failed (see install: reason above)");
-            }
-        }
-    } else if (strncmp(command, "disk wipe ", 10) == 0) {
-        const char* p = command + 10;
-        char name[32];
-        int ni = 0;
-        while (*p && *p != ' ' && ni < (int)sizeof(name) - 1) {
-            name[ni++] = *p++;
-        }
-        name[ni] = '\0';
-        while (*p == ' ') {
-            p++;
-        }
-        /* Accept YES / yes / Yes — trailing junk after YES is ignored. */
-        int yes = (p[0] == 'Y' || p[0] == 'y')
-               && (p[1] == 'E' || p[1] == 'e')
-               && (p[2] == 'S' || p[2] == 's')
-               && (p[3] == '\0' || p[3] == ' ');
-        if (name[0] == '\0') {
-            console_print_error("Usage: disk wipe <name> YES");
-        } else if (!yes) {
-            int rc = rust_disk_wipe(name, 0);
-            if (rc == 1) {
-                console_println_color(
-                    "Armed. Confirm with: disk wipe <name> YES",
-                    CONSOLE_INFO_COLOR);
-            } else {
-                console_print_error("disk wipe failed (see wipe: reason above)");
-            }
-        } else {
-            console_print_warning("Wiping + formatting (USB: may take ~10s)...");
-            int rc = rust_disk_wipe(name, 1);
-            if (rc == 0) {
-                console_print_success("wiped + FAT32 ready — try: ls   or   dol -new note");
-            } else {
-                console_print_error("disk wipe failed (see wipe: reason above)");
-            }
+            console_print_error("Unknown disk option. Try: disk -help");
         }
     } else if (strncmp(command, "install ", 8) == 0) {
-        console_print_error("Moved: use  disk install <name> [YES]");
-        console_println_color("Wipe+format:  disk wipe <name> [YES]", CONSOLE_INFO_COLOR);
-    } else if (strcmp(command, "disk info") == 0) {
-        char buf[192];
-        rust_disk_info(buf, sizeof(buf));
-        console_println_color(buf, CONSOLE_INFO_COLOR);
-    } else if (strncmp(command, "disk read ", 10) == 0) {
-        uint32_t lba32 = 0;
-        if (!parse_number(command + 10, &lba32)) {
-            console_print_error("Usage: disk read <lba>");
-        } else {
-            uint8_t sec[512];
-            int rc = rust_disk_read((uint64_t)lba32, sec, sizeof(sec));
-            if (rc < 0) {
-                console_print_error("disk read failed (select a disk first?)");
-            } else {
-                /* ASCII preview (printable) + continuous hex — not spaced byte pairs. */
-                char ascii[17];
-                char hex[33];
-                int ai = 0;
-                int hi = 0;
-                const char* hx = "0123456789ABCDEF";
-                for (int i = 0; i < 16; i++) {
-                    uint8_t b = sec[i];
-                    ascii[ai++] = (b >= 32 && b < 127) ? (char)b : '.';
-                    hex[hi++] = hx[b >> 4];
-                    hex[hi++] = hx[b & 0xF];
-                }
-                ascii[ai] = '\0';
-                hex[hi] = '\0';
-                console_print_color("text ", CONSOLE_INFO_COLOR);
-                console_println_color(ascii, CONSOLE_FG_COLOR);
-                console_print_color("hex  ", CONSOLE_INFO_COLOR);
-                console_println_color(hex, CONSOLE_FG_COLOR);
-            }
-        }
-    } else if (strncmp(command, "disk write ", 11) == 0) {
-        /*
-         * disk write <lba> [payload]
-         *   payload hex:  DEADBEEF  or  DE AD BE EF
-         *   payload text: POPCORN   (any non-hex → ASCII into sector)
-         * Rest of the 512-byte sector is zero-filled.
-         */
-        const char* p = command + 11;
-        uint32_t lba32 = 0;
-        if (!parse_number(p, &lba32)) {
-            console_print_error("Usage: disk write <lba> <hex|text>");
-        } else {
-            while (*p >= '0' && *p <= '9') {
-                p++;
-            }
-            while (*p == ' ') {
-                p++;
-            }
-            uint8_t sec[512];
-            for (int i = 0; i < 512; i++) {
-                sec[i] = 0;
-            }
-            int ok = 1;
-            if (*p) {
-                /* Hex if every non-space char is 0-9A-F; otherwise ASCII text. */
-                int all_hex = 1;
-                for (const char* q = p; *q; q++) {
-                    char c = *q;
-                    if (c == ' ') {
-                        continue;
-                    }
-                    int hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
-                              (c >= 'A' && c <= 'F');
-                    if (!hex) {
-                        all_hex = 0;
-                        break;
-                    }
-                }
-                int bi = 0;
-                if (all_hex) {
-                    while (*p && bi < 512) {
-                        while (*p == ' ') {
-                            p++;
-                        }
-                        if (!*p) {
-                            break;
-                        }
-                        char c1 = *p++;
-                        while (*p == ' ') {
-                            p++;
-                        }
-                        char c2 = *p ? *p++ : '0';
-                        int h1 = (c1 >= '0' && c1 <= '9') ? c1 - '0'
-                                 : (c1 >= 'a' && c1 <= 'f') ? c1 - 'a' + 10
-                                 : (c1 >= 'A' && c1 <= 'F') ? c1 - 'A' + 10
-                                 : -1;
-                        int h2 = (c2 >= '0' && c2 <= '9') ? c2 - '0'
-                                 : (c2 >= 'a' && c2 <= 'f') ? c2 - 'a' + 10
-                                 : (c2 >= 'A' && c2 <= 'F') ? c2 - 'A' + 10
-                                 : -1;
-                        if (h1 < 0 || h2 < 0) {
-                            console_print_error("bad hex (use DEADBEEF or text like POPCORN)");
-                            ok = 0;
-                            break;
-                        }
-                        sec[bi++] = (uint8_t)((h1 << 4) | h2);
-                    }
-                } else {
-                    while (*p && bi < 512) {
-                        sec[bi++] = (uint8_t)*p++;
-                    }
-                }
-            }
-            if (ok) {
-                int rc = rust_disk_write((uint64_t)lba32, sec, sizeof(sec));
-                if (rc == -5) {
-                    console_print_error("disk LOCKED — disk install <name> YES  (or disk wipe)");
-                } else if (rc == -6) {
-                    console_print_error("refused: sector is in the MBR/GPT zone of a disk holding other data");
-                } else if (rc < 0) {
-                    console_print_error("disk write refused (disk use <name> first?)");
-                } else {
-                    console_print_success("sector written");
-                }
-            }
-        }
+        console_print_error("Moved: use  disk -install <name> [YES]");
+        console_println_color("Wipe+format:  disk -wipe <name> [YES]", CONSOLE_INFO_COLOR);
     } else {
         console_print_error("Command not found");
         console_print_color("Command: ", CONSOLE_INFO_COLOR);
