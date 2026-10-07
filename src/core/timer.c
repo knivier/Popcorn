@@ -34,16 +34,14 @@ void timer_init(uint32_t frequency_hz) {
 
 // Timer interrupt handler (called from assembly)
 void timer_interrupt_handler(void) {
-    // Increment tick counter
     global_timer.ticks++;
-    
-    // Call registered tick handler if present
-    if (global_timer.tick_handler) {
+
+    /* During USB BOT / xHCI: EOI only — never run the scheduler mid-transfer. */
+    if (!irq_quiet_active() && global_timer.tick_handler) {
         global_timer.tick_handler();
     }
 
-    // Send EOI (End of Interrupt) to PIC
-    write_port(0x20, 0x20);
+    pic_send_eoi(0);
 }
 
 // Enable timer interrupts

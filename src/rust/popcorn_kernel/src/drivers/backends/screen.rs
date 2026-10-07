@@ -246,14 +246,19 @@ pub fn screen_clear(attr: u8) {
     if screen_backend() == 1 {
         vga::set_cursor(0, 0);
     } else if screen_backend() == 2 {
-        fb::fill_text_panel();
+        /* Mark every row dirty and let present/sync redraw cells. Do NOT
+         * solid-fill the whole framebuffer here — that flashes blank frames
+         * between boot stages and wipes readable startup text. */
         unsafe {
-            let n = COLS * ROWS * 2;
-            for i in 0..n {
-                RENDERED[i] = CELLS[i];
+            for d in DIRTY.iter_mut().take(ROWS) {
+                *d = 1;
+            }
+            for b in RENDERED.iter_mut().take(COLS * ROWS * 2) {
+                *b = 0xFF;
             }
             PREV_CURSOR = 0xFFFF_FFFF;
         }
+        flush_dirty();
     }
 }
 

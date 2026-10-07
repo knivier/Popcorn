@@ -1,19 +1,16 @@
 //! Write-gated disk registry + boot-default picker.
 //!
 //! Policy:
-//! - Boot/USB (or first virtio in QEMU) auto-selected and writable
-//! - Internal (NVMe/SATA / second virtio) locked until `install <name> YES`
+//! - Boot never formats, installs, or unlocks NVMe
+//! - Internal/NVMe writes: `disk master <name> YES` this boot only
+//! - `disk install` / `disk wipe` never flip the NVMe write gate
+//! - `disk install <name> YES` stages bootloader+kernel from the live boot
+//!   volume into RAM, formats USB/virtio (or master-unlocked NVMe) as Popcorn FAT32
 //! - ram0 always available for tests
-//! - `install <name>` must be typed first (arm), then `install <name> YES` (unlock);
-//!   a bare `install <name> YES` is refused
 //! - A USB disk whose first sectors are neither blank nor Popcorn-formatted
-//!   (boot stick, Ventoy, NTFS/ext4 data) is `protected`: locked like Internal
-//! - Even an unlocked Internal/protected disk refuses writes while it holds
-//!   foreign data (GPT header, or a non-blank non-Popcorn sector 0), and every
-//!   disk refuses writes to the GPT/MBR head and backup-GPT tail zones then
+//!   (boot stick, Ventoy, NTFS/ext4 data) is `protected` until install/wipe
 //! - Real NVMe (when present) is `nvme0`, Internal + locked; virtio[1] becomes `vdb`
-//! - Real USB MSC (xHCI, Bulk-Only) is `usb0` (boot, writable); virtio[0] then
-//!   becomes `vda`. Without a working MSC device virtio[0] stays the `usb0` stand-in.
+//! - Real USB MSC (xHCI, Bulk-Only) is `usb0`; virtio[0] then becomes `vda`
 
 pub mod nvme;
 pub mod ramdisk;
@@ -70,6 +67,8 @@ struct DiskEntry {
     install_unlocked: bool,
     /// USB disk that holds someone else's data (boot media, NTFS, ...): needs unlock too.
     protected: bool,
+    /// Internal/NVMe writes: only `disk master <name> YES`. Never auto, never install.
+    master_unlocked: bool,
 }
 
 /// Sectors at each end of a disk that hold MBR/GPT + backup GPT.
@@ -80,6 +79,8 @@ static mut DISKS: Option<Vec<DiskEntry>> = None;
 static SELECTED: AtomicUsize = AtomicUsize::new(usize::MAX);
 /// Pending install target index, or MAX if none.
 static PENDING_INSTALL: AtomicUsize = AtomicUsize::new(usize::MAX);
+static PENDING_WIPE: AtomicUsize = AtomicUsize::new(usize::MAX);
+static PENDING_MASTER: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 /* Static names for registered disks (immortal). */
 static mut NAME_USB0: &str = "usb0";
@@ -102,8 +103,11 @@ fn table() -> &'static mut Vec<DiskEntry> {
 }
 
 fn is_writable(d: &DiskEntry) -> bool {
+    if is_internal_disk(d) {
+        return d.master_unlocked;
+    }
     match d.class {
-        DiskClass::Internal => d.install_unlocked,
+        DiskClass::Internal => false,
         DiskClass::Usb if d.protected => d.install_unlocked,
         DiskClass::Ram | DiskClass::Virtio | DiskClass::Usb => true,
     }
@@ -111,7 +115,19 @@ fn is_writable(d: &DiskEntry) -> bool {
 
 /// Needs the `install <name>` / `install <name> YES` handshake before writes.
 fn needs_unlock(d: &DiskEntry) -> bool {
-    d.class == DiskClass::Internal || d.protected
+    (d.class == DiskClass::Internal || d.protected) && !d.install_unlocked
+}
+
+fn is_internal_disk(d: &DiskEntry) -> bool {
+    d.class == DiskClass::Internal || matches!(d.backend, Backend::Nvme(_))
+}
+
+pub fn selected_is_internal() -> bool {
+    selected_entry().map(is_internal_disk).unwrap_or(false)
+}
+
+pub fn selected_master_unlocked() -> bool {
+    selected_entry().map(|d| d.master_unlocked).unwrap_or(false)
 }
 
 fn publish_disk(d: &DiskEntry) {
@@ -150,6 +166,9 @@ pub fn init() {
     t.clear();
     SELECTED.store(usize::MAX, Ordering::Release);
     PENDING_INSTALL.store(usize::MAX, Ordering::Release);
+    PENDING_WIPE.store(usize::MAX, Ordering::Release);
+    PENDING_MASTER.store(usize::MAX, Ordering::Release);
+    nvme::set_write_enabled(false);
 
     if let Ok((sectors, ssize)) = ramdisk::init() {
         let d = DiskEntry {
@@ -161,6 +180,7 @@ pub fn init() {
             is_boot: false,
             install_unlocked: false,
             protected: false,
+            master_unlocked: false,
         };
         publish_disk(&d);
         t.push(d);
@@ -194,9 +214,12 @@ pub fn init() {
     };
     let mut usb_real = false;
     if usb_n > 0 {
-        /* usb0 = first non-foreign disk (blank / Popcorn data), else the first
-         * (which then registers as `protected`, i.e. locked until install YES). */
-        let primary = (0..usb_n).find(|&i| !usb_msc::is_boot_like(i)).unwrap_or(0);
+        /* Prefer a Popcorn volume as usb0, else blank (install target), else first. */
+        let primary = (0..usb_n)
+            .find(|&i| usb_msc::is_ours(i))
+            .or_else(|| (0..usb_n).find(|&i| usb_msc::is_blank(i)))
+            .or_else(|| (0..usb_n).find(|&i| !usb_msc::is_boot_like(i)))
+            .unwrap_or(0);
         let mut order: Vec<usize> = Vec::new();
         order.push(primary);
         for i in 0..usb_n {
@@ -216,9 +239,12 @@ pub fn init() {
                     sectors,
                     sector_size: ssize,
                     backend: Backend::UsbMsc(i),
-                    is_boot: n == 0,
+                    /* Only a real Popcorn volume is the default boot/data disk.
+                     * Blank sticks are writable but must not auto-format on boot. */
+                    is_boot: usb_msc::is_ours(i),
                     install_unlocked: false,
                     protected: usb_msc::is_boot_like(i),
+                    master_unlocked: false,
                 };
                 publish_disk(&d);
                 t.push(d);
@@ -259,6 +285,7 @@ pub fn init() {
                 is_boot,
                 install_unlocked: false,
                 protected: false,
+                master_unlocked: false,
             };
             publish_disk(&d);
             t.push(d);
@@ -275,6 +302,7 @@ pub fn init() {
             is_boot: false,
             install_unlocked: false,
             protected: false,
+            master_unlocked: false,
         };
         publish_disk(&d);
         t.push(d);
@@ -326,6 +354,7 @@ pub fn init() {
             is_boot: false,
             install_unlocked: false,
             protected: false,
+            master_unlocked: false,
         };
         publish_disk(&d);
         t.push(d);
@@ -364,6 +393,8 @@ pub fn list(buf: &mut [u8]) -> usize {
         }
         if is_writable(d) {
             s.push_str(" rw");
+        } else if is_internal_disk(d) {
+            s.push_str(" MASTER-LOCKED");
         } else {
             s.push_str(" LOCKED");
         }
@@ -378,48 +409,295 @@ pub fn use_disk(name: &str) -> Result<(), &'static str> {
         .iter()
         .position(|d| d.name == name)
         .ok_or("unknown disk")?;
-    if !is_writable(&t[idx]) {
-        return Err("locked — use: install <name>, then install <name> YES");
+    if matches!(t[idx].backend, Backend::Stub) {
+        return Err("stub disk has no I/O");
     }
+    /* Internal/NVMe may be selected for reads while MASTER-LOCKED. Writes still fail. */
     SELECTED.store(idx, Ordering::Release);
     Ok(())
 }
 
-/// Start or complete install unlock for an internal (or protected USB) disk.
-/// `install nvme0` arms; `install nvme0 YES` unlocks + selects — but only for the
-/// disk that was armed by the immediately preceding `install` (a bare `... YES`
-/// is refused).
-/// Returns Ok(true) if unlocked, Ok(false) if armed (needs YES).
+/// Unlock Internal/NVMe writes for this boot. Never called from install, wipe, or
+/// the QEMU selftest. Returns Ok(true) if unlocked, Ok(false) if armed (needs YES).
+pub fn master(name: &str, confirm_yes: bool) -> Result<bool, &'static str> {
+    let t = table();
+    let idx = t
+        .iter()
+        .position(|d| d.name == name)
+        .ok_or("unknown disk")?;
+    if matches!(t[idx].backend, Backend::Stub | Backend::Ram) {
+        return Err("master is only for internal/NVMe disks");
+    }
+    if !is_internal_disk(&t[idx]) {
+        return Err("master is only for internal/NVMe disks");
+    }
+    if !confirm_yes {
+        PENDING_MASTER.store(idx, Ordering::Release);
+        return Ok(false);
+    }
+    let armed = PENDING_MASTER.load(Ordering::Acquire);
+    if armed != usize::MAX && armed != idx {
+        return Err("another disk is armed — master that name, or master this one without a prior arm");
+    }
+    t[idx].master_unlocked = true;
+    if let Backend::Nvme(_) = t[idx].backend {
+        nvme::set_write_enabled(true);
+    }
+    PENDING_MASTER.store(usize::MAX, Ordering::Release);
+    crate::console_ffi::println_color(
+        "master: NVMe/internal writes ENABLED until reboot",
+        crate::console_ffi::COLOR_YELLOW,
+    );
+    Ok(true)
+}
+
+/// Start or complete a full system install onto a disk.
+/// Stages `EFI/BOOT/BOOTX64.EFI` + `BOOT/KERNEL` from the live boot volume into
+/// RAM, formats the target as Popcorn FAT32, writes the UEFI layout, and leaves
+/// the target selected + writable (so it is both bootable and the working disk).
+/// Returns Ok(true) if installed, Ok(false) if armed (needs YES).
 pub fn install(name: &str, confirm_yes: bool) -> Result<bool, &'static str> {
     let t = table();
     let idx = t
         .iter()
         .position(|d| d.name == name)
         .ok_or("unknown disk")?;
-    if !needs_unlock(&t[idx]) {
-        return Err("install only for internal/protected disks");
+    if matches!(t[idx].backend, Backend::Stub | Backend::Ram) {
+        return Err("cannot install to ram/stub disks");
     }
-    if matches!(t[idx].backend, Backend::Stub) {
-        return Err("no driver yet (list-only stub)");
+    if is_internal_disk(&t[idx]) && !t[idx].master_unlocked {
+        return Err("internal/NVMe locked — disk master <name> YES first");
     }
-    if t[idx].install_unlocked {
-        SELECTED.store(idx, Ordering::Release);
-        return Ok(true);
+    if t[idx].sectors < 68_000 {
+        return Err("disk too small for install (~33MiB+)");
     }
     if !confirm_yes {
         PENDING_INSTALL.store(idx, Ordering::Release);
         return Ok(false);
     }
-    if PENDING_INSTALL.load(Ordering::Acquire) != idx {
-        /* YES without an arm for *this* disk: refuse (never self-arm). */
-        return Err("not armed: run `install <name>` first, then `install <name> YES`");
+    /* Same-line YES is confirmation enough; prior arm is optional. */
+    let armed = PENDING_INSTALL.load(Ordering::Acquire);
+    if armed != usize::MAX && armed != idx {
+        return Err("another disk is armed — install that name, or install this one without a prior arm");
     }
+
+    crate::console_ffi::println_color(
+        "install: [1/4] staging bootloader + kernel from live boot disk...",
+        crate::console_ffi::COLOR_WHITE,
+    );
+    let (efi, kernel) = stage_boot_payloads(idx)?;
+    {
+        let mut line = alloc::string::String::from("install: staged EFI=");
+        append_u64(&mut line, efi.len() as u64);
+        line.push_str(" kernel=");
+        append_u64(&mut line, kernel.len() as u64);
+        line.push_str(" bytes");
+        crate::console_ffi::println_color(&line, crate::console_ffi::COLOR_LIGHT_CYAN);
+    }
+
+    /* Format target (same quick wipe as disk wipe). */
     t[idx].install_unlocked = true;
-    if let Backend::Nvme(_) = t[idx].backend {
-        nvme::set_write_enabled(true);
-    }
+    t[idx].protected = false;
     SELECTED.store(idx, Ordering::Release);
+    crate::fs::fat32::unmount();
+
+    let sectors = t[idx].sectors;
+    let ss = t[idx].sector_size as usize;
+    let zero = alloc::vec![0u8; ss];
+    crate::console_ffi::println_color(
+        "install: [2/4] formatting target as Popcorn FAT32...",
+        crate::console_ffi::COLOR_WHITE,
+    );
+    for lba in 0..PROTECT_ZONE.min(sectors) {
+        if raw_write(&t[idx], lba, &zero) < 0 {
+            return Err("install: failed clearing partition tables");
+        }
+    }
+    let _ = raw_write(&t[idx], sectors.saturating_sub(1), &zero);
+
+    match crate::fs::fat32::force_format() {
+        Ok(()) => {}
+        Err(_) => return Err("install: FAT32 format failed"),
+    }
+
+    match crate::fs::fat32::write_boot_layout(&efi, &kernel) {
+        Ok(()) => {}
+        Err(_) => return Err("install: failed writing/verifying boot files"),
+    }
+
+    t[idx].protected = false;
+    t[idx].install_unlocked = true;
+    t[idx].is_boot = true;
     PENDING_INSTALL.store(usize::MAX, Ordering::Release);
+    crate::console_ffi::println_color(
+        "install: complete — safe to reboot from this disk",
+        crate::console_ffi::COLOR_LIGHT_GREEN,
+    );
+    Ok(true)
+}
+
+/// True if this ELF looks like a QEMU auto-install kernel.
+/// Needles are split so this detector is not itself mistaken for that kernel.
+fn kernel_is_auto_install(k: &[u8]) -> bool {
+    fn has_parts(hay: &[u8], a: &[u8], b: &[u8]) -> bool {
+        let n = a.len() + b.len();
+        if hay.len() < n {
+            return false;
+        }
+        for i in 0..=hay.len() - n {
+            if &hay[i..i + a.len()] == a && &hay[i + a.len()..i + n] == b {
+                return true;
+            }
+        }
+        false
+    }
+    has_parts(k, b"rust_test_disk", b"_install") || has_parts(k, b"install-self", b"test")
+}
+
+fn ok_stage_source(d: &DiskEntry) -> bool {
+    if is_internal_disk(d) || matches!(d.backend, Backend::Stub | Backend::Ram | Backend::Nvme(_)) {
+        return false;
+    }
+    matches!(d.backend, Backend::UsbMsc(_) | Backend::Virtio(_))
+}
+
+/// Load BOOTX64.EFI + KERNEL from a FAT volume into RAM.
+/// Never reads Internal/NVMe (a leftover Popcorn format there carried the
+/// auto-install kernel onto the USB).
+fn stage_boot_payloads(target_idx: usize) -> Result<(Vec<u8>, Vec<u8>), &'static str> {
+    let t = table();
+    let prev = SELECTED.load(Ordering::Acquire);
+    let n = t.len();
+    let mut order: Vec<usize> = Vec::new();
+    if target_idx < n && ok_stage_source(&t[target_idx]) {
+        order.push(target_idx);
+    }
+    for i in 0..n {
+        if i != target_idx && t[i].is_boot && ok_stage_source(&t[i]) && !order.contains(&i) {
+            order.push(i);
+        }
+    }
+    for i in 0..n {
+        if i != target_idx && t[i].class == DiskClass::Usb && ok_stage_source(&t[i]) && !order.contains(&i)
+        {
+            order.push(i);
+        }
+    }
+    for i in 0..n {
+        if i != target_idx && t[i].class == DiskClass::Virtio && ok_stage_source(&t[i]) && !order.contains(&i)
+        {
+            order.push(i);
+        }
+    }
+
+    let mut found: Option<(Vec<u8>, Vec<u8>)> = None;
+    for i in order {
+        SELECTED.store(i, Ordering::Release);
+        crate::fs::fat32::unmount();
+        if crate::fs::fat32::mount_or_format().is_err() {
+            continue;
+        }
+        let efi = match crate::fs::fat32::read_binary(&["EFI", "BOOT"], "BOOTX64.EFI") {
+            Ok(v) if !v.is_empty() => v,
+            _ => continue,
+        };
+        let kern = crate::fs::fat32::read_binary(&["BOOT"], "KERNEL")
+            .or_else(|_| crate::fs::fat32::read_binary(&["EFI", "BOOT"], "KERNEL"))
+            .or_else(|_| crate::fs::fat32::read_binary(&[], "KERNEL"));
+        match kern {
+            Ok(k) if !k.is_empty() => {
+                if kernel_is_auto_install(&k) {
+                    crate::console_ffi::print_color(
+                        "install: refusing auto-install kernel on ",
+                        crate::console_ffi::COLOR_YELLOW,
+                    );
+                    crate::console_ffi::println_color(t[i].name, crate::console_ffi::COLOR_YELLOW);
+                    continue;
+                }
+                crate::console_ffi::print_color(
+                    "install: staged from ",
+                    crate::console_ffi::COLOR_LIGHT_CYAN,
+                );
+                crate::console_ffi::println_color(t[i].name, crate::console_ffi::COLOR_LIGHT_CYAN);
+                found = Some((efi, k));
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    SELECTED.store(prev, Ordering::Release);
+    crate::fs::fat32::unmount();
+    found.ok_or("no boot files found on USB (need EFI/BOOT/BOOTX64.EFI and BOOT/KERNEL; NVMe is never a source)")
+}
+
+/// Quick-wipe + Popcorn FAT32 format.
+/// `disk wipe <name> YES` is enough confirmation (YES in the command is the
+/// confirm). A prior bare `disk wipe <name>` still arms if preferred.
+/// Returns Ok(true) if wiped+formatted, Ok(false) if armed.
+pub fn wipe(name: &str, confirm_yes: bool) -> Result<bool, &'static str> {
+    let t = table();
+    let idx = t
+        .iter()
+        .position(|d| d.name == name)
+        .ok_or("unknown disk")?;
+    if matches!(t[idx].backend, Backend::Stub | Backend::Ram) {
+        return Err("cannot wipe ram/stub disks");
+    }
+    if is_internal_disk(&t[idx]) && !t[idx].master_unlocked {
+        return Err("internal/NVMe locked — disk master <name> YES first");
+    }
+    if t[idx].sectors < 68_000 {
+        return Err("disk too small for FAT32 (~33MiB+)");
+    }
+    if !confirm_yes {
+        PENDING_WIPE.store(idx, Ordering::Release);
+        return Ok(false);
+    }
+    /* Same-line YES is confirmation enough; prior arm is optional. */
+    let armed = PENDING_WIPE.load(Ordering::Acquire);
+    if armed != usize::MAX && armed != idx {
+        return Err("another disk is armed — wipe that name, or wipe this one without a prior arm");
+    }
+
+    /* Allow writes through the foreign-data gate for this operation. */
+    t[idx].install_unlocked = true;
+    t[idx].protected = false; /* wipe owns this stick for the duration */
+    SELECTED.store(idx, Ordering::Release);
+    crate::fs::fat32::unmount();
+
+    let sectors = t[idx].sectors;
+    let ss = t[idx].sector_size as usize;
+    let zero = alloc::vec![0u8; ss];
+    /* Quick wipe: destroy partition table / BPB head. Last-sector GPT backup
+     * is best-effort — failing it must not abort the format (USB end-LBA
+     * writes often time out on real sticks). */
+    crate::console_ffi::println_color(
+        "wipe: clearing partition tables...",
+        crate::console_ffi::COLOR_WHITE,
+    );
+    for lba in 0..PROTECT_ZONE.min(sectors) {
+        if raw_write(&t[idx], lba, &zero) < 0 {
+            return Err("wipe write failed (USB rejected head write)");
+        }
+    }
+    if sectors > PROTECT_ZONE {
+        let _ = raw_write(&t[idx], sectors - 1, &zero);
+    }
+
+    crate::console_ffi::println_color(
+        "wipe: formatting FAT32...",
+        crate::console_ffi::COLOR_WHITE,
+    );
+    match crate::fs::fat32::force_format() {
+        Ok(()) => {}
+        Err(_) => return Err("FAT32 format failed after wipe"),
+    }
+
+    t[idx].protected = false;
+    t[idx].install_unlocked = true;
+    t[idx].is_boot = true; /* Popcorn volume — prefer for auto-select next time */
+    PENDING_WIPE.store(usize::MAX, Ordering::Release);
     Ok(true)
 }
 
@@ -442,6 +720,8 @@ pub fn info(buf: &mut [u8]) -> usize {
         append_u64(&mut s, d.sectors);
         if is_writable(d) {
             s.push_str(" writable");
+        } else if is_internal_disk(d) {
+            s.push_str(" MASTER-LOCKED");
         } else {
             s.push_str(" LOCKED");
         }
@@ -485,6 +765,10 @@ fn raw_read(d: &DiskEntry, lba: u64, buf: &mut [u8]) -> i64 {
 }
 
 fn raw_write(d: &DiskEntry, lba: u64, buf: &[u8]) -> i64 {
+    /* Internal/NVMe writes require `disk master <name> YES` this boot. */
+    if is_internal_disk(d) && !d.master_unlocked {
+        return -5;
+    }
     match d.backend {
         Backend::Ram => ramdisk::write(lba, buf),
         Backend::Virtio(i) => virtio_blk::write(i, lba, buf),
@@ -569,12 +853,15 @@ pub fn write_selected(lba: u64, buf: &[u8]) -> i64 {
         return -2;
     }
     if d.class != DiskClass::Ram {
-        let in_zone = lba < PROTECT_ZONE
-            || (d.sectors > PROTECT_ZONE && lba >= d.sectors - PROTECT_ZONE);
-        /* Unlocked Internal/protected disks and the MBR/GPT head+tail of any
-         * disk are off limits while the disk holds data that is not ours. */
-        if (needs_unlock(d) || in_zone) && holds_foreign_data(d) {
-            return -6;
+        /* Foreign disks (ESP, NTFS, …): block head/tail unless the user has
+         * explicitly `install … YES`'d this disk — then FAT updates in the
+         * reserved/FAT region must be allowed or every file write fails. */
+        if holds_foreign_data(d) && !d.install_unlocked && !d.master_unlocked {
+            let in_zone = lba < PROTECT_ZONE
+                || (d.sectors > PROTECT_ZONE && lba >= d.sectors - PROTECT_ZONE);
+            if needs_unlock(d) || in_zone {
+                return -6;
+            }
         }
     }
     raw_write(d, lba, buf)
@@ -638,12 +925,44 @@ pub extern "C" fn rust_disk_install(name: *const core::ffi::c_char, yes: i32) ->
     let rc = cstr_map(name, |s| match install(s, yes != 0) {
         Ok(true) => 0,
         Ok(false) => 1,
-        Err(_) => -1,
+        Err(e) => {
+            crate::console_ffi::print_color("install: ", crate::console_ffi::COLOR_YELLOW);
+            crate::console_ffi::println_color(e, crate::console_ffi::COLOR_YELLOW);
+            -1
+        }
     });
     if rc == 0 {
         crate::fs::remount_selected();
     }
     rc
+}
+
+/// Returns 0 wiped+formatted, 1 need YES, -1 error.
+#[no_mangle]
+pub extern "C" fn rust_disk_wipe(name: *const core::ffi::c_char, yes: i32) -> i32 {
+    cstr_map(name, |s| match wipe(s, yes != 0) {
+        Ok(true) => 0,
+        Ok(false) => 1,
+        Err(e) => {
+            crate::console_ffi::print_color("wipe: ", crate::console_ffi::COLOR_YELLOW);
+            crate::console_ffi::println_color(e, crate::console_ffi::COLOR_YELLOW);
+            -1
+        }
+    })
+}
+
+/// Returns 0 unlocked, 1 need YES, -1 error. Never invoked by boot or selftest.
+#[no_mangle]
+pub extern "C" fn rust_disk_master(name: *const core::ffi::c_char, yes: i32) -> i32 {
+    cstr_map(name, |s| match master(s, yes != 0) {
+        Ok(true) => 0,
+        Ok(false) => 1,
+        Err(e) => {
+            crate::console_ffi::print_color("master: ", crate::console_ffi::COLOR_YELLOW);
+            crate::console_ffi::println_color(e, crate::console_ffi::COLOR_YELLOW);
+            -1
+        }
+    })
 }
 
 /// Run `f` on the NUL-terminated disk name (max 31 bytes, valid UTF-8).
@@ -688,4 +1007,123 @@ pub extern "C" fn rust_disk_write(lba: u64, buf: *const u8, buflen: usize) -> i3
         return -2;
     }
     write_selected(lba, unsafe { core::slice::from_raw_parts(buf, buflen) }) as i32
+}
+
+/// Automated install selftest — compiled only with `--features qemu-install-selftest`.
+/// QEMU USB/virtio only; never Internal/NVMe; never linked into a flashable kernel.
+#[cfg(feature = "qemu-install-selftest")]
+fn running_under_hypervisor() -> bool {
+    let r = unsafe { core::arch::x86_64::__cpuid(1) };
+    (r.ecx & (1 << 31)) != 0
+}
+
+#[cfg(feature = "qemu-install-selftest")]
+#[no_mangle]
+pub extern "C" fn rust_test_disk_install() -> i32 {
+    extern "C" {
+        fn boot_serial_putc(c: u8);
+    }
+    let fail = || {
+        unsafe { boot_serial_putc(b'i') };
+        -1
+    };
+    if !running_under_hypervisor() {
+        crate::console_ffi::println_color(
+            "install-selftest: refused (not a VM)",
+            crate::console_ffi::COLOR_YELLOW,
+        );
+        return fail();
+    }
+
+    let t = table();
+    let n = t.len();
+    let mut source = usize::MAX;
+    let mut target = usize::MAX;
+
+    /* Find a source that already has the loader (boot ESP / Popcorn stick). */
+    let prev = SELECTED.load(Ordering::Acquire);
+    for i in 0..n {
+        if matches!(t[i].backend, Backend::Stub | Backend::Ram) {
+            continue;
+        }
+        if is_internal_disk(&t[i]) {
+            continue;
+        }
+        SELECTED.store(i, Ordering::Release);
+        crate::fs::fat32::unmount();
+        if crate::fs::fat32::mount_or_format().is_ok() && crate::fs::fat32::has_boot_loader() {
+            source = i;
+            break;
+        }
+    }
+    if source == usize::MAX {
+        SELECTED.store(prev, Ordering::Release);
+        crate::fs::fat32::unmount();
+        return fail();
+    }
+
+    /* USB/virtio only, never Internal, never the live boot source. */
+    for i in 0..n {
+        if i == source || is_internal_disk(&t[i]) {
+            continue;
+        }
+        if !matches!(t[i].backend, Backend::UsbMsc(_) | Backend::Virtio(_)) {
+            continue;
+        }
+        if t[i].sectors < 68_000 {
+            continue;
+        }
+        target = i;
+        break;
+    }
+    if target == usize::MAX {
+        SELECTED.store(prev, Ordering::Release);
+        crate::fs::fat32::unmount();
+        crate::console_ffi::println_color(
+            "install-selftest: no USB/virtio target (refusing NVMe fallback)",
+            crate::console_ffi::COLOR_YELLOW,
+        );
+        return fail();
+    }
+
+    let name = t[target].name;
+    SELECTED.store(prev, Ordering::Release);
+    crate::fs::fat32::unmount();
+
+    crate::console_ffi::print_color(
+        "install-selftest: target=",
+        crate::console_ffi::COLOR_YELLOW,
+    );
+    crate::console_ffi::println_color(name, crate::console_ffi::COLOR_YELLOW);
+
+    PENDING_INSTALL.store(target, Ordering::Release);
+    match install(name, true) {
+        Ok(true) => {}
+        _ => return fail(),
+    }
+
+    crate::fs::fat32::unmount();
+    if crate::fs::fat32::mount_or_format().is_err() {
+        return fail();
+    }
+    let efi_ok = crate::fs::fat32::read_binary(&["EFI", "BOOT"], "BOOTX64.EFI")
+        .map(|v| v.len() > 1000)
+        .unwrap_or(false);
+    let kern_ok = crate::fs::fat32::read_binary(&["BOOT"], "KERNEL")
+        .map(|v| v.len() > 100_000)
+        .unwrap_or(false);
+    if efi_ok && kern_ok {
+        unsafe { boot_serial_putc(b'I') };
+        crate::console_ffi::println_color(
+            "install-selftest: PASS",
+            crate::console_ffi::COLOR_LIGHT_GREEN,
+        );
+        0
+    } else {
+        crate::console_ffi::println_color(
+            "install-selftest: FAIL verify",
+            crate::console_ffi::COLOR_YELLOW,
+        );
+        fail()
+    }
 }

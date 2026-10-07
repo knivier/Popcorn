@@ -16,12 +16,30 @@ build_uefi_img() {
   [[ -f "$KERNEL_OUT" ]] || die "Build kernel first: ./scripts/core.sh build"
   [[ -f "$UEFI_OUT" ]] || die "Build UEFI loader first: ./scripts/core.sh uefi"
 
+  if [[ "${POPCORN_CFLAGS:-}" == *POPCORN_TEST_INSTALL* ]]; then
+    case "$(basename "$IMG_OUT")" in
+      UNSAFE-*) ;;
+      *)
+        die "REFUSING to write auto-install kernel into $(basename "$IMG_OUT") — use target/UNSAFE/UNSAFE-*.img"
+        ;;
+    esac
+  else
+    if grep -aE -q 'install-selftest|rust_test_disk_install' "$KERNEL_OUT"; then
+      die "REFUSING img: kernel still contains auto-install selftest"
+    fi
+  fi
+
   local stage
+  mkdir -p "$(dirname "$IMG_OUT")"
   stage="$(mktemp -d)"
   uefi_stage_layout "$stage"
   populate_fat_image "$IMG_OUT" "$stage" "$IMG_SIZE_MB"
   rm -rf "$stage"
 
-  log SUCCESS "UEFI disk image: $IMG_OUT"
-  log INFO "Flash with Balena Etcher (use the .img file, not the .iso)."
+  if [[ "${POPCORN_CFLAGS:-}" == *POPCORN_TEST_INSTALL* ]]; then
+    log WARN "UNSAFE image (QEMU auto-install): $IMG_OUT — do not flash"
+  else
+    log SUCCESS "UEFI disk image: $IMG_OUT"
+    log INFO "Flash ONLY this file with Balena Etcher (never target/UNSAFE/*)."
+  fi
 }

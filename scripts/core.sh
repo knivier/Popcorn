@@ -42,6 +42,7 @@ Run:
 
 Test:
   test-uefi   QEMU smoke: UEFI img + GRUB ISO + #PF dump
+  test-install QEMU-only auto-install (never flash the test img; rebuilds a safe img after)
   test-pf     Rebuild with POPCORN_TEST_PF; expect #PF COM1 dump
 
 Other:
@@ -124,6 +125,25 @@ main() {
       check_kernel_dependencies
       build_all_uefi
       qemu_uefi_test_stability
+      ;;
+    test-install)
+      check_kernel_dependencies
+      log WARN "Auto-install kernel is QEMU-only. NEVER flash target/UNSAFE/*."
+      export POPCORN_CFLAGS="${POPCORN_CFLAGS:-} -DPOPCORN_TEST_INSTALL"
+      mkdir -p "$POPCORN_TARGET/UNSAFE"
+      IMG_OUT="$POPCORN_TARGET/UNSAFE/UNSAFE-popcorn-uefi-test-install.img"
+      UEFI_IMG="$IMG_OUT"
+      restore_safe_img() {
+        unset POPCORN_CFLAGS
+        IMG_OUT="$POPCORN_TARGET/popcorn-uefi.img"
+        UEFI_IMG="$IMG_OUT"
+        log INFO "Rebuilding hardware-safe popcorn-uefi.img (no auto-install)"
+        build_all_uefi
+      }
+      trap restore_safe_img EXIT
+      rm -f "${USB_DATA_IMG:-$POPCORN_TARGET/UNSAFE/UNSAFE-qemu-usb-data.img}"
+      build_all_uefi
+      qemu_uefi_test_install
       ;;
     clean)
       clean_build_artifacts

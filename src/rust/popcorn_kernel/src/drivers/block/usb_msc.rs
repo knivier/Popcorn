@@ -2,6 +2,10 @@
 //! on top of the polled xHCI driver. 512-byte sectors, one sector per call.
 //!
 //! Layout of each device's 4 KiB DMA page: CBW @0, CSW @64, data @512.
+//!
+//! Timer IRQs must not run the scheduler mid-BOT (corrupts xHCI rings).
+//! Full CLI for the whole transfer also hung ThinkPad EC watchdogs during
+//! `disk install` kernel writes — use irq_quiet instead (EOI, no schedule).
 
 use alloc::vec::Vec;
 use core::ptr::addr_of_mut;
@@ -15,6 +19,27 @@ const OFF_CBW: u64 = 0;
 const OFF_CSW: u64 = 64;
 const OFF_DATA: u64 = 512;
 
+extern "C" {
+    fn irq_quiet_enter();
+    fn irq_quiet_leave();
+}
+
+/// Defer scheduler for one BOT command; keep IF=1 so PIC/EOI still run.
+struct IrqQuietGuard;
+
+impl IrqQuietGuard {
+    fn new() -> Self {
+        unsafe { irq_quiet_enter() };
+        Self
+    }
+}
+
+impl Drop for IrqQuietGuard {
+    fn drop(&mut self) {
+        unsafe { irq_quiet_leave() };
+    }
+}
+
 struct Disk {
     /// Index of the device inside the xHCI MSC list.
     xi: usize,
@@ -23,6 +48,10 @@ struct Disk {
     /// Head of the disk is neither blank nor Popcorn-formatted (ESP / MBR / GPT /
     /// NTFS / ext4 ...): someone else's data, so the block layer locks it.
     boot_like: bool,
+    /// Valid Popcorn FAT32 OEM BPB on LBA 0.
+    ours: bool,
+    /// First CLASSIFY_SECTORS are all zero.
+    blank: bool,
 }
 
 /// Sectors scanned (from LBA 0) to decide whether a stick is blank.
@@ -40,6 +69,7 @@ fn be32(b: &[u8], o: usize) -> u32 {
 
 /// One BOT command. Data (if any) lives at the device's data offset.
 fn bot(xi: usize, tag: u32, cdb: &[u8], data_len: u32, data_in: bool) -> Result<(), &'static str> {
+    let _irq = IrqQuietGuard::new();
     let (virt, phys) = xhci::msc_io_buf(xi).ok_or("usb msc: no io buffer")?;
     if cdb.is_empty() || cdb.len() > 16 || data_len as usize > SECTOR {
         return Err("usb msc: bad command");
@@ -106,6 +136,8 @@ fn init_disk(xi: usize) -> Result<Disk, &'static str> {
         sectors: 0,
         tag: 0x504F_0000,
         boot_like: false,
+        ours: false,
+        blank: false,
     };
 
     /* INQUIRY: some devices want it first; result is not needed. */
@@ -148,16 +180,21 @@ fn init_disk(xi: usize) -> Result<Disk, &'static str> {
     }
     d.sectors = last as u64 + 1;
 
-    /* Classify: blank (all-zero head) or Popcorn-formatted FAT32 = ours;
-     * anything else (boot stick, NTFS, ext4, GPT, ...) is foreign. */
+    /* Classify: blank / Popcorn / foreign. Read failures are foreign-safe
+     * (lock the stick) rather than panicking the probe. */
     let mut s = [0u8; SECTOR];
     let mut blank = true;
     for lba in 0..CLASSIFY_SECTORS.min(d.sectors) {
-        rw10(&mut d, false, lba)?;
+        if rw10(&mut d, false, lba).is_err() {
+            blank = false;
+            d.boot_like = true;
+            break;
+        }
         unsafe { core::ptr::copy_nonoverlapping(data_ptr(xi).ok_or("usb msc: no buf")?, s.as_mut_ptr(), SECTOR) };
         if lba == 0 {
             let ours = s[510] == 0x55 && s[511] == 0xAA && &s[3..11] == b"POPCORN ";
             if ours {
+                d.ours = true;
                 blank = false;
                 break;
             }
@@ -168,8 +205,10 @@ fn init_disk(xi: usize) -> Result<Disk, &'static str> {
             break;
         }
     }
+    d.blank = blank;
     if blank {
         d.boot_like = false;
+        d.ours = false;
     }
     Ok(d)
 }
@@ -201,6 +240,14 @@ pub fn capacity(idx: usize) -> Option<(u64, u32)> {
 
 pub fn is_boot_like(idx: usize) -> bool {
     disks().get(idx).map_or(false, |d| d.boot_like)
+}
+
+pub fn is_ours(idx: usize) -> bool {
+    disks().get(idx).map_or(false, |d| d.ours)
+}
+
+pub fn is_blank(idx: usize) -> bool {
+    disks().get(idx).map_or(false, |d| d.blank)
 }
 
 pub fn read(idx: usize, lba: u64, buf: &mut [u8]) -> i64 {

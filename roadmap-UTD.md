@@ -165,18 +165,20 @@ Do this before expanding storage.
 
 ## 2.1 PIC cleanup
 
-- [ ] Change PIC master ICW3 to `0x04`
-- [ ] Change PIC slave ICW3 to `0x02`
-- [ ] Add `io_wait()` between PIC initialization commands
-- [ ] Preserve existing IRQ masks where appropriate
-- [ ] Ensure IRQ0 can be independently masked/unmasked
-- [ ] Ensure IRQ1 can be independently masked/unmasked
-- [ ] When enabling IRQ8–15, automatically unmask master IRQ2
-- [ ] Add helper `pic_send_eoi(irq)`
-- [ ] Correct slave-before-master EOI ordering
-- [ ] Add spurious IRQ7 detection
-- [ ] Add spurious IRQ15 detection
-- [ ] Record unexpected IRQ count
+- [x] Change PIC master ICW3 to `0x04`
+- [x] Change PIC slave ICW3 to `0x02`
+- [x] Add `io_wait()` between PIC initialization commands
+- [x] Preserve existing IRQ masks where appropriate
+- [x] Ensure IRQ0 can be independently masked/unmasked
+- [x] Ensure IRQ1 can be independently masked/unmasked
+- [x] When enabling IRQ8–15, automatically unmask master IRQ2
+- [x] Add helper `pic_send_eoi(irq)`
+- [x] Correct slave-before-master EOI ordering
+- [x] Add spurious IRQ7 detection
+- [x] Add spurious IRQ15 detection
+- [x] Record unexpected IRQ count
+
+DONE!
 
 ## 2.2 PIT correction
 

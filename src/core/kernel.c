@@ -102,6 +102,18 @@ void kmain(void) {
                 if (uefi_input_poll(&keycode, &is_scancode)) {
                     if (!is_scancode) {
                         if (dolphin_is_active()) {
+                            /* UEFI delivers Unicode, not scancodes — feed the editor. */
+                            char ch = (char)keycode;
+                            if (ch == '\r' || ch == '\n') {
+                                dolphin_handle_key(0x1C); /* Enter */
+                            } else if (ch == 0x08 || ch == 0x7F) {
+                                dolphin_handle_key(0x0E); /* Backspace */
+                            } else if (ch == 0x1B) {
+                                dolphin_handle_key(0x01); /* Esc */
+                            } else if (ch >= 32 && ch < 127) {
+                                dolphin_insert_char(ch);
+                                dolphin_render();
+                            }
                             continue;
                         }
                         if (input_index < INPUT_MAX) {

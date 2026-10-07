@@ -102,7 +102,7 @@ static const char* available_commands[] = {
     "drive", "drive list", "init_drive", "drive info", "drive cmd", "dev", "dev list",
     "catalog", "catalog list",
     "disk", "disk list", "disk use", "disk info", "disk read", "disk write",
-    "install",
+    "disk install", "disk wipe", "disk master",
     "wrap", "wrap on", "wrap off",
     NULL
 };
@@ -189,7 +189,9 @@ void execute_command(const char *command) {
         console_println_color("Devices", CONSOLE_HEADER_COLOR);
         console_println("  drive list   init_drive <name>   dev list   catalog");
         console_println("  disk list | use <name> | info | read <lba> | write <lba> <data>");
-        console_println("  install <internal> | install <internal> YES");
+        console_println("  disk install <name> [YES]   USB/virtio (or NVMe after disk master)");
+        console_println("  disk wipe <name> [YES]      FAT32 format; NVMe needs disk master first");
+        console_println("  disk master <name> YES      unlock internal/NVMe writes this boot only");
         console_println_color("Editor / keys", CONSOLE_HEADER_COLOR);
         console_println("  dol -new|-open|-save|-help");
         console_println("  Up/Down scroll   Left/Right history");
@@ -217,10 +219,22 @@ void execute_command(const char *command) {
         console_print_color("Estimated seconds: ", CONSOLE_INFO_COLOR);
         console_println_color(buffer, CONSOLE_FG_COLOR);
     } else if (strcmp(command, "stop") == 0) {
+        /* Power-off where the host supports it; otherwise halt cleanly.
+         * Do NOT poke KBC 0x64/0xFE here — that is a reset pulse and on many
+         * UEFI laptops it freezes the machine without rebooting. */
         console_print_warning("Shutting down...");
-        write_port(0x64, 0xFE);  // Send reset command to keyboard controller
-        // If shutdown fails, halt the CPU
-        asm volatile("hlt");
+        console_present();
+        /* QEMU isa-debug exit / fw_cfg style poweroff ports */
+        asm volatile("outw %0, %1" : : "a"((unsigned short)0x2000), "Nd"((unsigned short)0x604));
+        asm volatile("outw %0, %1" : : "a"((unsigned short)0x2000), "Nd"((unsigned short)0xB004));
+        /* VirtualBox */
+        asm volatile("outw %0, %1" : : "a"((unsigned short)0x3400), "Nd"((unsigned short)0x4004));
+        console_println_color("Halted. It is safe to power off.", CONSOLE_INFO_COLOR);
+        console_present();
+        asm volatile("cli");
+        for (;;) {
+            asm volatile("hlt");
+        }
     } else if (strncmp(command, "write ", 6) == 0) {
         // Validate that there is content after "write "
         if (command[6] == '\0' || command[6] == ' ') {
@@ -782,10 +796,10 @@ void execute_command(const char *command) {
         if (rust_disk_use(command + 9) == 0) {
             console_print_success("disk selected");
         } else {
-            console_print_error("disk use failed (unknown or LOCKED — install <name> YES)");
+            console_print_error("disk use failed (unknown or LOCKED — disk install/wipe)");
         }
-    } else if (strncmp(command, "install ", 8) == 0) {
-        const char* p = command + 8;
+    } else if (strncmp(command, "disk master ", 12) == 0) {
+        const char* p = command + 12;
         char name[32];
         int ni = 0;
         while (*p && *p != ' ' && ni < (int)sizeof(name) - 1) {
@@ -795,19 +809,110 @@ void execute_command(const char *command) {
         while (*p == ' ') {
             p++;
         }
-        int yes = (strcmp(p, "YES") == 0);
+        int yes = (p[0] == 'Y' || p[0] == 'y')
+               && (p[1] == 'E' || p[1] == 'e')
+               && (p[2] == 'S' || p[2] == 's')
+               && (p[3] == '\0' || p[3] == ' ');
         if (name[0] == '\0') {
-            console_print_error("Usage: install <name> [YES]");
-        } else {
-            int rc = rust_disk_install(name, yes);
-            if (rc == 0) {
-                console_print_success("unlocked + selected (writes allowed)");
-            } else if (rc == 1) {
-                console_println_color("Armed. Now type: install <name> YES  (writes to this disk)", CONSOLE_INFO_COLOR);
+            console_print_error("Usage: disk master <name> YES");
+        } else if (!yes) {
+            int rc = rust_disk_master(name, 0);
+            if (rc == 1) {
+                console_println_color(
+                    "Will ENABLE writes to internal/NVMe until reboot (can destroy the OS disk).",
+                    CONSOLE_WARNING_COLOR);
+                console_println_color(
+                    "Confirm: disk master <name> YES",
+                    CONSOLE_INFO_COLOR);
             } else {
-                console_print_error("install failed (unknown disk, not an internal disk, or no driver)");
+                console_print_error("disk master failed (see master: reason above)");
+            }
+        } else {
+            console_print_warning("Unlocking internal/NVMe writes for this boot...");
+            int rc = rust_disk_master(name, 1);
+            if (rc == 0) {
+                console_print_success("master unlocked — writes allowed until reboot");
+            } else {
+                console_print_error("disk master failed (see master: reason above)");
             }
         }
+    } else if (strncmp(command, "disk install ", 13) == 0) {
+        const char* p = command + 13;
+        char name[32];
+        int ni = 0;
+        while (*p && *p != ' ' && ni < (int)sizeof(name) - 1) {
+            name[ni++] = *p++;
+        }
+        name[ni] = '\0';
+        while (*p == ' ') {
+            p++;
+        }
+        int yes = (p[0] == 'Y' || p[0] == 'y')
+               && (p[1] == 'E' || p[1] == 'e')
+               && (p[2] == 'S' || p[2] == 's')
+               && (p[3] == '\0' || p[3] == ' ');
+        if (name[0] == '\0') {
+            console_print_error("Usage: disk install <name> YES");
+        } else if (!yes) {
+            int rc = rust_disk_install(name, 0);
+            if (rc == 1) {
+                console_println_color(
+                    "Will ERASE target, format Popcorn FAT32, copy bootloader+kernel.",
+                    CONSOLE_WARNING_COLOR);
+                console_println_color(
+                    "Confirm: disk install <name> YES",
+                    CONSOLE_INFO_COLOR);
+            } else {
+                console_print_error("disk install failed (see install: reason above)");
+            }
+        } else {
+            console_print_warning("Installing Popcorn onto disk (ERASES target)...");
+            int rc = rust_disk_install(name, 1);
+            if (rc == 0) {
+                console_print_success("installed — reboot from this disk; dol/ls work on it now");
+            } else {
+                console_print_error("disk install failed (see install: reason above)");
+            }
+        }
+    } else if (strncmp(command, "disk wipe ", 10) == 0) {
+        const char* p = command + 10;
+        char name[32];
+        int ni = 0;
+        while (*p && *p != ' ' && ni < (int)sizeof(name) - 1) {
+            name[ni++] = *p++;
+        }
+        name[ni] = '\0';
+        while (*p == ' ') {
+            p++;
+        }
+        /* Accept YES / yes / Yes — trailing junk after YES is ignored. */
+        int yes = (p[0] == 'Y' || p[0] == 'y')
+               && (p[1] == 'E' || p[1] == 'e')
+               && (p[2] == 'S' || p[2] == 's')
+               && (p[3] == '\0' || p[3] == ' ');
+        if (name[0] == '\0') {
+            console_print_error("Usage: disk wipe <name> YES");
+        } else if (!yes) {
+            int rc = rust_disk_wipe(name, 0);
+            if (rc == 1) {
+                console_println_color(
+                    "Armed. Confirm with: disk wipe <name> YES",
+                    CONSOLE_INFO_COLOR);
+            } else {
+                console_print_error("disk wipe failed (see wipe: reason above)");
+            }
+        } else {
+            console_print_warning("Wiping + formatting (USB: may take ~10s)...");
+            int rc = rust_disk_wipe(name, 1);
+            if (rc == 0) {
+                console_print_success("wiped + FAT32 ready — try: ls   or   dol -new note");
+            } else {
+                console_print_error("disk wipe failed (see wipe: reason above)");
+            }
+        }
+    } else if (strncmp(command, "install ", 8) == 0) {
+        console_print_error("Moved: use  disk install <name> [YES]");
+        console_println_color("Wipe+format:  disk wipe <name> [YES]", CONSOLE_INFO_COLOR);
     } else if (strcmp(command, "disk info") == 0) {
         char buf[192];
         rust_disk_info(buf, sizeof(buf));
@@ -918,7 +1023,7 @@ void execute_command(const char *command) {
             if (ok) {
                 int rc = rust_disk_write((uint64_t)lba32, sec, sizeof(sec));
                 if (rc == -5) {
-                    console_print_error("disk LOCKED — install <name>, then install <name> YES");
+                    console_print_error("disk LOCKED — disk install <name> YES  (or disk wipe)");
                 } else if (rc == -6) {
                     console_print_error("refused: sector is in the MBR/GPT zone of a disk holding other data");
                 } else if (rc < 0) {

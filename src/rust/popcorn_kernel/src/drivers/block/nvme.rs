@@ -48,8 +48,7 @@ const SPIN_READY: u32 = 5_000_000;
 /// Completion-poll budget.
 const SPIN_CMD: u32 = 20_000_000;
 
-/// Defense in depth for the (Windows) system disk: the driver itself refuses
-/// NVM Write until the block layer's `install <name> YES` handshake flips this.
+/// Off at boot. Only `disk master <name> YES` may set this. Install/wipe/selftest never do.
 static WRITE_ENABLED: AtomicBool = AtomicBool::new(false);
 
 pub fn set_write_enabled(on: bool) {
@@ -426,7 +425,6 @@ fn do_io(idx: usize, write: bool, lba: u64, buf: *mut u8, len: usize) -> i64 {
     match submit(dev.bar, dev.stride, &mut dev.io, c) {
         Ok(_) => {}
         Err("nvme command timeout") => {
-            /* Queue state is unknown; refuse further I/O. */
             dev.dead = true;
             return -1;
         }

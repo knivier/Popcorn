@@ -51,12 +51,18 @@ build_rust_kernel() {
   local rust_dir="$POPCORN_SRC/rust"
   local out_dir="$POPCORN_TARGET/rust"
   local archive
+  local extra=()
   mkdir -p "$out_dir" "$OBJ_DIR"
   [[ -f "$rust_dir/Cargo.toml" ]] || die "Missing Rust workspace: $rust_dir/Cargo.toml"
+  if [[ "${POPCORN_CFLAGS:-}" == *POPCORN_TEST_INSTALL* ]]; then
+    extra=(--features qemu-install-selftest)
+    log WARN "Rust: qemu-install-selftest ON — this kernel must not be flashed"
+  fi
   log INFO "Building Rust crate popcorn_kernel (build-std, large code model)"
   (
     cd "$rust_dir"
-    CARGO_TARGET_DIR="$out_dir" cargo build --release --target x86_64-unknown-none
+    CARGO_TARGET_DIR="$out_dir" cargo build --release --target x86_64-unknown-none \
+      -p popcorn_kernel "${extra[@]}"
   ) >>"$BUILD_LOG" 2>&1 || die "cargo build failed — see $BUILD_LOG"
   archive="$out_dir/x86_64-unknown-none/release/libpopcorn_kernel.a"
   [[ -f "$archive" ]] || die "Missing $archive"
@@ -156,7 +162,18 @@ link_kernel() {
   "$LD" -m elf_x86_64 -T "$POPCORN_SRC/link.ld" -o "$KERNEL_OUT" "$@" >>"$BUILD_LOG" 2>&1 \
     || die "Link failed"
   [[ -f "$KERNEL_OUT" ]] || die "Kernel output missing: $KERNEL_OUT"
+  assert_kernel_not_auto_install
   log SUCCESS "Kernel built: $KERNEL_OUT"
+}
+
+# Flashable kernels must not contain the QEMU auto-install symbol or strings.
+assert_kernel_not_auto_install() {
+  if [[ "${POPCORN_CFLAGS:-}" == *POPCORN_TEST_INSTALL* ]]; then
+    return 0
+  fi
+  if grep -aE -q 'install-selftest|rust_test_disk_install' "$KERNEL_OUT"; then
+    die "REFUSING kernel: auto-install selftest is linked. Rebuild without POPCORN_TEST_INSTALL."
+  fi
 }
 
 build_kernel() {

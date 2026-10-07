@@ -117,36 +117,11 @@ void idt_init(void)
     uint64_t syscall_address = (uint64_t)(uintptr_t)syscall_handler_asm;
     idt_set_gate(0x80, syscall_address, 0xEEU, 0U);
 
-    /*     Ports
-    *    PIC1    PIC2
-    *Command 0x20    0xA0
-    *Data     0x21    0xA1
-    */
-
-    /* ICW1 - begin initialization */
-    write_port(0x20 , 0x11);
-    write_port(0xA0 , 0x11);
-
-    /* ICW2 - remap offset address of IDT */
-    /*
-    * In x86 protected mode, we have to remap the PICs beyond 0x20 because
-    * Intel has designated the first 32 interrupts as "reserved" for CPU exceptions
-    */
-    write_port(0x21 , 0x20);
-    write_port(0xA1 , 0x28);
-
-    /* ICW3 - setup cascading */
-    write_port(0x21 , 0x00);
-    write_port(0xA1 , 0x00);
-
-    /* ICW4 - environment info */
-    write_port(0x21 , 0x01);
-    write_port(0xA1 , 0x01);
-    /* Initialization finished */
-
-    /* mask interrupts */
-    write_port(0x21 , 0xff);
-    write_port(0xA1 , 0xff);
+    /* PIC remap: vectors 0x20/0x28, ICW3 cascade IRQ2 (was wrongly 0x00/0x00). */
+    pic_init_remap();
+    /* Early boot: keep all IRQs masked until timer/kbd explicitly enable. */
+    write_port(0x21, 0xff);
+    write_port(0xA1, 0xff);
 
     /* 64-bit: lidt must see a contiguous 2+8 byte block; avoid RDI/ABI issues by using "m". */
     {
