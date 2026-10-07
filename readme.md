@@ -2,7 +2,7 @@
 
 A modern, modular 64-bit kernel framework designed for learning operating system development.
 
-**Current Version: v0.5**
+**Current Version: v0.7**
 
 ## Quick Start
 
