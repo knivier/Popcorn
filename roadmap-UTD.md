@@ -77,10 +77,12 @@ Higher-level policy belongs in libraries, services, and personalities.
 
 Suggested names:
 
-- [ ] `*PopCore` — minimal privileged ExoCore
-- [ ] `*PopABI` — common syscall/application ABI
-- [ ] `*ExoABI` — raw low-level resource ABI
-- [ ] `*LibPop` — default userspace OS/library personality
+ABI's are pipelines for ring3 -> ring 0 access
+
+- [ ] `*Core` — minimal privileged ExoCore
+- [ ] `*SecurePipe` — common syscall/application ABI
+- [ ] `*DirectPipe` — raw low-level resource ABI
+- [ ] `*UserPipe` — default userspace OS/library personality
 - [ ] `*PopRealm` — protection/resource domain
 - [ ] `*PopTask` — schedulable execution object
 - [ ] `*PopSpace` — address-space resource
