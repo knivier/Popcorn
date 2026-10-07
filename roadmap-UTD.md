@@ -192,7 +192,8 @@ DONE!
 - [ ] Test UEFI polling mode
 - [ ] Verify both report similar uptime
 - [ ] Verify sleep(1000 ms) lasts approximately one second
-- [ ] Fetch RTC data using Port 0x70 / 0x71
+- [ ] Define constant version number to pull from as popcorn constant vcn
+- [x] Fetch RTC data using Port 0x70 / 0x71
 
 ## 2.3 Build flags
 
