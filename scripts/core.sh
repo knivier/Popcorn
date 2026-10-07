@@ -51,6 +51,7 @@ Other:
   help        This message
 
 Wrappers: ./scripts/macos.sh ./scripts/fedora.sh ./scripts/linux.sh
+Windows:  powershell -File scripts/win.ps1 all|run-uefi  (WSL, safe img only)
 GUIs:      ./scripts/gui-macos.py ./scripts/gui-fedora.py
            ./scripts/gui-linux.py ./scripts/gui-win.py
 EOF
@@ -60,6 +61,16 @@ build_all_uefi() {
   build_kernel
   build_uefi
   build_uefi_img
+}
+
+# True if QEMU would boot a stale kernel (missing artifacts, or src newer than target/kernel).
+uefi_artifacts_stale() {
+  local img="${UEFI_IMG:-$POPCORN_TARGET/popcorn-uefi.img}"
+  local efi="${UEFI_OUT:-$POPCORN_TARGET/BOOTX64.EFI}"
+  [[ -f "$KERNEL_OUT" && -f "$efi" && -f "$img" ]] || return 0
+  find "$POPCORN_SRC" \
+    \( -name '*.c' -o -name '*.h' -o -name '*.asm' -o -name '*.rs' -o -name '*.toml' -o -name '*.ld' \) \
+    -newer "$KERNEL_OUT" -print -quit 2>/dev/null | grep -q .
 }
 
 main() {
@@ -105,11 +116,13 @@ main() {
       ;;
     run-uefi)
       check_kernel_dependencies
-      if [[ ! -f "$KERNEL_OUT" || ! -f "${UEFI_OUT:-$POPCORN_TARGET/BOOTX64.EFI}" || ! -f "${UEFI_IMG:-$POPCORN_TARGET/popcorn-uefi.img}" ]]; then
+      if uefi_artifacts_stale; then
+        log INFO "Rebuilding UEFI image so source edits are in the guest"
         build_all_uefi
       else
-        log INFO "Using existing artifacts in $POPCORN_TARGET (run './scripts/core.sh all' to rebuild)"
+        log INFO "Using existing artifacts in $POPCORN_TARGET (run './scripts/core.sh all' to force rebuild)"
       fi
+      assert_kernel_not_auto_install
       qemu_uefi_run_interactive
       ;;
     test-uefi)

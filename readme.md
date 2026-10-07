@@ -33,13 +33,23 @@ Platform wrappers (dialog menu when run with no args):
 | `python3 scripts/gui-linux.py` | Linux (Tkinter) |
 | `python scripts/gui-win.py` | Windows via WSL2 (Tkinter) |
 
-On Windows, use `gui-win.py` or run the CLI inside WSL:
+On Windows, use `gui-win.py` or `scripts/win.ps1`. Both go through WSL, build the **hardware-safe** `target/popcorn-uefi.img` (no auto-install kernel), and run QEMU with **only files under `target/`** — never `PhysicalDrive` / the Windows NVMe.
+
+```powershell
+python scripts/gui-win.py
+powershell -File scripts/win.ps1 all
+powershell -File scripts/win.ps1 run-uefi
+```
+
+Or inside WSL:
 
 ```bash
 wsl
 cd /mnt/c/Users/<you>/Documents/Code/popcorn
 ./scripts/core.sh all && ./scripts/core.sh run-uefi
 ```
+
+Do not flash `target/UNSAFE/*`. Do not run `test-install` from Windows.
 
 ### Try the Features
 

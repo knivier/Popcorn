@@ -124,6 +124,11 @@ class PopcornTkGui:
         self.logs.add("INFO", f"Root: {ROOT_DIR}")
         self.logs.add("INFO", f"Toolchain: {self.tc.cc} + {self.tc.ld}" + (" (via WSL)" if self.via_wsl else ""))
         self.logs.add("INFO", self.install_hint)
+        if self.via_wsl:
+            self.logs.add(
+                "INFO",
+                "Windows: hardware-safe img only (no auto-install). QEMU uses target/ files — never the Windows disk.",
+            )
 
     def _set_status(self, text: str, ok: bool = True) -> None:
         self.status.config(text=text, fg=self.colors["ok"] if ok else self.colors["error"])
@@ -203,7 +208,11 @@ def install_hint_for(platform_name: str) -> str:
     if name in ("linux", "debian", "ubuntu"):
         return "Install: sudo apt install nasm clang lld qemu-system-x86 grub-pc-bin xorriso mtools ovmf dosfstools"
     if name in ("win", "windows"):
-        return "Uses WSL2. In Fedora/Ubuntu WSL: install nasm clang lld qemu-system-x86 edk2-ovmf (or ovmf) mtools."
+        return (
+            "Uses WSL2. In Fedora/Ubuntu WSL: install nasm clang lld qemu-system-x86 "
+            "edk2-ovmf (or ovmf) mtools rustup. Builds popcorn-uefi.img only (never auto-install). "
+            "QEMU never attaches the Windows drive."
+        )
     return "See readme.md for platform toolchain packages."
 
 

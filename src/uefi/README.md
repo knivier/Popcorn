@@ -27,3 +27,10 @@ QEMU (interactive):
 ```bash
 ./scripts/core.sh run-uefi
 ```
+
+Windows (WSL, hardware-safe image only; QEMU never attaches the Windows disk):
+
+```powershell
+powershell -File scripts/win.ps1 all
+powershell -File scripts/win.ps1 run-uefi
+```

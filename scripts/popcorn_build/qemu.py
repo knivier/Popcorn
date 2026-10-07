@@ -10,17 +10,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .log import LogBuffer
-from .paths import ROOT_DIR, TARGET_DIR
-from .runner import run_core
+from .paths import TARGET_DIR
+from .runner import ensure_shell_scripts_lf, run_core, wsl_core_cmd
 
 VNC_HOST = "127.0.0.1"
 VNC_PORT = 5900
-
-
-def _windows_path_to_wsl(path: Path) -> str:
-    resolved = path.resolve()
-    drive = resolved.drive.rstrip(":").lower()
-    return "/mnt/" + drive + resolved.as_posix()[2:]
 
 
 def find_vnc_viewer() -> Path | None:
@@ -125,14 +119,13 @@ class QemuRunner:
             )
 
         if self.via_wsl:
-            root_wsl = _windows_path_to_wsl(ROOT_DIR)
-            cmd = [
-                "wsl",
-                "bash",
-                "-lc",
-                f"cd '{root_wsl}' && export POPCORN_QEMU_DISPLAY=vnc && ./scripts/core.sh run-uefi",
-            ]
+            ensure_shell_scripts_lf(self.logs)
+            cmd = wsl_core_cmd(
+                "run-uefi",
+                extra_prefix="export POPCORN_QEMU_DISPLAY=vnc; ",
+            )
             self.logs.add("CMD", " ".join(cmd))
+            self.logs.add("INFO", "QEMU guest disks are files under target/ only — host NVMe/USB are never attached")
             self.logs.add("INFO", f"VNC will be at {VNC_HOST}:{VNC_PORT}")
             self.proc = subprocess.Popen(
                 cmd,

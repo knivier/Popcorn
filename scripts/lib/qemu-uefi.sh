@@ -36,14 +36,67 @@ EOF
   fi
 }
 
+# Guest disks must be regular files under $POPCORN_TARGET. Never PhysicalDrive,
+# never /dev/sd*, never the Windows NVMe.
+qemu_assert_guest_file() {
+  local path="$1" what="$2"
+  local abs target
+  if [[ -z "$path" ]]; then
+    die "REFUSING QEMU $what: empty path"
+  fi
+  case "$path" in
+    *PhysicalDrive*|*PHYSICALDRIVE*|\\\\.\\*|/dev/sd*|/dev/hd*|/dev/nvme*|/dev/vd*|/dev/xvd*|/dev/mapper/*|/dev/disk/*)
+      die "REFUSING QEMU $what: host disk passthrough is forbidden ($path)"
+      ;;
+  esac
+  if [[ -b "$path" || -c "$path" ]]; then
+    die "REFUSING QEMU $what: $path is a block/char device"
+  fi
+  if [[ ! -f "$path" ]]; then
+    die "REFUSING QEMU $what: not a regular file: $path"
+  fi
+  abs="$(cd "$(dirname "$path")" && pwd)/$(basename "$path")"
+  target="$(cd "$POPCORN_TARGET" && pwd)"
+  case "$abs" in
+    "$target"/*) ;;
+    *)
+      die "REFUSING QEMU $what: $abs is outside target/ (host disks are never attached)"
+      ;;
+  esac
+}
+
+qemu_assert_boot_img() {
+  [[ -f "$UEFI_IMG" ]] || die "Missing $UEFI_IMG — run: ./scripts/core.sh img"
+  qemu_assert_guest_file "$UEFI_IMG" "boot image"
+  case "$UEFI_IMG" in
+    *UNSAFE*)
+      if [[ "${POPCORN_CFLAGS:-}" == *POPCORN_TEST_INSTALL* ]]; then
+        log WARNING "QEMU test-install: UNSAFE image (scratch files under target/ only)"
+        return 0
+      fi
+      die "REFUSING to boot $UEFI_IMG. Interactive/flash path is target/popcorn-uefi.img"
+      ;;
+  esac
+  if grep -aE -q 'install-selftest|rust_test_disk_install' "$UEFI_IMG"; then
+    die "REFUSING to boot auto-install image $UEFI_IMG"
+  fi
+}
+
 # Data disks for the picker (all under target/UNSAFE — never flash):
 #   usb-storage (xHCI, UNSAFE-qemu-usb-data.img) → guest usb MSC
 #   virtio-blk → guest vda / usb0 stand-in
 #   NVMe       → guest nvme0 (Internal, writes impossible)
-qemu_uefi_data_disk_args() {
+# Call from the parent shell (not inside $()) so die() actually stops QEMU.
+qemu_prepare_scratch_disks() {
   ensure_raw_img "$DATA_IMG" 64 "USB/boot stand-in disk"
   ensure_raw_img "$USB_DATA_IMG" 64 "USB mass-storage data disk"
   ensure_raw_img "$INTERNAL_IMG" 128 "internal NVMe disk"
+  qemu_assert_guest_file "$DATA_IMG" "virtio scratch"
+  qemu_assert_guest_file "$USB_DATA_IMG" "usb-storage scratch"
+  qemu_assert_guest_file "$INTERNAL_IMG" "emulated NVMe scratch"
+}
+
+qemu_uefi_data_disk_args() {
   printf '%s\n' \
     -drive "if=none,id=popmsc,format=raw,file=$USB_DATA_IMG" \
     -device "usb-storage,bus=xhci.0,drive=popmsc" \
@@ -103,6 +156,9 @@ qemu_uefi_display_args() {
 qemu_uefi_usb_args() {
   local code="$1"
   local extra=("${@:2}")
+  qemu_assert_boot_img
+  qemu_assert_guest_file "$OVMF_VARS" "OVMF vars"
+  qemu_prepare_scratch_disks
   # shellcheck disable=SC2046
   qemu-system-x86_64 \
     -machine q35 -m 4096 -cpu max \
@@ -508,8 +564,12 @@ qemu_uefi_run_interactive() {
   [[ -f "$UEFI_IMG" ]] || die "Missing $UEFI_IMG — run: ./scripts/core.sh img"
 
   ensure_ovmf_vars "$OVMF_VARS"
+  qemu_assert_boot_img
+  qemu_assert_guest_file "$OVMF_VARS" "OVMF vars"
+  qemu_prepare_scratch_disks
   log INFO "QEMU UEFI USB boot (interactive window)"
   log INFO "Video: virtio-vga/ramfb (GOP). Serial boot tags still print here."
+  log INFO "Guest disks: files under target/ only (host Windows/NVMe never attached)"
 
   # shellcheck disable=SC2046
   exec qemu-system-x86_64 \

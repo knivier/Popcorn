@@ -2,8 +2,13 @@
 """
 Popcorn Windows GUI — builds/runs via WSL2.
 
+Always builds the hardware-safe UEFI image (no auto-install kernel).
+QEMU attaches only regular files under target/ — never PhysicalDrive / the
+Windows NVMe. test-install is blocked from this GUI.
+
 Run: python scripts/gui-win.py
-Requires: WSL2 distro with Popcorn toolchain (nasm, clang, lld, qemu, OVMF).
+CLI: powershell -File scripts/win.ps1 all
+Requires: WSL2 distro with nasm clang lld qemu-system-x86 ovmf/edk2-ovmf mtools rustup.
 """
 from __future__ import annotations
 

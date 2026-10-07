@@ -3,6 +3,7 @@ title Popcorn QEMU (VNC)
 cd /d "%~dp0.."
 echo.
 echo  Popcorn UEFI via WSL + TigerVNC
+echo  Hardware-safe image only. QEMU uses target\ files — never the Windows disk.
 echo  VNC: 127.0.0.1:5900
 echo.
 
@@ -10,7 +11,7 @@ REM Kill any leftover guest so the port is free.
 wsl -e bash -lc "killall qemu-system-x86_64 2>/dev/null || true"
 
 REM Start QEMU in a new window (keeps serial output visible).
-start "Popcorn QEMU" wsl -e bash -lc "cd /mnt/c/Users/Knivier/Documents/Code/popcorn && export POPCORN_QEMU_DISPLAY=vnc && ./scripts/core.sh run-uefi"
+start "Popcorn QEMU" powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0win.ps1" run-uefi
 
 echo  Waiting for VNC on 127.0.0.1:5900 ...
 powershell -NoProfile -Command ^
