@@ -1,18 +1,14 @@
 """Shared Tkinter GUI for Fedora / Linux / Windows."""
 from __future__ import annotations
 
-import platform
-import subprocess
 import threading
 import tkinter as tk
 from tkinter import messagebox, scrolledtext
 from typing import Callable
 
-from .builder import KernelBuilder
-from .iso import IsoBuilder
 from .log import LogBuffer
 from .paths import ROOT_DIR, SRC_DIR, TARGET_DIR
-from .qemu import QemuConfig, QemuRunner
+from .qemu import QemuRunner
 from .runner import run_core
 from .toolchain import Toolchain, detect_toolchain
 
@@ -28,8 +24,8 @@ class PopcornTkGui:
         self.tc = detect_toolchain() or Toolchain(
             cc="clang", ld="ld.lld", nasm="nasm", qemu="qemu-system-x86_64", mkrescue=None
         )
-        self.builder = KernelBuilder(toolchain=self.tc, logs=self.logs, via_wsl=via_wsl)
-        self.iso = IsoBuilder(toolchain=self.tc, logs=self.logs, via_wsl=via_wsl)
+        # Every action goes through scripts/core.sh (run_core); the toolchain is
+        # only detected for the log label.
         self.qemu = QemuRunner(logs=self.logs, via_wsl=via_wsl)
 
         self.root = tk.Tk()
@@ -154,9 +150,11 @@ class PopcornTkGui:
         if self._busy:
             messagebox.showinfo("Busy", "A build/run is already in progress.")
             return
+        # Set on the Tk thread before spawning, so a second click can never
+        # pass the check while the worker is still starting.
+        self._busy = True
 
         def runner() -> None:
-            self._busy = True
             try:
                 fn()
             except Exception as e:
@@ -214,7 +212,3 @@ def install_hint_for(platform_name: str) -> str:
             "QEMU never attaches the Windows drive."
         )
     return "See readme.md for platform toolchain packages."
-
-
-def detect_via_wsl() -> bool:
-    return platform.system().lower() == "windows"

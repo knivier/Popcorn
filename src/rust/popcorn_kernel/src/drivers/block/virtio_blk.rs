@@ -1,16 +1,20 @@
 //! Legacy virtio-blk (PCI transitional) — up to 4 devices.
+//! Slot N is always PCI virtio-blk #N; a device that fails to probe leaves its
+//! slot empty (`capacity(N) == None`) so the other disks keep stable names.
 
-use alloc::boxed::Box;
 use core::sync::atomic::Ordering;
 
 use crate::drivers::bus::pci;
-use crate::drivers::dma;
+use crate::drivers::dma::{self, DmaBuffer};
 use crate::drivers::io::{inb, inl, inw, outb, outl, outw};
 
 extern "C" {
     fn alloc_pages(num_pages: usize, flags: u32) -> *mut u8;
+    fn free_pages(p: *mut u8, num_pages: usize);
 }
 const MEM_ALLOC_ZERO: u32 = 0x01;
+/// `MEM_ALLOC_DMA` in `src/includes/memory.h`: frames below 4 GiB.
+const MEM_ALLOC_DMA: u32 = 0x02;
 
 const VIRTIO_STATUS_ACKNOWLEDGE: u8 = 1;
 const VIRTIO_STATUS_DRIVER: u8 = 2;
@@ -63,7 +67,17 @@ struct VirtioBlk {
     used_off: usize,
     avail_idx: u16,
     last_used_idx: u16,
+    /// One DMA page reused by every request: header, data, status (REQ_*_OFF).
+    req: DmaBuffer,
+    /// A request timed out: the device may still own descriptors 0-2 and the
+    /// request page, so no further I/O is issued (same policy as nvme).
+    dead: bool,
 }
+
+/* Request page layout (one request in flight at a time). */
+const REQ_HDR_OFF: usize = 0;
+const REQ_DATA_OFF: usize = 16;
+const REQ_STATUS_OFF: usize = 16 + SECTOR_SIZE as usize;
 
 static mut DEVS: [Option<VirtioBlk>; MAX_VIRTIO_DISKS] = [None, None, None, None];
 
@@ -103,8 +117,9 @@ fn layout(qsz: u16) -> (usize, usize, usize) {
 
 fn probe_one(pci_n: usize, slot: usize) -> Result<(u64, u32), &'static str> {
     let addr = pci::find_virtio_blk_n(pci_n).ok_or("no virtio-blk")?;
-    pci::enable_bus_master(addr.bus, addr.slot, addr.func);
+    /* Check BAR0 first: a device we cannot drive is left with decode/BME off. */
     let iobase = pci::bar_io(addr.bus, addr.slot, addr.func, 0).ok_or("virtio BAR0 not I/O")?;
+    pci::enable_bus_master(addr.bus, addr.slot, addr.func);
 
     io_write8(iobase, REG_STATUS, 0);
     io_write8(iobase, REG_STATUS, VIRTIO_STATUS_ACKNOWLEDGE);
@@ -128,15 +143,27 @@ fn probe_one(pci_n: usize, slot: usize) -> Result<(u64, u32), &'static str> {
 
     let (avail_off, used_off, nbytes) = layout(qsz);
     let npages = (nbytes + 4095) / 4096;
-    let pages = unsafe { alloc_pages(npages, MEM_ALLOC_ZERO) };
+    /* Below 4 GiB like dma_alloc: the queue is device-visible memory. */
+    let pages = unsafe { alloc_pages(npages, MEM_ALLOC_ZERO | MEM_ALLOC_DMA) };
     if pages.is_null() {
         io_write8(iobase, REG_STATUS, VIRTIO_STATUS_FAILED);
         return Err("virtio queue OOM");
     }
     let phys = dma::virt_to_phys(pages as u64);
     if (phys & 0xFFF) != 0 {
+        io_write8(iobase, REG_STATUS, VIRTIO_STATUS_FAILED);
+        unsafe { free_pages(pages, npages) };
         return Err("queue not page aligned");
     }
+    /* Per-device request page, allocated before the device learns the queue. */
+    let req = match dma::dma_alloc(4096) {
+        Some(b) => b,
+        None => {
+            io_write8(iobase, REG_STATUS, VIRTIO_STATUS_FAILED);
+            unsafe { free_pages(pages, npages) };
+            return Err("virtio request buffer OOM");
+        }
+    };
     io_write32(iobase, REG_QUEUE_PFN, (phys >> 12) as u32);
     io_write8(
         iobase,
@@ -155,19 +182,24 @@ fn probe_one(pci_n: usize, slot: usize) -> Result<(u64, u32), &'static str> {
             used_off,
             avail_idx: 0,
             last_used_idx: 0,
+            req,
+            dead: false,
         });
     }
     Ok((capacity, SECTOR_SIZE))
 }
 
-/// Probe all legacy virtio-blk devices; returns count.
+/// Probe all legacy virtio-blk devices; returns how many came up.
+/// Slots may be sparse (a bad device does not hide the ones after it), so
+/// callers must walk `0..MAX_VIRTIO_DISKS` and check `capacity(i)`.
 pub fn probe_all() -> usize {
     let mut n = 0usize;
     for i in 0..MAX_VIRTIO_DISKS {
+        if pci::find_virtio_blk_n(i).is_none() {
+            break; /* no more virtio-blk functions on the bus */
+        }
         if probe_one(i, i).is_ok() {
             n += 1;
-        } else {
-            break;
         }
     }
     n
@@ -187,36 +219,38 @@ fn do_io(idx: usize, is_write: bool, lba: u64, buf: &mut [u8]) -> i64 {
             None => return -1,
         }
     };
+    if dev.dead {
+        return -1;
+    }
     if lba >= dev.capacity {
         return -2;
     }
 
-    #[repr(C)]
-    struct ReqBuf {
-        hdr: BlkReqHdr,
-        data: [u8; 512],
-        status: u8,
-    }
-    let mut req = Box::new(ReqBuf {
-        hdr: BlkReqHdr {
-            type_: if is_write {
-                VIRTIO_BLK_T_OUT
-            } else {
-                VIRTIO_BLK_T_IN
-            },
-            reserved: 0,
-            sector: lba,
-        },
-        data: [0u8; 512],
-        status: 0xFF,
-    });
-    if is_write {
-        req.data.copy_from_slice(&buf[..512]);
-    }
+    let req_virt = dev.req.virt as usize;
+    let req_phys = dev.req.phys + REQ_HDR_OFF as u64;
+    let data_phys = dev.req.phys + REQ_DATA_OFF as u64;
+    let status_phys = dev.req.phys + REQ_STATUS_OFF as u64;
+    let data_ptr = (req_virt + REQ_DATA_OFF) as *mut u8;
+    let status_ptr = (req_virt + REQ_STATUS_OFF) as *mut u8;
 
-    let req_phys = dma::virt_to_phys(req.as_ref() as *const ReqBuf as u64);
-    let data_phys = req_phys + 16;
-    let status_phys = data_phys + 512;
+    unsafe {
+        core::ptr::write_volatile(
+            (req_virt + REQ_HDR_OFF) as *mut BlkReqHdr,
+            BlkReqHdr {
+                type_: if is_write {
+                    VIRTIO_BLK_T_OUT
+                } else {
+                    VIRTIO_BLK_T_IN
+                },
+                reserved: 0,
+                sector: lba,
+            },
+        );
+        if is_write {
+            core::ptr::copy_nonoverlapping(buf.as_ptr(), data_ptr, SECTOR_SIZE as usize);
+        }
+        core::ptr::write_volatile(status_ptr, 0xFF);
+    }
 
     unsafe {
         let base = dev.queue_pages as usize;
@@ -262,19 +296,27 @@ fn do_io(idx: usize, is_write: bool, lba: u64, buf: &mut [u8]) -> i64 {
             core::hint::spin_loop();
         }
         if !done {
-            /* The device may still DMA into `req` later: leak it rather than
-             * hand the page back to the allocator. */
-            core::mem::forget(req);
+            /* The device still owns descriptors 0-2 and may DMA into the request
+             * page later. Reusing either would hand it a half-rewritten request
+             * and shift every later completion by one, so stop all I/O. The
+             * request page is never freed. */
+            dev.dead = true;
+            crate::console_ffi::println_color(
+                "virtio-blk: request timeout, disk disabled",
+                crate::console_ffi::COLOR_YELLOW,
+            );
             return -1;
         }
     }
 
     /* Written by the device via DMA — read volatile, never cache. */
-    if unsafe { core::ptr::read_volatile(&req.status) } != 0 {
+    if unsafe { core::ptr::read_volatile(status_ptr) } != 0 {
         return -1;
     }
     if !is_write {
-        buf[..512].copy_from_slice(&req.data);
+        unsafe {
+            core::ptr::copy_nonoverlapping(data_ptr, buf.as_mut_ptr(), SECTOR_SIZE as usize);
+        }
     }
     SECTOR_SIZE as i64
 }

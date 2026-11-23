@@ -10,14 +10,34 @@ param(
 $ErrorActionPreference = "Stop"
 $Repo = Split-Path -Parent $PSScriptRoot
 
+# Normalize first, then check: the value checked must be exactly what reaches
+# core.sh, or "test-install." would slip past the block and be stripped to
+# "test-install" afterwards.
+$safeCmd = ($Command -replace '[^a-zA-Z0-9_-]', '').ToLowerInvariant()
+if ([string]::IsNullOrWhiteSpace($safeCmd)) {
+    $safeCmd = "help"
+}
+
 $blocked = @("test-install")
-if ($blocked -contains $Command.ToLowerInvariant()) {
+if ($blocked -contains $safeCmd) {
     Write-Error @"
 Blocked on Windows: $Command
 That command builds an auto-install kernel. It must never be flashed.
 QEMU on this path only uses regular files under target\ — never the Windows disk.
 If you need the QEMU selftest, run it inside WSL: ./scripts/core.sh test-install
 "@
+    exit 2
+}
+
+# Allow-list: anything else (including future core.sh commands) is refused here.
+$allowed = @(
+    "build", "uefi", "img", "iso", "iso-uefi", "all",
+    "run", "run-uefi", "stop",
+    "test-uefi", "test-uefi-stability", "test-pf",
+    "clean", "logs", "help"
+)
+if ($allowed -notcontains $safeCmd) {
+    Write-Error "Unsupported command on Windows: $Command (allowed: $($allowed -join ', '))"
     exit 2
 }
 
@@ -43,11 +63,6 @@ if ($full -notmatch '^([A-Za-z]):\\(.*)$') {
     exit 1
 }
 $wslRoot = "/mnt/$($Matches[1].ToLowerInvariant())/$($Matches[2].Replace('\','/'))"
-
-$safeCmd = $Command -replace '[^a-zA-Z0-9_-]', ''
-if ([string]::IsNullOrWhiteSpace($safeCmd)) {
-    $safeCmd = "help"
-}
 
 $extra = ""
 if ($safeCmd -eq "run-uefi") {

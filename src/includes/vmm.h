@@ -35,8 +35,6 @@ uint64_t vmm_alloc_pml4(void);
 /* Free a private PML4 page only (never frees shared PDPT/PD). No-op if master. */
 void vmm_free_pml4(uint64_t pml4_phys, uint64_t kernel_master_pml4_phys);
 
-int vmm_map_kernel_region(uint64_t pml4_phys);
-
 /*
  * Build a task root from master: share identity + kernel half; clear PML4[1..255].
  */

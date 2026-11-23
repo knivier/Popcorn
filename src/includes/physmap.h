@@ -27,9 +27,6 @@
 #define PMM_TRACK_BYTES       ((uint64_t)PMM_TRACK_GIB << 30)
 #define PMM_MAX_4K_FRAMES     (PMM_TRACK_BYTES / 4096ull)
 
-/* Number of 1 GiB PDPT slots needed for the identity / direct map. */
-#define VMM_PDPT_SLOTS        VMM_IDENTITY_GIB
-
 static inline void* phys_to_virt(uint64_t phys) {
     return (void*)(uintptr_t)(VMM_DIRECT_MAP_BASE + phys);
 }

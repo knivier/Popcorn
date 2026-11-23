@@ -1,5 +1,4 @@
 #include "../includes/kbd.h"
-#include "../includes/keyboard_queue.h"
 #include "../includes/keyboard_map.h"
 #include "../includes/irq.h"
 #include "../includes/driver_abi.h"
@@ -71,7 +70,7 @@ static bool kbd_dev_read(uint8_t* out) {
     if (!out) {
         return false;
     }
-    rust_kbd_poll();
+    rust_kbd_poll(); /* masks IRQs around the 8042 read + push, so it can't race IRQ1 */
     dev = kbd_dev();
     if (!dev || !dev->ops || !dev->ops->read) {
         return rust_kbd_pop(out) != 0;
@@ -81,8 +80,10 @@ static bool kbd_dev_read(uint8_t* out) {
 
 void kb_init(void)
 {
-    (void)init_drive("kbd");
-    irq_enable(1);
+    /* Probe fails when no 8042 answers (port 0x64 floats to 0xFF); leave IRQ1 masked then. */
+    if (init_drive("kbd") == 0) {
+        irq_enable(1);
+    }
 }
 
 void keyboard_poll_ps2(void) {

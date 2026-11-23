@@ -113,11 +113,11 @@ Do this before expanding storage.
 
 - [ ] Select a disposable USB/storage target
 - [ ] Confirm correct physical device is selected
-- [ ] Print selected device identifier
+- [x] Print selected device identifier
 - [ ] Print block size
-- [ ] Print total block count
-- [ ] Print whether device is writable
-- [ ] Print whether write lock is active
+- [x] Print total block count
+- [x] Print whether device is writable
+- [x] Print whether write lock is active
 - [ ] Print requested LBA before every test write
 - [ ] Print requested sector count
 - [ ] Print buffer physical address
@@ -184,9 +184,9 @@ DONE!
 
 ## 2.2 PIT correction
 
-- [ ] Define exactly what one `global_timer.tick` means
-- [ ] Keep that meaning identical in IRQ and polling mode
-- [ ] Fix polling code so PIT decrements are not treated as timer periods
+- [x] Define exactly what one `global_timer.tick` means (one PIT period = `pit_divisor` input clocks, PIT mode 2; `src/core/timer.c`)
+- [x] Keep that meaning identical in IRQ and polling mode
+- [x] Fix polling code so PIT decrements are not treated as timer periods
 - [ ] Verify 100 Hz means approximately 100 ticks per real second
 - [ ] Measure 10-second timer interval
 - [ ] Compare timer result with an external clock
@@ -199,10 +199,10 @@ DONE!
 
 ## 2.3 Build flags
 
-- [ ] Verify all interruptible x86-64 kernel C code uses `-mno-red-zone`
-- [ ] Verify freestanding compiler flags
-- [ ] Verify stack protector policy
-- [ ] Verify no userspace libc assumptions leak into kernel build
+- [x] Verify all interruptible x86-64 kernel C code uses `-mno-red-zone`
+- [x] Verify freestanding compiler flags
+- [x] Verify stack protector policy
+- [x] Verify no userspace libc assumptions leak into kernel build
 - [ ] Document required ABI flags
 
 ---
@@ -251,17 +251,17 @@ Name suggestion:
 
 ## 3.2 Common ASM interrupt wrapper
 
-- [ ] Save all GPRs in one consistent order
-- [ ] Normalize exception error-code layout
-- [ ] Push fake error code for exceptions without CPU error code
-- [ ] Push vector number
-- [ ] Execute `cld`
-- [ ] Align stack correctly before C calls
-- [ ] Pass `*PopFrame*` to C
-- [ ] Restore original stack exactly
-- [ ] Restore GPRs
+- [x] Save all GPRs in one consistent order
+- [x] Normalize exception error-code layout
+- [x] Push fake error code for exceptions without CPU error code
+- [x] Push vector number (exceptions push the vector; IRQ stubs push the ISA IRQ number)
+- [x] Execute `cld`
+- [x] Align stack correctly before C calls
+- [ ] Pass `*PopFrame*` to C (exceptions pass `exc_frame_t*`; IRQs pass only the IRQ number)
+- [x] Restore original stack exactly (IRQ and int 0x80 paths; exceptions halt)
+- [x] Restore GPRs
 - [ ] Remove normalized vector/error fields
-- [ ] Finish with `iretq`
+- [x] Finish with `iretq`
 - [ ] Verify no C code sees a malformed stack
 
 ## 3.3 Exceptions
@@ -288,15 +288,15 @@ Add dedicated handlers for:
 
 ## 3.4 Fault reporting
 
-- [ ] Print vector
-- [ ] Print error code
-- [ ] Print RIP
-- [ ] Print RSP
-- [ ] Print CS
-- [ ] Print SS where available
-- [ ] Print RFLAGS
-- [ ] Print CR2 for #PF
-- [ ] Decode #PF bits
+- [x] Print vector
+- [x] Print error code
+- [x] Print RIP
+- [x] Print RSP
+- [x] Print CS
+- [x] Print SS where available
+- [x] Print RFLAGS
+- [x] Print CR2 for #PF
+- [x] Decode #PF bits
 - [ ] Print CR3
 - [ ] Print current `*PopTask`
 - [ ] Print current `*PopRealm`
@@ -326,19 +326,21 @@ Stop treating all of these as one object:
 
 ## 4.2 Switch using interrupt frames
 
+> Implemented differently: preemption switches at a call boundary. `switch_to()` (`src/core/context_switch.asm`) keeps callee-saved registers on each task's own kernel stack. The IRQ stub (`irq_common` in `src/core/idt.asm`) keeps the full interrupted GPR+FXSAVE state there, and the preempted task resumes through its `iretq`. Frame-based switching is only needed once Ring-3 tasks exist (Phase 7).
+
 - [ ] Timer interrupt receives `*PopFrame`
 - [ ] Save interrupted frame into current task
-- [ ] Scheduler chooses next task
+- [x] Scheduler chooses next task (`pick_next`)
 - [ ] Load selected task's frame
-- [ ] Restore CR3 when address space differs
-- [ ] Return through `iretq`
-- [ ] Remove timer-preemption dependency on normal C `context_save()`
-- [ ] Keep cooperative yield behavior compatible
+- [x] Restore CR3 when address space differs (`task_switch`)
+- [x] Return through `iretq` (preempted task resumes via `irq_common`)
+- [x] Remove timer-preemption dependency on normal C `context_save()`
+- [x] Keep cooperative yield behavior compatible (`scheduler_yield` uses the same `schedule_locked` path)
 
 ## 4.3 Cooperative scheduling
 
-- [ ] Implement `yield`
-- [ ] Make `yield` enter same scheduler mechanism
+- [x] Implement `yield`
+- [x] Make `yield` enter same scheduler mechanism
 - [ ] Verify yielding task resumes exactly after yield
 - [ ] Verify callee-saved registers survive
 - [ ] Verify caller-saved registers behave according to ABI
@@ -348,7 +350,7 @@ Stop treating all of these as one object:
 
 Suggested custom name:
 
-- [ ] `*PopTaskEntry`
+- [x] `*PopTaskEntry` (implemented as `task_entry_trampoline` in context_switch.asm + `scheduler_task_entry`; exit path is `scheduler_exit_current`)
 
 Flow:
 
@@ -364,12 +366,12 @@ task_function(argument)
 
 Tasks:
 
-- [ ] Ensure C entry stack obeys SysV ABI
-- [ ] Provide task argument
-- [ ] Catch normal task return
-- [ ] Mark returned task dead
-- [ ] Reschedule
-- [ ] Never fall off stack into garbage
+- [x] Ensure C entry stack obeys SysV ABI
+- [ ] Provide task argument (passed in RSI but dropped with `(void)data`: tasks are `void(void)`)
+- [x] Catch normal task return
+- [x] Mark returned task dead
+- [x] Reschedule
+- [x] Never fall off stack into garbage
 
 ## 4.5 Scheduler stress tests
 
@@ -417,7 +419,7 @@ Suggested layout:
 - [ ] Define user selectors with RPL3
 - [ ] Define DPL3 user code descriptor
 - [ ] Define DPL3 user data descriptor
-- [ ] Reload segment registers appropriately
+- [x] Reload segment registers appropriately
 - [ ] Verify CS after GDT initialization
 - [ ] Verify TR after `ltr`
 
@@ -425,9 +427,9 @@ Suggested layout:
 
 - [ ] Create one clearly typed x86-64 TSS struct
 - [ ] Stop manually writing magic byte offsets where possible
-- [ ] Set `rsp0`
-- [ ] Keep dedicated #DF IST
-- [ ] Keep dedicated critical-fault IST
+- [x] Set `rsp0` (static boot `stack_top` only; per-task RSP0 update still open)
+- [x] Keep dedicated #DF IST (IST2, 4 KiB)
+- [x] Keep dedicated critical-fault IST (IST1, 4 KiB, used by #PF and #GP)
 - [ ] Add guard pages to IST stacks later
 - [ ] Document IST numbering
 - [ ] Verify `ltr` succeeds
@@ -490,9 +492,9 @@ For each `*PopTask`:
 
 - [ ] user stack base
 - [ ] user stack top
-- [ ] kernel stack base
-- [ ] kernel stack top
-- [ ] stack size
+- [x] kernel stack base (TaskStruct.stack_base; per-task 16 KiB slot from static g_task_stacks pool)
+- [x] kernel stack top (TaskStruct.stack_top, 16-byte aligned)
+- [x] stack size (TaskStruct.stack_size = TASK_STACK_SIZE)
 - [ ] guard page metadata
 
 During scheduling:
@@ -554,15 +556,15 @@ Do **not** involve ELF yet.
 
 ## 8.1 Repair `int 0x80`
 
-- [ ] Define exact syscall register convention
-- [ ] Define syscall number register
-- [ ] Define argument registers
-- [ ] Define return register
-- [ ] Define error convention
-- [ ] Define preserved registers
-- [ ] Define syscall stack frame
-- [ ] Match ASM frame exactly to C struct
-- [ ] Preserve return value in RAX
+- [x] Define exact syscall register convention
+- [x] Define syscall number register (RAX)
+- [x] Define argument registers (RDI, RSI, RDX, RCX, R8, R9; RCX replaces the suggested R10)
+- [x] Define return register (RAX)
+- [x] Define error convention (negative `SYSCALL_E*`)
+- [x] Define preserved registers (all except RAX)
+- [x] Define syscall stack frame (`syscall_context_t`)
+- [x] Match ASM frame exactly to C struct (`_Static_assert` in syscall.c)
+- [x] Preserve return value in RAX
 - [ ] Return to user with `iretq`
 
 Suggested ABI:
@@ -1282,7 +1284,7 @@ Do **not** allow arbitrary interrupt-controller programming from userspace.
 
 ## MMIO
 
-- [ ] identify PCI BAR
+- [x] identify PCI BAR (`drivers/bus/pci.rs` `bar_io` / `bar_mem`, incl. 64-bit sizing; used by virtio-blk, NVMe, xHCI)
 - [ ] create MMIO resource
 - [ ] create uncached/device mapping
 - [ ] map only allowed BAR into realm
@@ -1300,6 +1302,8 @@ Do **not** allow arbitrary interrupt-controller programming from userspace.
 # PHASE 24 — Userspace Drivers
 
 Do this selectively.
+
+> **Driver note (owner decisions, 2026-11-22):** near-term drivers stay in Ring 0 as in-kernel, resource-granted Rust drivers. They receive `MmioRegion`/`PortRange`/`IrqHandle`/`DmaPool` grants at probe and never use raw `inl`/`outl`/`phys_to_virt`, so a driver can later move to a Ring-3 realm by swapping the grant implementation. Every device class (block, net, usb, display) uses one submit → kick → complete queue. Interrupts are hybrid: LAPIC + MSI/MSI-X wakes the driver, it polls up to a budget, then re-arms, and pure polling remains the fallback (UEFI today). PCI devices do not use legacy PIC INTx. The network stack is hand-written no_std up to UDP, and TCP will be decided later. No framework code exists yet. Design: `docs/drivers/virtio-net-review.md` ("Locked decisions"). The Ring-3 driver plan below remains the long-term ExoCore target.
 
 ## Start easy
 
@@ -1544,8 +1548,8 @@ Suggested:
 
 # PHASE 31 — FPU/SIMD State
 
-- [ ] CPUID capabilities
-- [ ] enable SSE
+- [x] CPUID capabilities (`cpuid_get_features`, cpuinfo drive)
+- [x] enable SSE (GRUB path sets CR0/CR4; UEFI inherits from firmware; IRQ/syscall stubs `fxsave64`/`fxrstor64`)
 - [ ] enable XSAVE if available
 - [ ] allocate per-task extended-state area
 - [ ] save on switch
@@ -1573,7 +1577,7 @@ Suggested:
 - [ ] SMAP
 - [ ] UMIP if useful
 - [ ] CR0.WP
-- [ ] NXE
+- [x] NXE
 
 ## Syscalls
 
@@ -1774,12 +1778,12 @@ Implement:
 
 Keep current boot paths working.
 
-- [ ] GRUB path stays bootable
-- [ ] native UEFI path stays bootable
+- [x] GRUB path stays bootable
+- [x] native UEFI path stays bootable
 - [ ] kernel receives normalized boot-info structure
 - [ ] firmware-specific logic ends before core initialization
-- [ ] boot path selects framebuffer
-- [ ] boot path supplies memory map
+- [x] boot path selects framebuffer
+- [x] boot path supplies memory map
 - [ ] boot path supplies ACPI root
 - [ ] boot path supplies init package/device
 
@@ -2448,8 +2452,8 @@ Define v1.0 around **your architecture**.
 
 Suggested v1.0 requirements:
 
-- [ ] GRUB boot
-- [ ] native UEFI boot
+- [x] GRUB boot
+- [x] native UEFI boot
 - [ ] stable physical memory manager
 - [ ] stable VMM
 - [ ] stable preemptive scheduling
@@ -2485,14 +2489,14 @@ Do not look at all 72 phases every day.
 For **right now**, your queue is:
 
 - [ ] **1. Fix real-hardware storage writes**
-- [ ] **2. Fix PIC cascade configuration**
-- [ ] **3. Fix PIT polling time accounting**
-- [ ] **4. Verify `-mno-red-zone`**
+- [x] **2. Fix PIC cascade configuration**
+- [x] **3. Fix PIT polling time accounting** (code fixed: poll mode emits one tick per PIT period like IRQ0; runtime measurements in Phase 2.2 still open)
+- [x] **4. Verify `-mno-red-zone`**
 - [ ] **5. Build one normalized `*PopFrame` interrupt frame**
-- [ ] **6. Normalize ASM interrupt entry**
-- [ ] **7. Fix stack alignment before ASM → C calls**
+- [x] **6. Normalize ASM interrupt entry** (shared `PUSH_GPRS` + `cld`; exceptions use a uniform vector/error frame; the `*PopFrame` hand-off to C is still open, see item 5)
+- [x] **7. Fix stack alignment before ASM → C calls**
 - [ ] **8. Move timer preemption to interrupt-frame context switching**
-- [ ] **9. Add `*PopTaskEntry` trampoline**
+- [x] **9. Add `*PopTaskEntry` trampoline** (`task_entry_trampoline` → `scheduler_task_entry`; task data argument not yet passed to the task function)
 - [ ] **10. Stress-test kernel multitasking**
 - [ ] **11. Clean GDT selector definitions**
 - [ ] **12. Add user code/data descriptors**

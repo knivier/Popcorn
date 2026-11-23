@@ -1,4 +1,16 @@
 //! Framebuffer /dev/fb0 — full-bleed GOP text at native 8×16 glyphs.
+//!
+//! The GOP framebuffer is mapped uncached (boot_identity_uncache_range), so
+//! every store to it is a bus transaction and loads are slower still. To keep
+//! scrolling cheap on real hardware and under emulation:
+//!
+//! * Once the heap is up (`enable_shadow`), glyphs are rendered into a
+//!   write-back RAM shadow of the text area. Scrolling is a memmove inside the
+//!   shadow. `flush` pushes only changed pixel rows to the framebuffer with
+//!   wide (u64) stores; full-width rows are skipped when their hash matches
+//!   what was last pushed there. The framebuffer is never read back.
+//! * Before the heap exists, cells are rendered into a small stack buffer and
+//!   blitted one 8-pixel glyph row at a time (no per-byte stores).
 
 use super::font8x16::FONT8X16;
 
@@ -7,6 +19,9 @@ pub const FONT_H: u32 = 16;
 pub const MAX_COLS: u32 = 240;
 pub const MAX_ROWS: u32 = 70;
 const POPCORN_FB_BG_RGB: u32 = 0x001018;
+const MAX_TEXT_PX_ROWS: usize = (MAX_ROWS * FONT_H) as usize;
+/// Hash value meaning "framebuffer row content unknown" (hash_row never returns 0).
+const HASH_UNKNOWN: u64 = 0;
 
 static mut ACTIVE: bool = false;
 static mut BASE: usize = 0;
@@ -24,17 +39,22 @@ static mut COLS: u32 = 80;
 static mut ROWS: u32 = 25;
 static mut ORIGIN_X: u32 = 0;
 static mut ORIGIN_Y: u32 = 0;
-static mut SCALE: u8 = 1;
+
+/* Write-back shadow of the text area (COLS*8 x ROWS*16 pixels, fb pixel format). */
+static mut SHADOW: *mut u8 = core::ptr::null_mut();
+static mut SHADOW_BYTES: usize = 0;
+static mut SH_STRIDE: usize = 0;
+static mut SH_ROWS: usize = 0;
+/* Per text pixel row: dirty byte span [DMIN, DMAX) and hash of the fb row. */
+static mut DMIN: [u32; MAX_TEXT_PX_ROWS] = [u32::MAX; MAX_TEXT_PX_ROWS];
+static mut DMAX: [u32; MAX_TEXT_PX_ROWS] = [0; MAX_TEXT_PX_ROWS];
+static mut FB_HASH: [u64; MAX_TEXT_PX_ROWS] = [HASH_UNKNOWN; MAX_TEXT_PX_ROWS];
+static mut DIRTY_LO: usize = usize::MAX;
+static mut DIRTY_HI: usize = 0;
 
 extern "C" {
-    fn boot_fb_solid_fill(
-        base: *mut u8,
-        pitch: u32,
-        width: u32,
-        height: u32,
-        bytespp: u8,
-        rgb: u32,
-    );
+    /// kernel.asm low-identity PDPT (512 entries); only entry 0 is read here.
+    static page_table_l3: [u64; 512];
     fn boot_identity_uncache_range(phys: u64, len: u64);
 }
 
@@ -100,7 +120,12 @@ pub fn init_from_handoff(h: &FbHandoff) -> bool {
     }
     let bytespp = ((h.bpp as u32 + 7) / 8) as u8;
     let span = pitch as u64 * h.height as u64;
-    if h.addr + span > (512u64 << 30) {
+    /* Low identity map: 512 GiB of 1 GiB pages (UEFI path with PDPE1GB, PS set in
+     * page_table_l3[0]); otherwise the 2 MiB layout covers only 64 GiB (GRUB path,
+     * or UEFI on CPUs without PDPE1GB). Anything past that would be unmapped. */
+    let l3_0 = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(page_table_l3).cast::<u64>()) };
+    let mapped_top = if (l3_0 & 0x80) != 0 { 512u64 << 30 } else { 64u64 << 30 };
+    if h.addr.checked_add(span).map_or(true, |end| end > mapped_top) {
         return false;
     }
 
@@ -138,27 +163,22 @@ pub fn init_from_handoff(h: &FbHandoff) -> bool {
     true
 }
 
-fn cell_w() -> u32 {
-    FONT_W * unsafe { SCALE as u32 }
-}
-
-fn cell_h() -> u32 {
-    FONT_H * unsafe { SCALE as u32 }
-}
-
 fn compute_layout() {
     unsafe {
         /* Native 8×16 → ~160×45 on 720p / ~240×67 on 1080p. */
-        SCALE = 1;
         let cw = FONT_W;
         let ch = FONT_H;
+        /* Never lay out more cells than fit on screen (rows past HEIGHT would
+         * be clipped, hiding the status/heartbeat rows). The 320x200 handoff
+         * floor already guarantees >= 40 cols and >= 12 rows. Keep the fb even
+         * on tiny modes: UEFI-only machines have no VGA text to fall back to. */
         let mut c = WIDTH / cw;
         let mut r = HEIGHT / ch;
-        if c < 40 {
-            c = 40;
+        if c < 1 {
+            c = 1;
         }
-        if r < 15 {
-            r = 15;
+        if r < 3 {
+            r = 3;
         }
         if c > MAX_COLS {
             c = MAX_COLS;
@@ -172,6 +192,15 @@ fn compute_layout() {
         let text_h = r * ch;
         ORIGIN_X = if WIDTH > text_w { (WIDTH - text_w) / 2 } else { 0 };
         ORIGIN_Y = if HEIGHT > text_h { (HEIGHT - text_h) / 2 } else { 0 };
+        /* A shadow sized for another layout is unusable; drop back to direct
+         * drawing (the buffer is leaked; layouts do not change in practice). */
+        if !SHADOW.is_null() {
+            let stride = (c * cw) as usize * BYTESPP as usize;
+            let rows_px = (r * ch) as usize;
+            if stride != SH_STRIDE || rows_px != SH_ROWS {
+                SHADOW = core::ptr::null_mut();
+            }
+        }
     }
 }
 
@@ -192,51 +221,292 @@ fn pack(rgb: u32) -> u32 {
     }
 }
 
-fn put_pixel(x: u32, y: u32, pixel: u32) {
-    unsafe {
-        if BASE == 0 || x >= WIDTH || y >= HEIGHT {
-            return;
-        }
-        let p = (BASE as *mut u8)
-            .add((y as usize) * (PITCH as usize) + (x as usize) * (BYTESPP as usize));
-        for i in 0..BYTESPP as usize {
+/// Store one packed pixel (`bpp` bytes, little-endian) into cached memory.
+#[inline(always)]
+unsafe fn put_px(p: *mut u8, bpp: usize, pixel: u32) {
+    if bpp == 4 {
+        (p as *mut u32).write_unaligned(pixel);
+    } else {
+        for i in 0..bpp {
             *p.add(i) = (pixel >> (i * 8)) as u8;
         }
     }
 }
 
+/// Copy `len` bytes from cached RAM to the (uncached) framebuffer using the
+/// widest volatile stores the alignment allows. Never reads `dst`.
+unsafe fn blit(dst: *mut u8, src: *const u8, len: usize) {
+    let mix = (dst as usize) | (src as usize) | len;
+    if mix & 7 == 0 {
+        let d = dst as *mut u64;
+        let s = src as *const u64;
+        for i in 0..len / 8 {
+            core::ptr::write_volatile(d.add(i), *s.add(i));
+        }
+    } else if mix & 3 == 0 {
+        let d = dst as *mut u32;
+        let s = src as *const u32;
+        for i in 0..len / 4 {
+            core::ptr::write_volatile(d.add(i), *s.add(i));
+        }
+    } else {
+        for i in 0..len {
+            core::ptr::write_volatile(dst.add(i), *src.add(i));
+        }
+    }
+}
+
+/// Framebuffer address of text-area pixel (x, y) (text-area coordinates).
+unsafe fn fb_text_ptr(x: usize, y: usize) -> *mut u8 {
+    (BASE as *mut u8).add(
+        (ORIGIN_Y as usize + y) * PITCH as usize + (ORIGIN_X as usize + x) * BYTESPP as usize,
+    )
+}
+
+fn hash_row(p: *const u8, len: usize) -> u64 {
+    /* len is a multiple of 8 (text width is a multiple of 8 pixels) and the
+     * shadow is page aligned, so whole-word reads are in bounds and aligned. */
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    unsafe {
+        let w = p as *const u64;
+        for i in 0..len / 8 {
+            h = (h.rotate_left(5) ^ *w.add(i)).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    h | 1
+}
+
+fn shadow_on() -> bool {
+    unsafe { !SHADOW.is_null() }
+}
+
+unsafe fn mark_span(y: usize, x0: u32, x1: u32) {
+    if y >= SH_ROWS {
+        return;
+    }
+    if x0 < DMIN[y] {
+        DMIN[y] = x0;
+    }
+    if x1 > DMAX[y] {
+        DMAX[y] = x1;
+    }
+    if y < DIRTY_LO {
+        DIRTY_LO = y;
+    }
+    if y + 1 > DIRTY_HI {
+        DIRTY_HI = y + 1;
+    }
+}
+
+/// Allocate the write-back text shadow once the kernel heap is up. Returns
+/// true when the shadow is active. The caller must re-render every cell
+/// (the shadow starts as solid background).
+pub fn enable_shadow() -> bool {
+    if !is_active() {
+        return false;
+    }
+    if shadow_on() {
+        return true;
+    }
+    unsafe {
+        let stride = (COLS * FONT_W) as usize * BYTESPP as usize;
+        let rows_px = (ROWS * FONT_H) as usize;
+        if rows_px > MAX_TEXT_PX_ROWS || stride == 0 || stride % 8 != 0 {
+            return false;
+        }
+        let bytes = stride * rows_px;
+        let layout = match core::alloc::Layout::from_size_align(bytes, 4096) {
+            Ok(l) => l,
+            Err(_) => return false,
+        };
+        let p = alloc::alloc::alloc(layout);
+        if p.is_null() {
+            return false;
+        }
+        SH_STRIDE = stride;
+        SH_ROWS = rows_px;
+        SHADOW_BYTES = bytes;
+        SHADOW = p;
+        fill_shadow(pack(POPCORN_FB_BG_RGB));
+        for y in 0..MAX_TEXT_PX_ROWS {
+            DMIN[y] = u32::MAX;
+            DMAX[y] = 0;
+            FB_HASH[y] = HASH_UNKNOWN;
+        }
+        DIRTY_LO = usize::MAX;
+        DIRTY_HI = 0;
+    }
+    true
+}
+
+unsafe fn fill_shadow(pix: u32) {
+    if SHADOW.is_null() {
+        return;
+    }
+    let bpp = BYTESPP as usize;
+    let row0 = SHADOW;
+    let mut x = 0;
+    while x < SH_STRIDE {
+        put_px(row0.add(x), bpp, pix);
+        x += bpp;
+    }
+    for y in 1..SH_ROWS {
+        core::ptr::copy_nonoverlapping(row0, SHADOW.add(y * SH_STRIDE), SH_STRIDE);
+    }
+}
+
+/// Minimum TSC cycles between paced pushes (~5-20 ms at 1-4 GHz; no
+/// calibration needed). The window also grows to 4x the cost of the last
+/// push, so uncached fb writes stay under ~20% of a long output burst on
+/// slow framebuffers.
+const PUSH_WINDOW_TSC: u64 = 20_000_000;
+static mut LAST_PUSH_TSC: u64 = 0;
+static mut LAST_PUSH_COST: u64 = 0;
+
+fn has_dirty() -> bool {
+    unsafe { !SHADOW.is_null() && DIRTY_LO < DIRTY_HI }
+}
+
+/// Like `flush`, but coalesce bursts: if a push happened within the last
+/// window, leave the rows dirty for the next push (`flush` from the idle loop
+/// or `present`, or a later paced call). Each push to the uncached fb costs up
+/// to a full text area per scrolled line, so a 40-line command output becomes
+/// a couple of pushes instead of 40.
+pub fn flush_paced() {
+    if !has_dirty() {
+        return;
+    }
+    let now = unsafe { core::arch::x86_64::_rdtsc() };
+    unsafe {
+        let mut window = LAST_PUSH_COST.saturating_mul(4);
+        if window < PUSH_WINDOW_TSC {
+            window = PUSH_WINDOW_TSC;
+        }
+        if now.wrapping_sub(LAST_PUSH_TSC) < window {
+            return;
+        }
+    }
+    flush();
+}
+
+/// Push every changed shadow row to the framebuffer.
+pub fn flush() {
+    if has_dirty() {
+        unsafe {
+            let t0 = core::arch::x86_64::_rdtsc();
+            flush_rows();
+            LAST_PUSH_TSC = core::arch::x86_64::_rdtsc();
+            LAST_PUSH_COST = LAST_PUSH_TSC.wrapping_sub(t0);
+        }
+    }
+}
+
+fn flush_rows() {
+    if !is_active() || !shadow_on() {
+        return;
+    }
+    unsafe {
+        if DIRTY_LO >= DIRTY_HI {
+            return;
+        }
+        let full = SH_STRIDE as u32;
+        let hi = if DIRTY_HI > SH_ROWS { SH_ROWS } else { DIRTY_HI };
+        for y in DIRTY_LO..hi {
+            let (a, b) = (DMIN[y], DMAX[y]);
+            if a >= b {
+                continue;
+            }
+            DMIN[y] = u32::MAX;
+            DMAX[y] = 0;
+            let src = SHADOW.add(y * SH_STRIDE);
+            if a == 0 && b >= full {
+                let h = hash_row(src, SH_STRIDE);
+                if h != FB_HASH[y] {
+                    blit(fb_text_ptr(0, y), src, SH_STRIDE);
+                    FB_HASH[y] = h;
+                }
+            } else {
+                let b = if b > full { full } else { b };
+                blit(fb_text_ptr(0, y).add(a as usize), src.add(a as usize), (b - a) as usize);
+                FB_HASH[y] = HASH_UNKNOWN;
+            }
+        }
+        DIRTY_LO = usize::MAX;
+        DIRTY_HI = 0;
+    }
+}
+
+/// Scroll text rows [row0, row0+n) up by one cell row inside the shadow. The
+/// bottom row's pixels are left stale; the caller redraws its cells. Returns
+/// false when there is no shadow (caller falls back to redrawing cells).
+pub fn scroll_up(row0: u32, n: u32) -> bool {
+    if !is_active() || !shadow_on() || n < 2 || row0 + n > rows() {
+        return false;
+    }
+    unsafe {
+        let band = FONT_H as usize * SH_STRIDE;
+        let dst = SHADOW.add(row0 as usize * band);
+        core::ptr::copy(dst.add(band), dst, (n as usize - 1) * band);
+        let full = SH_STRIDE as u32;
+        let y0 = (row0 * FONT_H) as usize;
+        let y1 = ((row0 + n - 1) * FONT_H) as usize;
+        for y in y0..y1 {
+            mark_span(y, 0, full);
+        }
+    }
+    true
+}
+
+/// Fill the whole framebuffer with `rgb` (0xRRGGBB), packed for the active
+/// channel layout (RGB or BGR GOP, 15/16/24/32 bpp).
 pub fn paint_background(rgb: u32) {
     if !is_active() {
         return;
     }
+    let pix = pack(rgb);
     unsafe {
-        boot_fb_solid_fill(BASE as *mut u8, PITCH, WIDTH, HEIGHT, BYTESPP, rgb);
+        if BASE == 0 {
+            return;
+        }
+        let bpp = BYTESPP as usize;
+        /* Build one solid row in RAM, then blit it to every scanline. */
+        let mut line = [0u8; 64];
+        let mut i = 0;
+        while i + bpp <= 64 {
+            put_px(line.as_mut_ptr().add(i), bpp, pix);
+            i += bpp;
+        }
+        let chunk = (64 / bpp) * bpp; /* whole pixels per chunk */
+        let row_bytes = WIDTH as usize * bpp;
+        for y in 0..HEIGHT as usize {
+            let row = (BASE as *mut u8).add(y * PITCH as usize);
+            let mut off = 0;
+            while off < row_bytes {
+                let n = if row_bytes - off < chunk { row_bytes - off } else { chunk };
+                blit(row.add(off), line.as_ptr(), n);
+                off += n;
+            }
+        }
+        if shadow_on() {
+            fill_shadow(pix);
+            for y in 0..SH_ROWS {
+                DMIN[y] = u32::MAX;
+                DMAX[y] = 0;
+                FB_HASH[y] = HASH_UNKNOWN;
+            }
+            DIRTY_LO = usize::MAX;
+            DIRTY_HI = 0;
+        }
     }
 }
 
+/// Clear the text panel and margins to the console background. Panel and
+/// margins share one packed color, so a single full-screen fill covers both.
 pub fn fill_text_panel() {
     if !is_active() {
         return;
     }
     paint_background(POPCORN_FB_BG_RGB);
-    let pix = pack(POPCORN_FB_BG_RGB);
-    let cw = cell_w();
-    let ch = cell_h();
-    unsafe {
-        let x0 = ORIGIN_X;
-        let y0 = ORIGIN_Y;
-        let rw = COLS * cw;
-        let rh = ROWS * ch;
-        let mut y = y0;
-        while y < y0 + rh && y < HEIGHT {
-            let mut x = x0;
-            while x < x0 + rw && x < WIDTH {
-                put_pixel(x, y, pix);
-                x += 1;
-            }
-            y += 1;
-        }
-    }
 }
 
 pub fn relayout() {
@@ -247,6 +517,15 @@ pub fn relayout() {
     fill_text_panel();
 }
 
+/// Render one glyph row (8 pixels) into `dst` (cached memory).
+#[inline(always)]
+unsafe fn render_glyph_row(dst: *mut u8, bpp: usize, bits: u8, fgp: u32, bgp: u32) {
+    for col in 0..FONT_W as usize {
+        let px = if bits & (0x80u8 >> col) != 0 { fgp } else { bgp };
+        put_px(dst.add(col * bpp), bpp, px);
+    }
+}
+
 pub fn draw_cell(cx: u32, cy: u32, ch: u8, attr: u8) {
     if !is_active() || cx >= cols() || cy >= rows() {
         return;
@@ -254,28 +533,24 @@ pub fn draw_cell(cx: u32, cy: u32, ch: u8, attr: u8) {
     let fgp = pack(PALETTE[(attr & 0x0F) as usize]);
     let bgp = pack(PALETTE[((attr >> 4) & 0x07) as usize]);
     let glyph = &FONT8X16[(ch & 0x7F) as usize];
-    let cw = cell_w();
-    let chh = cell_h();
-    let scale = unsafe { SCALE as u32 };
-    let px0 = unsafe { ORIGIN_X } + cx * cw;
-    let py0 = unsafe { ORIGIN_Y } + cy * chh;
-    for dy in 0..chh {
-        for dx in 0..cw {
-            put_pixel(px0 + dx, py0 + dy, bgp);
-        }
-    }
-    for row in 0..FONT_H {
-        let bits = glyph[row as usize];
-        for col in 0..FONT_W {
-            if bits & (0x80u8 >> col) == 0 {
-                continue;
+    unsafe {
+        let bpp = BYTESPP as usize;
+        let row_bytes = FONT_W as usize * bpp;
+        let x0 = cx as usize * FONT_W as usize;
+        let y0 = cy as usize * FONT_H as usize;
+        if shadow_on() {
+            let xb = (x0 * bpp) as u32;
+            for row in 0..FONT_H as usize {
+                let dst = SHADOW.add((y0 + row) * SH_STRIDE + x0 * bpp);
+                render_glyph_row(dst, bpp, glyph[row], fgp, bgp);
+                mark_span(y0 + row, xb, xb + row_bytes as u32);
             }
-            let gx = px0 + col * scale;
-            let gy = py0 + row * scale;
-            for sy in 0..scale {
-                for sx in 0..scale {
-                    put_pixel(gx + sx, gy + sy, fgp);
-                }
+        } else {
+            let mut buf = [0u64; 4]; /* 8 px * up to 4 bytes */
+            let bp = buf.as_mut_ptr() as *mut u8;
+            for row in 0..FONT_H as usize {
+                render_glyph_row(bp, bpp, glyph[row], fgp, bgp);
+                blit(fb_text_ptr(x0, y0 + row), bp, row_bytes);
             }
         }
     }
@@ -286,14 +561,23 @@ pub fn draw_cursor(cx: u32, cy: u32, attr: u8, visible: bool) {
         return;
     }
     let fgp = pack(PALETTE[(attr & 0x0F) as usize]);
-    let cw = cell_w();
-    let chh = cell_h();
-    let px0 = unsafe { ORIGIN_X } + cx * cw;
-    let py0 = unsafe { ORIGIN_Y } + cy * chh;
-    for col in 0..cw {
-        put_pixel(px0 + col, py0 + chh - 1, fgp);
-        if chh > 1 {
-            put_pixel(px0 + col, py0 + chh - 2, fgp);
+    unsafe {
+        let bpp = BYTESPP as usize;
+        let row_bytes = FONT_W as usize * bpp;
+        let x0 = cx as usize * FONT_W as usize;
+        let y0 = cy as usize * FONT_H as usize;
+        let mut buf = [0u64; 4];
+        let bp = buf.as_mut_ptr() as *mut u8;
+        render_glyph_row(bp, bpp, 0xFF, fgp, fgp);
+        for row in (FONT_H as usize - 2)..FONT_H as usize {
+            if shadow_on() {
+                let dst = SHADOW.add((y0 + row) * SH_STRIDE + x0 * bpp);
+                core::ptr::copy_nonoverlapping(bp, dst, row_bytes);
+                let xb = (x0 * bpp) as u32;
+                mark_span(y0 + row, xb, xb + row_bytes as u32);
+            } else {
+                blit(fb_text_ptr(x0, y0 + row), bp, row_bytes);
+            }
         }
     }
 }

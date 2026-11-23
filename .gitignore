@@ -37,6 +37,9 @@ v17/
 CoPilotIndices/
 VSWorkspaceState.json
 
+# OS metadata (macOS Finder)
+.DS_Store
+
 # Debug scratch
 src/dbg/
 scripts/gen_kernel_map.py

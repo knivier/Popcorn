@@ -28,11 +28,6 @@ pub extern "C" fn uptime_pop_func(_start_pos: u32) {
 }
 
 #[no_mangle]
-pub extern "C" fn get_tick_count() -> u32 {
-    unsafe { timer_get_ticks() as u32 }
-}
-
-#[no_mangle]
 pub static uptime_module: PopModule = PopModule {
     name: NAME.as_ptr() as *const c_char,
     message: MESSAGE.as_ptr() as *const c_char,

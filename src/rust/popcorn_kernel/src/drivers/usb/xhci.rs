@@ -176,15 +176,12 @@ struct MscEp {
 
 struct Dev {
     slot: u8,
-    port: u32,
-    speed: u32,
     ep0: Ring,
     in_ctx: DmaBuffer,
     msc: Option<MscEp>,
 }
 
 struct Xhci {
-    bar: u64,
     op: u64,
     rt: u64,
     db: u64,
@@ -401,8 +398,6 @@ impl Xhci {
 
         self.devs.push(Dev {
             slot: slot as u8,
-            port,
-            speed,
             ep0,
             in_ctx,
             msc: None,
@@ -534,20 +529,23 @@ impl Xhci {
     }
 
     fn scan_ports(&mut self) {
-        delay_ms(100); /* let USB3 links train / devices re-announce after reset */
+        /* PPC=1 controllers may leave root ports unpowered, and an unpowered
+         * port always reads CCS=0: power every port before looking for devices. */
+        for p in 0..self.nports {
+            let reg = self.op + OP_PORTSC + 0x10 * p as u64;
+            let v = r32(reg);
+            if v & PORT_PP == 0 {
+                w32(reg, (v & PORT_KEEP) | PORT_PP);
+            }
+        }
+        /* One settle covers power-good, USB3 link training and devices
+         * re-announcing after reset. */
+        delay_ms(100);
         for p in 0..self.nports {
             let reg = self.op + OP_PORTSC + 0x10 * p as u64;
             let mut v = r32(reg);
             if v & PORT_CCS == 0 {
                 continue;
-            }
-            if v & PORT_PP == 0 {
-                w32(reg, (v & PORT_KEEP) | PORT_PP);
-                delay_ms(20);
-                v = r32(reg);
-                if v & PORT_CCS == 0 {
-                    continue;
-                }
             }
             if v & PORT_PED == 0 {
                 w32(reg, (v & PORT_KEEP) | PORT_PR);
@@ -603,7 +601,14 @@ impl Xhci {
     }
 }
 
-fn build(bar: u64, bar_size: u64, bufs: &mut Vec<DmaBuffer>) -> Result<Xhci, &'static str> {
+/// `op_out` is set to the operational-register base once it has been checked to
+/// lie inside the BAR; it stays 0 if `build` failed before touching the device.
+fn build(
+    bar: u64,
+    bar_size: u64,
+    bufs: &mut Vec<DmaBuffer>,
+    op_out: &mut u64,
+) -> Result<Xhci, &'static str> {
     let w0 = r32(bar);
     if w0 == 0xFFFF_FFFF {
         return Err("xhci BAR reads all-ones");
@@ -619,12 +624,14 @@ fn build(bar: u64, bar_size: u64, bufs: &mut Vec<DmaBuffer>) -> Result<Xhci, &'s
     let rt = bar + (r32(bar + CAP_RTSOFF) & !0x1F) as u64;
     let ctx = if hcc1 & (1 << 2) != 0 { 64 } else { 32 };
     if caplen < 0x20
+        || caplen & 3 != 0
         || db + 4 * (MAX_SLOTS as u64 + 1) > bar + bar_size
         || rt + 0x40 > bar + bar_size
         || op + OP_PORTSC + 0x10 * nports as u64 > bar + bar_size
     {
         return Err("xhci: registers outside BAR");
     }
+    *op_out = op;
 
     legacy_handoff(bar, bar_size, hcc1);
 
@@ -693,7 +700,6 @@ fn build(bar: u64, bar_size: u64, bufs: &mut Vec<DmaBuffer>) -> Result<Xhci, &'s
     }
 
     Ok(Xhci {
-        bar,
         op,
         rt,
         db,
@@ -729,12 +735,14 @@ pub fn init() -> Result<usize, &'static str> {
     pci::enable_bus_master(addr.bus, addr.slot, addr.func);
 
     let mut bufs: Vec<DmaBuffer> = Vec::new();
-    let mut x = match build(bar, size, &mut bufs) {
+    let mut op = 0u64;
+    let mut x = match build(bar, size, &mut bufs, &mut op) {
         Ok(x) => x,
         Err(e) => {
             let c = core::mem::take(&mut bufs);
-            let op = bar + (r32(bar) & 0xFF) as u64;
-            if (r32(bar) & 0xFF) >= 0x20 {
+            /* Only halt once build validated the register layout; before that
+             * (e.g. BAR reads all-ones) nothing was written and `op` is junk. */
+            if op != 0 {
                 halt(op);
             }
             for b in c {
@@ -762,7 +770,6 @@ pub fn shutdown() {
     for b in x.bufs {
         dma::dma_free(b);
     }
-    let _ = (x.bar, x.nports, x.ctx, x.rt);
 }
 
 /// Per-device DMA page used for CBW/CSW/data: `(virt, phys)`.

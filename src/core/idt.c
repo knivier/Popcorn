@@ -10,6 +10,7 @@ extern void default_cpu_exception(void);
 extern void exc_double_fault(void);
 extern void exc_general_protection(void);
 extern void exc_page_fault(void);
+extern const uint64_t exc_stub_table[32]; /* idt.asm: exc_stub_<n> for vectors 0-31 */
 extern void keyboard_handler_main(void);
 extern char read_port(unsigned short port);
 extern void write_port(unsigned short port, unsigned char data);
@@ -45,6 +46,8 @@ struct GDT_ptr {
 
 /* 64-bit TSS, IST1 = #PF, IST2 = #DF. TSS is a 16-byte GDT entry; it must be 16-byte aligned
    in the GDT (Intel SDM, IA-32e: misaligned 16B system descriptor + LTR = #GP → triple-fault/reset). */
+#define GDT_KERNEL_CODE_SEL KERNEL_CODE_SEGMENT_OFFSET /* 0x08, IDT gate selector */
+#define GDT_KERNEL_DATA_SEL KERNEL_DATA_SEGMENT_OFFSET /* 0x10 */
 #define GDT_TSS_SEL 0x20u /* GDT index 4 after null+code+data+pad — offset 0x20 from GDT base */
 static void tss_ist_lgdt_ltr(void) {
     static uint8_t tss[104] __attribute__((aligned(16)));
@@ -87,7 +90,30 @@ static void tss_ist_lgdt_ltr(void) {
     struct GDT_ptr gp;
     gp.limit = (uint16_t)(6U * 8U - 1U);
     gp.base = (uint64_t)(uintptr_t)gdt6;
-    __asm__ volatile("lgdt %0" : : "m"(gp) : "memory");
+    /*
+     * Reload every selector from the new table. Live selectors keep their old
+     * hidden descriptor caches, but iretq (IRQ/exception/syscall return) re-reads
+     * CS/SS from the GDT, so any selector not valid in gdt6 would #GP there. Both
+     * entry paths already run on 0x08/0x10 from kernel.asm's boot GDT; this
+     * keeps the invariant local to the GDT that is actually live. Far return
+     * (lretq) is the only way to reload CS in long mode. Built with
+     * -mno-red-zone, so the pushes cannot clobber locals.
+     */
+    __asm__ volatile(
+        "lgdt %0\n\t"
+        "pushq %1\n\t"
+        "leaq 1f(%%rip), %%rax\n\t"
+        "pushq %%rax\n\t"
+        "lretq\n\t"
+        "1:\n\t"
+        "movw %2, %%ax\n\t"
+        "movw %%ax, %%ds\n\t"
+        "movw %%ax, %%es\n\t"
+        "movw %%ax, %%fs\n\t"
+        "movw %%ax, %%gs\n\t"
+        "movw %%ax, %%ss\n\t"
+        : : "m"(gp), "i"((int)GDT_KERNEL_CODE_SEL), "i"((int)GDT_KERNEL_DATA_SEL)
+        : "rax", "memory");
     /* ltr is r/m16. gas turns `ltr %ax`/`ltrw %ax` into 0f 00 d8 (ltr %eax); in long mode use 0x66 prefix. */
     __asm__ volatile(
         "movw %0, %%ax\n\t"
@@ -99,11 +125,13 @@ void idt_init(void)
 {
     tss_ist_lgdt_ltr();
 
-    uint64_t def = (uint64_t)(uintptr_t)default_cpu_exception;
+    /* Per-vector stubs: the COM1 dump names the real vector and error code.
+     * default_cpu_exception stays as the (unused) catch-all gate. */
     for (uint8_t n = 0; n < 32U; n++) {
-        idt_set_gate(n, def, INTERRUPT_GATE, 0U);
+        idt_set_gate(n, exc_stub_table[n], INTERRUPT_GATE, 0U);
     }
-    /* #DF / #PF / #GP: diagnosable dumps on COM1; IST for #DF/#PF/#GP. */
+    /* #DF / #PF / #GP: same per-vector stubs (exc_stub_table[8/13/14]), but on
+     * IST stacks so a blown kernel stack still produces a dump. */
     idt_set_gate(0x08, (uint64_t)(uintptr_t)exc_double_fault, INTERRUPT_GATE, 2U);
     idt_set_gate(0x0d, (uint64_t)(uintptr_t)exc_general_protection, INTERRUPT_GATE, 1U);
     idt_set_gate(0x0e, (uint64_t)(uintptr_t)exc_page_fault, INTERRUPT_GATE, 1U);

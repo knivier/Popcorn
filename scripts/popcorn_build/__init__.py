@@ -1,12 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
-
-SCRIPTS_DIR = Path(__file__).resolve().parent.parent
-ROOT_DIR = SCRIPTS_DIR.parent
-SRC_DIR = ROOT_DIR / "src"
-TARGET_DIR = ROOT_DIR / "target"
-CORE_SH = SCRIPTS_DIR / "core.sh"
+# Single source of truth for paths: re-exported from .paths, never redefined.
+from .paths import CORE_SH, ROOT_DIR, SCRIPTS_DIR, SRC_DIR, TARGET_DIR
 
 __all__ = [
     "SCRIPTS_DIR",

@@ -9,6 +9,7 @@
 #include "../includes/shell.h"
 #include "../includes/phase2_selftest.h"
 #include "../includes/utils.h"
+#include "../includes/driver_abi.h"
 #include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -31,7 +32,14 @@ extern void boot_serial_putc(char c);
 
 /* Shared console cursor byte offset (shell history / legacy helpers). */
 unsigned int current_loc = 0;
-ConsoleState console_state = {0, 0, CONSOLE_FG_COLOR, true, false, 0};
+ConsoleState console_state = {
+    .cursor_x = 0,
+    .cursor_y = 0,
+    .current_color = CONSOLE_FG_COLOR,
+    .cursor_visible = true,
+    .scroll_offset = 0,
+    .wrap_enabled = false, /* console_init turns wrap on */
+};
 
 /* Modifier state from the scancode loop; read by Dolphin via keyboard_map.h. */
 static bool kbd_shift = false;
@@ -63,6 +71,16 @@ void kmain(void) {
 
     uint64_t loop_iter = 0;
     uint64_t last_uefi_poll_tick = 0;
+#ifdef POPCORN_SERIAL_CONSOLE
+    /* Test builds: count every key handed to the shell/editor and announce on
+     * COM1 when the loop goes idle, so the harness knows a keystroke's redraw
+     * is finished without waiting for the serial line to go quiet. */
+    uint64_t test_keys_done = 0;
+    bool test_keys_dirty = false;
+#define TEST_KEY_DONE() (test_keys_done++, test_keys_dirty = true)
+#else
+#define TEST_KEY_DONE() ((void)0)
+#endif
 
     boot_serial_putc('L');
     /*
@@ -88,6 +106,8 @@ void kmain(void) {
         bool from_queue = false;
 
         timer_poll();
+        /* Push console rows a paced (coalesced) update left pending. */
+        rust_screen_idle_flush();
         if ((loop_iter & 0xFFu) == 0u) {
             console_heartbeat_tick();
         }
@@ -114,6 +134,7 @@ void kmain(void) {
                                 dolphin_insert_char(ch);
                                 dolphin_render();
                             }
+                            TEST_KEY_DONE();
                             continue;
                         }
                         if (input_index < INPUT_MAX) {
@@ -123,6 +144,7 @@ void kmain(void) {
                             console_putchar((char)keycode);
                             history_index = -1;
                         }
+                        TEST_KEY_DONE();
                         continue;
                     }
                     from_queue = true;
@@ -130,8 +152,62 @@ void kmain(void) {
             }
         }
 
+#ifdef POPCORN_SERIAL_CONSOLE
+        /* Test builds: COM1 bytes act as typed ASCII (core.sh test-shell). */
+        if (!from_queue) {
+            unsigned char lsr;
+            __asm__ volatile("inb %1, %0" : "=a"(lsr) : "Nd"((unsigned short)0x3FD));
+            if ((lsr & 0x01u) && lsr != 0xFFu) {
+                unsigned char sb;
+                __asm__ volatile("inb %1, %0" : "=a"(sb) : "Nd"((unsigned short)0x3F8));
+                char ch = (char)sb;
+                if (ch == '\r' || ch == '\n') {
+                    keycode = ENTER_KEY_CODE;
+                    from_queue = true;
+                } else if (ch == 0x08 || ch == 0x7F) {
+                    keycode = BACKSPACE_KEY_CODE;
+                    from_queue = true;
+                } else if (ch == 0x1B) {
+                    keycode = 0x01; /* Esc */
+                    from_queue = true;
+                } else if (ch == '\t') {
+                    keycode = TAB_KEY_CODE;
+                    from_queue = true;
+                } else if (ch >= 32 && ch < 127) {
+                    if (dolphin_is_active()) {
+                        dolphin_insert_char(ch);
+                        /* Redraw once per COM1 burst, not per byte: a full
+                         * editor redraw per char made a 2 KB file take ~10 min. */
+                        unsigned char more;
+                        __asm__ volatile("inb %1, %0" : "=a"(more) : "Nd"((unsigned short)0x3FD));
+                        if (!(more & 0x01u) || more == 0xFFu) {
+                            dolphin_render();
+                        }
+                    } else if (input_index < INPUT_MAX) {
+                        console_scroll_to_bottom();
+                        input_buffer[input_index++] = ch;
+                        console_set_color(CONSOLE_BG_COLOR | COLOR_WHITE);
+                        console_putchar(ch);
+                        history_index = -1;
+                    }
+                    TEST_KEY_DONE();
+                    continue;
+                } else {
+                    TEST_KEY_DONE();
+                    continue;
+                }
+            }
+        }
+#endif
+
         /* Scancodes via /dev/kbd device ops (Rust drive). */
         if (!from_queue && !kbd_read_scancode(&keycode)) {
+#ifdef POPCORN_SERIAL_CONSOLE
+            if (test_keys_dirty) {
+                test_keys_dirty = false;
+                console_test_idle_marker(test_keys_done);
+            }
+#endif
             /* UEFI/QEMU: sti+hlt hangs on latent IRQ; polled PIT keeps time alive. */
             if (timer_is_poll_mode()) {
                 __asm__ volatile("pause");
@@ -168,6 +244,7 @@ void kmain(void) {
             }
         }
 
+        TEST_KEY_DONE();
         if (dolphin_is_active()) {
             dolphin_handle_key(keycode);
             continue;

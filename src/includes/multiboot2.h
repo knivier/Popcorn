@@ -9,7 +9,6 @@
 // Reference: https://www.gnu.org/software/grub/manual/multiboot2/multiboot.html
 
 #define MULTIBOOT2_BOOTLOADER_MAGIC 0x36d76289
-#define MBI_STAGING_SIZE              65536
 
 // Multiboot2 tag types
 #define MULTIBOOT_TAG_TYPE_END               0
@@ -186,8 +185,8 @@ void multiboot2_parse(void);
 /* Walk tags for framebuffer/VBE only — call before console_init on UEFI hardware. */
 void multiboot2_parse_framebuffer(void);
 void popcorn_apply_uefi_boot_info(void);
-void uefi_boot_mark_console(void);
 bool multiboot2_is_uefi_boot(void);
+int popcorn_boot_volume(uint32_t* serial, uint64_t* sectors);
 SystemInfo* multiboot2_get_info(void);
 const FramebufferInfo* multiboot2_get_framebuffer(void);
 const char* multiboot2_get_bootloader_name(void);

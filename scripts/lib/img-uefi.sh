@@ -27,6 +27,7 @@ build_uefi_img() {
     if grep -aE -q 'install-selftest|rust_test_disk_install' "$KERNEL_OUT"; then
       die "REFUSING img: kernel still contains auto-install selftest"
     fi
+    assert_loader_not_test_install
   fi
 
   local stage
@@ -37,7 +38,7 @@ build_uefi_img() {
   rm -rf "$stage"
 
   if [[ "${POPCORN_CFLAGS:-}" == *POPCORN_TEST_INSTALL* ]]; then
-    log WARN "UNSAFE image (QEMU auto-install): $IMG_OUT — do not flash"
+    log WARNING "UNSAFE image (QEMU auto-install): $IMG_OUT — do not flash"
   else
     log SUCCESS "UEFI disk image: $IMG_OUT"
     log INFO "Flash ONLY this file with Balena Etcher (never target/UNSAFE/*)."

@@ -4,9 +4,10 @@ use alloc::string::String;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::console_ffi::{
-    print, print_color, println_color, separator, u64_to_dec, util_delay, COLOR_LIGHT_CYAN,
+    print, print_color, println_color, separator, u64_to_dec, COLOR_LIGHT_CYAN,
     COLOR_LIGHT_GREEN, COLOR_LIGHT_MAGENTA, COLOR_WHITE, COLOR_YELLOW,
 };
+use crate::drivers::io::{inb, outb};
 
 const IOC_CPU_INFO: u64 = (0x04 << 8) | 1;
 const IOC_CPU_FREQ: u64 = (0x04 << 8) | 2;
@@ -205,11 +206,13 @@ pub fn detect_extended() {
         let edx = data[3];
         e.stepping = eax & 0xF;
         e.model = (eax >> 4) & 0xF;
-        e.family = (eax >> 8) & 0xF;
-        if e.family == 0xF {
+        /* Extended family/model rules key off the raw base family (SDM/APM). */
+        let base_family = (eax >> 8) & 0xF;
+        e.family = base_family;
+        if base_family == 0xF {
             e.family += (eax >> 20) & 0xFF;
         }
-        if e.family == 0x6 || e.family == 0xF {
+        if base_family == 0x6 || base_family == 0xF {
             e.model += ((eax >> 16) & 0xF) << 4;
         }
         e.has_fpu = u8::from((edx & (1 << 0)) != 0);
@@ -276,17 +279,85 @@ pub fn detect_frequency() {
         FREQ_READY.store(true, Ordering::Release);
         return;
     }
-    unsafe {
-        let t0 = rdtsc();
-        util_delay(100);
-        let t1 = rdtsc();
-        let delta = t1.wrapping_sub(t0);
-        f.tsc_hz = delta.saturating_mul(10);
-        f.mhz = (f.tsc_hz / 1_000_000) as u32;
-        f.frequency_detected = 1;
-        FREQ = f;
+    match calibrate_tsc_hz() {
+        Some(hz) => {
+            f.tsc_hz = hz;
+            f.mhz = (hz / 1_000_000) as u32;
+            f.frequency_detected = 1;
+            unsafe {
+                FREQ = f;
+            }
+            FREQ_READY.store(true, Ordering::Release);
+        }
+        None => {
+            /* PIT channel 2 never reached terminal count (gated off or not
+             * emulated). That will not change, so latch "undetected" instead
+             * of re-spinning on every cpu hz / IOC_CPU_FREQ call. */
+            unsafe {
+                FREQ = f;
+            }
+            FREQ_READY.store(true, Ordering::Release);
+        }
     }
-    FREQ_READY.store(true, Ordering::Release);
+}
+
+/// PIT input clock (Hz), same as PIT_FREQUENCY in timer.h.
+const PIT_INPUT_HZ: u64 = 1_193_182;
+/// PIT channel 2 one-shot length: 59659 counts = 50 ms (max 16-bit is ~54.9 ms).
+const CAL_PIT_COUNT: u16 = 59_659;
+/// Time bound (TSC cycles) on the wait so a missing/stuck PIT can never hang
+/// the caller: 2^32 cycles is ~1-4 s on any real clock, far past the 50 ms
+/// window even at 80+ GHz. Checked every iteration, so a slow port read
+/// (LPC, or a VM exit under KVM) cannot stretch it.
+const CAL_TSC_LIMIT: u64 = 1 << 32;
+/// Backstop iteration bound in case the TSC itself does not advance.
+const CAL_SPIN_LIMIT: u64 = 200_000_000;
+
+const PIT_CH2_DATA: u16 = 0x42;
+const PIT_CMD: u16 = 0x43;
+/// Port B: bit0 = ch2 gate, bit1 = speaker data, bit5 = ch2 OUT (read).
+const PORT_B: u16 = 0x61;
+
+/// Measure TSC Hz against a PIT channel 2 one-shot (mode 0, gated, speaker
+/// off). Independent of IRQ0, IF, and the channel 0 poll/IRQ tick path, so it
+/// works the same on the GRUB (IRQ) and UEFI (poll) boots. `None` if the PIT
+/// never signals terminal count.
+fn calibrate_tsc_hz() -> Option<u64> {
+    unsafe {
+        let saved = inb(PORT_B);
+        /* Gate low, speaker data off while we program the counter. */
+        outb(PORT_B, saved & !0x03);
+        /* Channel 2, lobyte/hibyte, mode 0 (interrupt on terminal count), binary. */
+        outb(PIT_CMD, 0xB0);
+        outb(PIT_CH2_DATA, (CAL_PIT_COUNT & 0xFF) as u8);
+        outb(PIT_CH2_DATA, (CAL_PIT_COUNT >> 8) as u8);
+        /* Raise the gate: counting starts now; OUT2 goes high at zero. */
+        outb(PORT_B, (saved & !0x02) | 0x01);
+        let t0 = rdtsc();
+        let mut n = 0u64;
+        let mut done = false;
+        while n < CAL_SPIN_LIMIT {
+            if inb(PORT_B) & 0x20 != 0 {
+                done = true;
+                break;
+            }
+            if rdtsc().wrapping_sub(t0) > CAL_TSC_LIMIT {
+                break;
+            }
+            core::hint::spin_loop();
+            n += 1;
+        }
+        let t1 = rdtsc();
+        outb(PORT_B, saved);
+        if !done {
+            return None;
+        }
+        let delta = t1.wrapping_sub(t0);
+        if delta == 0 {
+            return None;
+        }
+        Some(delta.saturating_mul(PIT_INPUT_HZ) / CAL_PIT_COUNT as u64)
+    }
 }
 
 #[no_mangle]

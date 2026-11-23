@@ -7,6 +7,7 @@ Run: python3 scripts/gui-macos.py
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 from threading import Lock, Thread
 
@@ -68,8 +69,8 @@ def main() -> int:
     if tc.mkrescue == "x86_64-elf-grub-mkrescue" and have("i686-elf-grub-mkrescue"):
         tc = Toolchain(cc=tc.cc, ld=tc.ld, nasm=tc.nasm, qemu=tc.qemu, mkrescue="i686-elf-grub-mkrescue")
 
-    builder = KernelBuilder(toolchain=tc, logs=logs)
-    iso = IsoBuilder(toolchain=tc, logs=logs)
+    builder = KernelBuilder(logs=logs)
+    iso = IsoBuilder(logs=logs)
     qemu = QemuRunner(logs=logs)
 
     def set_state(level: str, msg: str) -> None:
@@ -83,10 +84,18 @@ def main() -> int:
         with state_lock:
             busy = v
 
-    def run_bg(fn):
+    def run_bg(fn) -> bool:
+        # Check-and-set under the lock before spawning: pywebview calls js_api
+        # methods from several threads, and the UI only disables buttons on its
+        # next poll, so two quick clicks could otherwise start two builds on target/.
+        nonlocal busy
+        with state_lock:
+            if busy:
+                return False
+            busy = True
+
         def _runner():
             try:
-                set_busy(True)
                 fn()
             except Exception as e:
                 logs.add("ERROR", str(e))
@@ -95,6 +104,7 @@ def main() -> int:
                 set_busy(False)
 
         Thread(target=_runner, daemon=True).start()
+        return True
 
     class Api:
         def get_state(self):
@@ -168,7 +178,9 @@ def main() -> int:
                 else:
                     set_state("OK", "Recomp complete")
 
-            run_bg(_do)
+            if not run_bg(_do):
+                logs.add("WARN", "A build/run is already in progress.")
+                return False
             return True
 
     window = webview.create_window(
@@ -184,15 +196,21 @@ def main() -> int:
     def pump_qemu_logs():
         while True:
             proc = qemu.proc
-            if proc and proc.stdout:
-                line = proc.stdout.readline()
-                if not line:
-                    if proc.poll() is not None:
-                        logs.add("INFO", "QEMU session ended")
-                        if qemu.proc is proc:
-                            qemu.proc = None
-                    continue
-                logs.add("INFO", line.rstrip("\n"))
+            if not (proc and proc.stdout):
+                # No QEMU session: idle instead of spinning a CPU core.
+                time.sleep(0.1)
+                continue
+            line = proc.stdout.readline()
+            if not line:
+                if proc.poll() is not None:
+                    logs.add("INFO", "QEMU session ended")
+                    if qemu.proc is proc:
+                        qemu.proc = None
+                else:
+                    # EOF but the process is not reaped yet.
+                    time.sleep(0.05)
+                continue
+            logs.add("INFO", line.rstrip("\n"))
 
     Thread(target=pump_qemu_logs, daemon=True).start()
     webview.start(debug=False)

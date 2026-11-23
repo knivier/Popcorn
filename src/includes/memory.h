@@ -47,8 +47,6 @@ typedef struct {
 void memory_init(void);
 void* kmalloc(size_t size, uint32_t flags);
 void kfree(void* ptr);
-void* krealloc(void* ptr, size_t size);
-void* kcalloc(size_t count, size_t size);
 
 // Allocation validation
 bool is_valid_allocation(void* ptr);
@@ -56,17 +54,13 @@ bool is_valid_allocation(void* ptr);
 // Page management
 void* alloc_pages(size_t num_pages, uint32_t flags);
 void free_pages(void* ptr, size_t num_pages);
-bool is_page_allocated(void* ptr);
-void* page_to_virt(uint64_t page);
-uint64_t virt_to_page(void* ptr);
 
 // Memory statistics
 KernelMemoryStats* memory_get_stats(void);
 void kernel_memory_print_stats(void);
 
-// Memory zones
+// Memory zones (ZONE_DMA keeps the allocation below 4 GiB physical; free with kfree)
 void* zone_alloc(MemoryZone zone, size_t size, uint32_t flags);
-void zone_free(MemoryZone zone, void* ptr, size_t size);
 
 // Utility functions
 size_t align_size(size_t size, size_t alignment);
@@ -76,6 +70,5 @@ void memory_copy(void* dest, const void* src, size_t size);
 
 // Debug functions
 void memory_debug_print(void);
-bool memory_check_integrity(void);
 
 #endif // MEMORY_H

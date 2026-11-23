@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .log import LogBuffer
-from .paths import TARGET_DIR
+from .paths import CORE_SH, TARGET_DIR
 from .runner import ensure_shell_scripts_lf, run_core, wsl_core_cmd
 
 VNC_HOST = "127.0.0.1"
@@ -98,25 +98,28 @@ class QemuRunner:
             self.logs.add("WARN", "Stopping QEMU...")
             self.proc.terminate()
         self.proc = None
+        self._stop_script_guest()
+
+    def _stop_script_guest(self) -> None:
+        """Stop the guest core.sh started (tracked by its QEMU pidfile).
+
+        Never a blanket killall: other QEMU VMs on the host are left alone.
+        """
         if self.via_wsl:
-            subprocess.run(
-                ["wsl", "bash", "-lc", "killall qemu-system-x86_64 2>/dev/null || true"],
-                check=False,
-            )
+            ensure_shell_scripts_lf(self.logs)
+            cmd = wsl_core_cmd("stop")
         else:
-            subprocess.run(["killall", "qemu-system-x86_64"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            cmd = ["bash", str(CORE_SH), "stop"]
+        subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def run_uefi(self, *, open_vnc: bool = True) -> None:
         """Start UEFI QEMU. On Windows/WSL, force VNC and optionally open TigerVNC."""
         if self.running():
             raise RuntimeError("QEMU already running — click Stop QEMU first")
 
-        # Clear stray guests from prior sessions (common after GUI relaunch).
+        # Clear a stray Popcorn guest from a prior session (common after GUI relaunch).
         if self.via_wsl:
-            subprocess.run(
-                ["wsl", "bash", "-lc", "killall qemu-system-x86_64 2>/dev/null || true"],
-                check=False,
-            )
+            self._stop_script_guest()
 
         if self.via_wsl:
             ensure_shell_scripts_lf(self.logs)

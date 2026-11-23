@@ -25,7 +25,12 @@ typedef enum {
     PRIORITY_REALTIME = 4
 } TaskPriority;
 
-// CPU context structure for x86-64
+/*
+ * Per-task CPU context. Only `rsp` is live: it holds the task's saved kernel stack
+ * pointer while it is switched out (switch_to() keeps rbx/rbp/r12-r15 and the return
+ * address on that stack). The other fields record the initial entry state for
+ * diagnostics and are not loaded by the switch.
+ */
 typedef struct {
     // General purpose registers (x86-64 calling convention)
     uint64_t r15;
@@ -57,10 +62,14 @@ typedef struct {
     uint64_t fs;   // extra segment
     uint64_t gs;   // extra segment
     
-    // FPU/SSE state (simplified - just mark as present)
-    uint64_t fpu_state[32]; // XMM0-XMM15 registers
+    /* Reserved, never loaded or saved: switch_to() switches at a call boundary where
+     * SysV treats XMM/x87 as caller-saved, and IRQ stubs (idt.asm) fxsave/fxrstor the
+     * interrupted state on the interrupted task's own stack. Kept for layout stability. */
+    uint64_t fpu_state[32];
     uint64_t fpu_control;
 } CPUContext;
+
+struct WaitQueue;
 
 // Task control block
 typedef struct task_struct {
@@ -99,10 +108,12 @@ typedef struct task_struct {
     /* Per-task translation root; default is boot kernel PML4 (identity map). */
     AddressSpace address_space;
 
-    /* Append-only: keep offsetof(context)/address_space stable for context_switch.asm */
+    /* Append-only: keep existing field offsets stable. */
     uint64_t sleep_until_tick;
     struct task_struct* wait_next;
     FileDesc fds[FD_MAX];
+    /* Wait queue this task is linked on while BLOCKED (NULL otherwise). */
+    struct WaitQueue* wait_queue;
 } TaskStruct;
 
 /* Intrusive wait queue (tasks linked via wait_next). */
@@ -127,18 +138,26 @@ void scheduler_init(void);
 void scheduler_tick(void);
 void scheduler_yield(void);
 TaskStruct* scheduler_create_task(void (*function)(void), void* data, TaskPriority priority);
+/* Kill a task by PID (any state). Kept void for existing callers; see scheduler_kill_task. */
 void scheduler_destroy_task(uint32_t pid);
+/* Kill a task by PID. Returns false if no live task has that PID (PID 0 is refused).
+ * Killing the calling task does not return. */
+bool scheduler_kill_task(uint32_t pid);
+/* End the calling task (ZOMBIE, reclaimed later). Never returns. */
+void scheduler_exit_current(void) __attribute__((noreturn));
 void scheduler_schedule(void);
 TaskStruct* scheduler_get_current_task(void);
 void scheduler_set_priority(uint32_t pid, TaskPriority priority);
 void scheduler_print_tasks(void);
 void scheduler_kill_all_except_idle(void);
 uint32_t scheduler_get_task_count(void);
+/* custom_pid must be non-zero and not used by a live task. */
 TaskStruct* scheduler_create_task_with_pid(void (*function)(void), void* data, TaskPriority priority, uint32_t custom_pid);
 /* After init: idle TCB may carry kmain/shell context; allow tick-driven schedule. */
 void scheduler_end_bootstrap(void);
 
-/* Block current task on wq until irq/timer wake; sleep_ms uses tick deadline. */
+/* Block current task on wq until irq/timer wake; sleep_ms uses tick deadline.
+ * Both return only once the task is runnable again (idling in place if nothing else can run). */
 void scheduler_block(WaitQueue* wq);
 void scheduler_wake_one(WaitQueue* wq);
 void scheduler_wake_all(WaitQueue* wq);
@@ -152,12 +171,17 @@ void scheduler_service_sleepers(void);
 void task_init(TaskStruct* task, void (*function)(void), void* data, TaskPriority priority);
 void task_set_address_space(TaskStruct* task, uint64_t pml4_phys);
 uint64_t scheduler_kernel_pml4_phys(void);
+/* Switch CR3 + kernel stack from `from` to `to`; returns when `from` is resumed. */
 void task_switch(TaskStruct* from, TaskStruct* to);
+/* Prepare a new task's stack so its first switch_to() enters task_entry_trampoline. */
 void setup_task_context(TaskStruct* task);
 
-// Assembly functions for context switching
-void context_save(CPUContext* context);
-void context_restore(CPUContext* context);
+// Assembly (context_switch.asm)
+/* Save callee-saved regs on the current stack, *old_rsp = RSP, switch to new_rsp. */
+void switch_to(uint64_t* old_rsp, uint64_t new_rsp);
+void task_entry_trampoline(void);
+/* Called by task_entry_trampoline on a new task's first run. Never returns. */
+void scheduler_task_entry(void (*fn)(void), void* data) __attribute__((noreturn));
 
 // Stack management
 void* task_allocate_stack(uint64_t size);

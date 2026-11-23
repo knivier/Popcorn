@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 use core::ffi::c_char;
 use core::ptr::addr_of_mut;
 
-use crate::console_ffi::{print_color, println_color, COLOR_LIGHT_GREEN, COLOR_WHITE};
+use crate::console_ffi::{print_color, println_color, COLOR_LIGHT_GREEN, COLOR_WHITE, COLOR_YELLOW};
 use crate::drivers::backends::clock;
 use crate::drivers::block;
 
@@ -51,9 +51,7 @@ pub enum FsError {
 }
 
 struct Fat32 {
-    bps: u16,
     spc: u8,
-    reserved: u16,
     fats: u8,
     spf: u32,
     root_cluster: u32,
@@ -66,6 +64,12 @@ struct Fat32 {
     disk: usize,
     /// Next cluster to try in `alloc_cluster` (avoids O(n²) FAT rescans).
     free_hint: u32,
+    /// Free data clusters (FSInfo FSI_Free_Count); `u32::MAX` = unknown, not tracked.
+    free_count: u32,
+    /// FSInfo sector (0 = the volume has none).
+    fsinfo_lba: u64,
+    /// free_count changed since FSInfo was last written.
+    fsinfo_dirty: bool,
     /// Cached primary-FAT sector index (`u32::MAX` = empty).
     fat_c_si: u32,
     fat_c_dirty: bool,
@@ -85,7 +89,13 @@ fn fs() -> Result<&'static mut Fat32, FsError> {
     Ok(f)
 }
 
-/// Forget the mounted volume (called when the selected disk changes).
+/// Forget the mounted volume. Best called BEFORE the selected disk changes, so
+/// the flush below still reaches the volume's own disk.
+///
+/// Every public mutating operation flushes the FAT cache before returning, so
+/// normally nothing is dirty here. If the selection has already moved to a
+/// different disk, `fat_flush` refuses (it never writes one volume's FAT onto
+/// another device) and the stale cache is simply dropped.
 pub fn unmount() {
     unsafe {
         if let Some(ref mut f) = *addr_of_mut!(FS) {
@@ -170,9 +180,7 @@ fn parse_bpb(sec: &[u8], disk_sectors: u64) -> Result<Fat32, FsError> {
         return Err(FsError::NotFat);
     }
     Ok(Fat32 {
-        bps,
         spc,
-        reserved,
         fats,
         spf: spf32,
         root_cluster,
@@ -183,6 +191,12 @@ fn parse_bpb(sec: &[u8], disk_sectors: u64) -> Result<Fat32, FsError> {
         cwd_path: String::from("/"),
         disk: block::selected_id(),
         free_hint: 3,
+        free_count: u32::MAX,
+        fsinfo_lba: match le16(sec, 48) {
+            fsi if fsi != 0 && fsi != 0xFFFF && (fsi as u64) < reserved as u64 => fsi as u64,
+            _ => 0,
+        },
+        fsinfo_dirty: false,
         fat_c_si: u32::MAX,
         fat_c_dirty: false,
         fat_c_sec: [0u8; 512],
@@ -240,7 +254,9 @@ fn format_fat32(disk_sectors: u64) -> Result<Fat32, FsError> {
     put16(&mut sec, 50, 6); /* backup boot */
     sec[64] = 0x80;
     sec[66] = 0x29;
-    put32(&mut sec, 67, 0x504F5043); /* serial 'POPC' */
+    /* Unique per format, so two Popcorn disks (and the UEFI loader's record of
+     * the boot volume) can be told apart. */
+    put32(&mut sec, 67, volume_serial());
     sec[71..82].copy_from_slice(b"POPCORN    ");
     sec[82..90].copy_from_slice(b"FAT32   ");
     sec[510] = 0x55;
@@ -270,9 +286,7 @@ fn format_fat32(disk_sectors: u64) -> Result<Fat32, FsError> {
     println_color("", COLOR_WHITE);
 
     let mut fs = Fat32 {
-        bps,
         spc,
-        reserved,
         fats,
         spf,
         root_cluster,
@@ -283,6 +297,9 @@ fn format_fat32(disk_sectors: u64) -> Result<Fat32, FsError> {
         cwd_path: String::from("/"),
         disk: block::selected_id(),
         free_hint: 3,
+        free_count: u32::MAX, /* set once the root cluster is allocated below */
+        fsinfo_lba: 1,
+        fsinfo_dirty: false,
         fat_c_si: u32::MAX,
         fat_c_dirty: false,
         fat_c_sec: [0u8; 512],
@@ -296,6 +313,9 @@ fn format_fat32(disk_sectors: u64) -> Result<Fat32, FsError> {
 
     /* Empty root cluster */
     fs.zero_cluster(2)?;
+    fs.free_count = cluster_count - 1;
+    put32(&mut info, 488, fs.free_count);
+    put32(&mut info, 492, 3);
 
     /* Volume label entry in root */
     let mut dir = [0u8; 32];
@@ -311,6 +331,17 @@ fn format_fat32(disk_sectors: u64) -> Result<Fat32, FsError> {
     wr(0, &sec)?;
 
     Ok(fs)
+}
+
+/// A volume serial that differs between formats (TSC mixed; never 0).
+fn volume_serial() -> u32 {
+    let t = unsafe { core::arch::x86_64::_rdtsc() };
+    let mut x = (t ^ (t >> 29) ^ 0x504F_5043).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    x ^= x >> 32;
+    match x as u32 {
+        0 => 0x504F_5043,
+        v => v,
+    }
 }
 
 fn fit_fat(sectors: u64, reserved: u16, fats: u8, spc: u8) -> Result<(u32, u32), FsError> {
@@ -362,8 +393,53 @@ impl Fat32 {
     }
 
     fn fat_flush(&mut self) -> Result<(), FsError> {
+        self.fat_flush_sector()?;
+        self.fsinfo_flush()
+    }
+
+    /// Keep FSInfo's free-cluster count (and next-free hint) in step with the FAT.
+    fn fsinfo_flush(&mut self) -> Result<(), FsError> {
+        if !self.fsinfo_dirty || self.fsinfo_lba == 0 || self.free_count == u32::MAX {
+            return Ok(());
+        }
+        if self.disk != block::selected_id() {
+            return Err(FsError::NotMounted);
+        }
+        let mut info = [0u8; 512];
+        rd(self.fsinfo_lba, &mut info)?;
+        if le32(&info, 0) != 0x4161_5252 || le32(&info, 484) != 0x6141_7272 {
+            self.fsinfo_dirty = false;
+            return Ok(());
+        }
+        put32(&mut info, 488, self.free_count);
+        put32(&mut info, 492, self.free_hint);
+        wr(self.fsinfo_lba, &info)?;
+        self.fsinfo_dirty = false;
+        Ok(())
+    }
+
+    /// Track a FAT entry going between free (0) and used.
+    fn note_fat_change(&mut self, old: u32, new: u32) {
+        if self.free_count == u32::MAX {
+            return;
+        }
+        if old == 0 && new != 0 {
+            self.free_count = self.free_count.saturating_sub(1);
+            self.fsinfo_dirty = true;
+        } else if old != 0 && new == 0 {
+            self.free_count = (self.free_count + 1).min(self.cluster_count);
+            self.fsinfo_dirty = true;
+        }
+    }
+
+    fn fat_flush_sector(&mut self) -> Result<(), FsError> {
         if !self.fat_c_dirty || self.fat_c_si == u32::MAX {
             return Ok(());
+        }
+        /* wr() targets whatever disk is selected *now*; never let this volume's
+         * FAT sector land on a different device after `disk use`/install/wipe. */
+        if self.disk != block::selected_id() {
+            return Err(FsError::NotMounted);
         }
         let si = self.fat_c_si as u64;
         for f in 0..self.fats as u64 {
@@ -377,7 +453,7 @@ impl Fat32 {
         if self.fat_c_si == si {
             return Ok(());
         }
-        self.fat_flush()?;
+        self.fat_flush_sector()?;
         rd(self.fat_lba + si as u64, &mut self.fat_c_sec)?;
         self.fat_c_si = si;
         Ok(())
@@ -399,6 +475,10 @@ impl Fat32 {
         let off = cluster as u64 * 4;
         let idx = (off % 512) as usize;
         self.fat_load((off / 512) as u32)?;
+        if (cluster as u64) >= 2 {
+            let old = le32(&self.fat_c_sec, idx) & FAT_MASK;
+            self.note_fat_change(old, value & FAT_MASK);
+        }
         put32(&mut self.fat_c_sec, idx, value & FAT_MASK);
         self.fat_c_dirty = true;
         Ok(())
@@ -434,6 +514,7 @@ impl Fat32 {
                 if le32(&self.fat_c_sec, idx) & FAT_MASK == 0 {
                     put32(&mut self.fat_c_sec, idx, FAT_EOC);
                     self.fat_c_dirty = true;
+                    self.note_fat_change(0, FAT_EOC);
                     self.free_hint = c.saturating_add(1);
                     return Ok(c);
                 }
@@ -517,34 +598,6 @@ impl Fat32 {
         }
     }
 
-    fn read_dirent(&mut self, dir_cluster: u32, index: usize) -> Result<[u8; 32], FsError> {
-        let bpc = (self.spc as usize) * 512;
-        let ents_per_cluster = bpc / 32;
-        let mut cluster = dir_cluster;
-        let mut idx = index;
-        let mut hops = 0u32;
-        loop {
-            if idx < ents_per_cluster {
-                let mut buf = vec![0u8; bpc];
-                self.read_cluster(cluster, &mut buf)?;
-                let off = idx * 32;
-                let mut ent = [0u8; 32];
-                ent.copy_from_slice(&buf[off..off + 32]);
-                return Ok(ent);
-            }
-            idx -= ents_per_cluster;
-            let next = self.fat_get(cluster)?;
-            if next >= 0x0FFF_FFF8 {
-                return Err(FsError::NotFound);
-            }
-            hops += 1;
-            if hops > self.cluster_count {
-                return Err(FsError::Io);
-            }
-            cluster = next;
-        }
-    }
-
     fn for_each_entry<F: FnMut(usize, &[u8; 32]) -> bool>(
         &mut self,
         dir_cluster: u32,
@@ -607,9 +660,23 @@ impl Fat32 {
             base += ents_per_cluster;
             let next = self.fat_get(cluster)?;
             if next >= 0x0FFF_FFF8 {
-                /* Directory full: extend the chain with a fresh (zeroed) cluster. */
+                /* Directory full: extend the chain with a fresh cluster. alloc_cluster
+                 * only marks the FAT entry; the data still holds whatever a freed file
+                 * left there, which would parse as live entries. Zero it BEFORE
+                 * linking so the chain never contains a dirty directory cluster. */
                 let neu = self.alloc_cluster()?;
-                self.fat_set(cluster, neu)?;
+                if let Err(e) = self.zero_cluster(neu) {
+                    let _ = self.fat_set(neu, 0);
+                    let _ = self.fat_flush();
+                    return Err(e);
+                }
+                if let Err(e) = self.fat_set(cluster, neu) {
+                    let _ = self.fat_set(neu, 0);
+                    let _ = self.fat_flush();
+                    return Err(e);
+                }
+                /* Persist the extension now; the caller's dirent write follows. */
+                self.fat_flush()?;
                 return Ok(base);
             }
             hops += 1;
@@ -723,7 +790,19 @@ pub fn mount_or_format() -> Result<(), FsError> {
     let mut sec0 = [0u8; 512];
     rd(0, &mut sec0)?;
 
-    if let Ok(fat) = parse_bpb(&sec0, sectors) {
+    if let Ok(mut fat) = parse_bpb(&sec0, sectors) {
+        /* Trust FSInfo's free count only when it is signed and plausible;
+         * otherwise leave it unknown (0xFFFFFFFF) rather than guess. */
+        if fat.fsinfo_lba != 0 {
+            let mut info = [0u8; 512];
+            if rd(fat.fsinfo_lba, &mut info).is_ok()
+                && le32(&info, 0) == 0x4161_5252
+                && le32(&info, 484) == 0x6141_7272
+                && le32(&info, 488) <= fat.cluster_count
+            {
+                fat.free_count = le32(&info, 488);
+            }
+        }
         unsafe { *addr_of_mut!(FS) = Some(fat) };
         return Ok(());
     }
@@ -876,7 +955,10 @@ fn find_dir_cluster(fat: &mut Fat32, dir: u32, name: &str) -> Result<u32, FsErro
     if ent[11] & ATTR_DIRECTORY == 0 {
         return Err(FsError::NotFound);
     }
-    Ok(Fat32::clus_from_ent(&ent))
+    /* A ".." entry in a first-level dir stores cluster 0, meaning the root
+     * (FAT spec); `cp X ..` used to hand cluster 0 to write_file_at and fail. */
+    let clu = Fat32::clus_from_ent(&ent);
+    Ok(if clu == 0 { fat.root_cluster } else { clu })
 }
 
 /// "." and ".." are only ever the on-disk dot entries, never user-created names.
@@ -921,6 +1003,12 @@ fn mkdir_at(fat: &mut Fat32, parent: u32, name: &str) -> Result<(), FsError> {
         ent[11] = ATTR_DIRECTORY;
         Fat32::put_clus(&mut ent, clu);
         clock::stamp_fat_dirent(&mut ent);
+        /* The new cluster's EOC must be on disk before any dirent points at it,
+         * or a reset leaves the directory on a cluster the FAT calls free. */
+        fat.fat_flush()?;
+        /* find_free_dirent flushes its own chain extension, so the FAT is clean
+         * once this returns: no failure can follow the parent link (which would
+         * make the rollback below free a cluster the parent now points at). */
         let di = fat.find_free_dirent(parent)?;
         fat.write_dirent(parent, di, &ent)
     })();
@@ -979,11 +1067,12 @@ fn write_file_at_limited(
         .find_free_dirent(dir)
         .and_then(|g| fat.write_dirent(dir, g, &ent));
     if let Err(e) = linked {
-        /* Avoid free_chain storm after a large payload write. */
-        let _ = e;
-        return Err(FsError::Io);
+        /* Nothing points at the new chain yet: release it (free_chain walks the
+         * FAT through the sector cache, so this is cheap) and keep the real error. */
+        let _ = fat.free_chain(first);
+        return Err(e);
     }
-    Ok(())
+    fat.fat_flush()
 }
 
 /// Allocate and fill a cluster chain; frees whatever it allocated on failure.
@@ -1133,13 +1222,17 @@ pub fn delete_entry(name: &str) -> Result<(), FsError> {
         if extra {
             return Err(FsError::BadName);
         }
-        fat.free_chain(clu)?;
-    } else if clu >= 2 {
-        fat.free_chain(clu)?;
     }
+    /* Dirent first, clusters last (same rule as write_file_at_limited): a failure
+     * here leaves the entry intact, and a failure freeing afterwards only leaks
+     * clusters instead of leaving a live entry on clusters the FAT calls free. */
     let mut del = ent;
     del[0] = 0xE5;
-    fat.write_dirent(fat.cwd, idx, &del)?;
+    let dir = fat.cwd;
+    fat.write_dirent(dir, idx, &del)?;
+    if clu >= 2 && fat.free_chain(clu).is_err() {
+        let _ = fat.fat_flush(); /* persist whatever part of the chain was freed */
+    }
     Ok(())
 }
 
@@ -1154,7 +1247,10 @@ pub fn chdir(name: &str) -> Result<(), FsError> {
     if name == "back" || name == ".." {
         if fat.cwd == fat.root_cluster {
             fat.cwd_path = String::from("/");
-            return Ok(());
+            sync_cwd_buf(fat);
+            /* `back` at / reports "Already at root"; `go ..` at / is a no-op
+             * success like POSIX `cd ..` (it used to claim "not found"). */
+            return if name == "back" { Err(FsError::NotFound) } else { Ok(()) };
         }
         let (_i, ent) = find_in_dir(fat, fat.cwd, "..")?;
         let parent = Fat32::clus_from_ent(&ent);
@@ -1250,7 +1346,9 @@ fn search_rec(
     depth: u32,
 ) -> Result<bool, FsError> {
     if depth > MAX_DEPTH {
-        return Err(FsError::Io);
+        /* Prune, don't abort: one over-deep (or cyclic) branch must not hide
+         * matches in later siblings (AAA/<19 levels> used to mask /ZZZ/X). */
+        return Ok(false);
     }
     let mut entries: Vec<(String, u32, bool)> = Vec::new();
     fat.for_each_entry(dir, |_i, ent| {
@@ -1327,7 +1425,9 @@ pub fn list_hierarchy() -> Result<(), FsError> {
 
 fn list_rec(fat: &mut Fat32, dir: u32, prefix: &str, depth: u32) -> Result<(), FsError> {
     if depth > MAX_DEPTH {
-        return Err(FsError::Io); /* cyclic or absurdly deep directory tree */
+        /* Cyclic or absurdly deep: prune this branch, keep listing siblings. */
+        println_color("  ... (max depth)", COLOR_YELLOW);
+        return Ok(());
     }
     let mut sub: Vec<(String, u32)> = Vec::new();
     fat.for_each_entry(dir, |_i, ent| {

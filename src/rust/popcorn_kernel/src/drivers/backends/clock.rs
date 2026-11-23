@@ -170,8 +170,7 @@ fn print_rtc_line() {
 
 /// Read CMOS RTC once, as local wall time (BIOS/QEMU values, no TZ convert).
 pub fn read_rtc() -> Option<RtcDateTime> {
-    let (mut sec, mut min, mut hour, mut day, mut month, mut year, mut century) = read_raw()?;
-    let mut last = (sec, min, hour, day, month, year, century);
+    let mut last = read_raw()?;
 
     // Re-read until two consecutive snapshots match (avoid update tear).
     for _ in 0..8 {
@@ -180,9 +179,8 @@ pub fn read_rtc() -> Option<RtcDateTime> {
             break;
         }
         last = next;
-        (sec, min, hour, day, month, year, century) = next;
     }
-    (sec, min, hour, day, month, year, century) = last;
+    let (mut sec, mut min, mut hour, mut day, mut month, mut year, mut century) = last;
 
     let reg_b = cmos_read(0x0B);
     let binary = (reg_b & 0x04) != 0;
@@ -195,9 +193,12 @@ pub fn read_rtc() -> Option<RtcDateTime> {
         day = bcd_to_bin(day);
         month = bcd_to_bin(month);
         year = bcd_to_bin(year);
-        if century != 0 {
-            century = bcd_to_bin(century);
-        }
+        /* 0x32 may not be a century register at all: only decode valid BCD. */
+        century = if (century >> 4) <= 9 && (century & 0x0F) <= 9 {
+            bcd_to_bin(century)
+        } else {
+            0
+        };
     }
 
     if !h24 {
@@ -214,15 +215,22 @@ pub fn read_rtc() -> Option<RtcDateTime> {
         hour &= 0x7F;
     }
 
-    let mut full_year = year as u16;
-    if century != 0 {
-        full_year = (century as u16) * 100 + (year as u16);
-    } else {
-        full_year += (CURRENT_YEAR / 100) * 100;
-        if full_year < CURRENT_YEAR {
-            full_year = full_year.saturating_add(100);
-        }
+    if year > 99 {
+        return None;
     }
+    let full_year = if century == 19 || century == 20 {
+        /* Trust reg 0x32 only when it holds a plausible century. */
+        (century as u16) * 100 + (year as u16)
+    } else {
+        /* No/garbage century: window yy around CURRENT_YEAR (-49..+50). */
+        let mut y = (CURRENT_YEAR / 100) * 100 + (year as u16);
+        if y > CURRENT_YEAR + 50 {
+            y -= 100;
+        } else if y + 49 < CURRENT_YEAR {
+            y += 100;
+        }
+        y
+    };
 
     if month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || min > 59 || sec > 59 {
         return None;
@@ -274,7 +282,8 @@ pub fn stamp_fat_dirent(ent: &mut [u8; 32]) {
 }
 
 fn read_raw() -> Option<(u8, u8, u8, u8, u8, u8, u8)> {
-    // Wait while update-in-progress is clear, then read (OSDev double-check style).
+    // Wait until update-in-progress (reg A bit 7) clears, then read once.
+    // The caller (read_rtc) re-reads until two snapshots match.
     for _ in 0..100_000 {
         if cmos_read(0x0A) & 0x80 == 0 {
             break;
@@ -289,7 +298,7 @@ fn read_raw() -> Option<(u8, u8, u8, u8, u8, u8, u8)> {
     let day = cmos_read(0x07);
     let month = cmos_read(0x08);
     let year = cmos_read(0x09);
-    // Common century register; zero/garbage filtered later.
+    // Common century register; read_rtc trusts it only if it decodes to 19/20.
     let century = cmos_read(0x32);
     Some((sec, min, hour, day, month, year, century))
 }

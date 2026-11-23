@@ -7,22 +7,20 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 const DATA: u16 = 0x60;
 const STATUS: u16 = 0x64;
 const QUEUE_CAP: usize = 256;
+/// Status bit 0: output buffer full (a byte is waiting at 0x60).
+const ST_OBF: u8 = 0x01;
+/// Status bit 5: the waiting byte came from the mouse/aux channel.
+const ST_AUX: u8 = 0x20;
+/// Upper bound on stale bytes drained at probe (the 8042 buffer is one byte deep).
+const PROBE_DRAIN_MAX: u32 = 32;
 
 /// 8042 controller helpers — keyboard and mouse/aux are separate channels.
 mod kbc {
-    use super::{inb, outb, DATA, STATUS};
+    use super::{inb, outb, DATA, STATUS, ST_OBF};
 
     pub fn wait_write() {
         for _ in 0..100_000u32 {
             if unsafe { (inb(STATUS) & 0x02) == 0 } {
-                return;
-            }
-        }
-    }
-
-    pub fn wait_read() {
-        for _ in 0..100_000u32 {
-            if unsafe { (inb(STATUS) & 0x01) != 0 } {
                 return;
             }
         }
@@ -38,8 +36,9 @@ mod kbc {
         unsafe { outb(DATA, data) }
     }
 
-    pub fn read_data() -> u8 {
-        wait_read();
+    /// Read 0x60 without waiting. Only call after a status read showed OBF set;
+    /// reading with OBF clear returns the stale latched byte.
+    pub fn take_data() -> u8 {
         unsafe { inb(DATA) }
     }
 
@@ -74,12 +73,28 @@ mod kbc {
     }
 
     pub fn data_ready() -> bool {
-        (status() & 0x01) != 0
+        (status() & ST_OBF) != 0
     }
+}
 
-    /// Bit 5 set ⇒ byte came from mouse/aux (when dual-channel is live).
-    pub fn from_mouse() -> bool {
-        (status() & 0x20) != 0
+/// Save RFLAGS and mask interrupts. The 8042 read + queue push must not be
+/// split by IRQ1, which runs the same producer path.
+#[inline(always)]
+fn irq_save() -> u64 {
+    let flags: u64;
+    unsafe {
+        core::arch::asm!("pushfq", "pop {}", "cli", out(reg) flags);
+    }
+    flags
+}
+
+/// Restore the caller's IF state (stays masked if it was masked, e.g. UEFI poll mode or IRQ context).
+#[inline(always)]
+fn irq_restore(flags: u64) {
+    if (flags & (1 << 9)) != 0 {
+        unsafe {
+            core::arch::asm!("sti", options(nostack));
+        }
     }
 }
 
@@ -88,6 +103,7 @@ static HEAD: AtomicU32 = AtomicU32::new(0);
 static TAIL: AtomicU32 = AtomicU32::new(0);
 static mut QUEUE: [u8; QUEUE_CAP] = [0; QUEUE_CAP];
 
+/// Single producer: only called from `poll_masked`, with interrupts off.
 fn push(scancode: u8) {
     let tail = TAIL.load(Ordering::Relaxed);
     let next = (tail + 1) % QUEUE_CAP as u32;
@@ -102,28 +118,54 @@ fn push(scancode: u8) {
 }
 
 pub fn probe() -> Result<(), &'static str> {
-    if READY.swap(true, Ordering::SeqCst) {
+    if READY.load(Ordering::Acquire) {
         return Ok(());
+    }
+    /* No 8042 decoding port 0x64 (UEFI-only board, no legacy emulation): the bus floats to 0xFF. */
+    if kbc::status() == 0xFF {
+        return Err("no 8042");
     }
     /* Mouse-ready split: disable aux, enable keyboard only, drain stale bytes. */
     kbc::disable_mouse();
     kbc::enable_keyboard();
+    let mut drained = 0u32;
     while kbc::data_ready() {
-        let _ = kbc::read_data();
+        if drained >= PROBE_DRAIN_MAX {
+            return Err("8042 stuck");
+        }
+        let _ = kbc::take_data();
+        drained += 1;
     }
+    /* Only mark ready once the controller is confirmed, so a failed probe can be retried. */
+    READY.store(true, Ordering::Release);
     Ok(())
 }
 
+/// Move at most one waiting byte into the queue. Caller has interrupts masked.
+fn poll_masked() {
+    /* One status read decides both "byte waiting" and "which channel": a second
+     * read could see a different byte's flags or OBF already cleared. */
+    let st = kbc::status();
+    if (st & ST_OBF) == 0 {
+        return;
+    }
+    let b = kbc::take_data();
+    if (st & ST_AUX) != 0 {
+        return; // discard aux until mouse drive exists
+    }
+    push(b);
+}
+
 /// Drain keyboard-channel bytes into the queue (ignore aux if flagged).
+/// Safe from both thread context (main loop / Dolphin) and IRQ1: the 8042
+/// read and queue push run with interrupts masked, so there is one producer at a time.
 pub fn poll() {
-    if !kbc::data_ready() {
-        return;
+    if !READY.load(Ordering::Acquire) {
+        return; // no controller (or probe not run yet): never read a floating 0x60
     }
-    if kbc::from_mouse() {
-        let _ = kbc::read_data(); // discard aux until mouse drive exists
-        return;
-    }
-    push(kbc::read_data());
+    let flags = irq_save();
+    poll_masked();
+    irq_restore(flags);
 }
 
 pub fn irq() {

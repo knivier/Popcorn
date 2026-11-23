@@ -59,22 +59,64 @@ static void fb_info_from_vbe_tag(const struct multiboot_tag_vbe* vbe) {
     fb_info.blue_size = mode->blue_mask ? mode->blue_mask : 8;
 }
 
+/* MBI bounds [first tag, end), or NULL if the pointer or total_size is unusable. */
+static uint8_t* mbi_first_tag(uint8_t** end_out) {
+    if (multiboot2_info_ptr == 0) {
+        return NULL;
+    }
+    uint8_t* mbi = (uint8_t*)(uintptr_t)multiboot2_info_ptr;
+    uint32_t total_size = *(uint32_t*)mbi;
+    if (total_size < 8 || total_size > 0x100000) {
+        return NULL;
+    }
+    *end_out = mbi + total_size;
+    return mbi + 8;
+}
+
+/*
+ * The tag at p if its header and declared size fit before end (size >= 8),
+ * else NULL. A zero size used to spin forever; sizes past the MBI read garbage.
+ */
+static struct multiboot_tag* mbi_tag_at(uint8_t* p, uint8_t* end) {
+    if (p > end || (size_t)(end - p) < sizeof(struct multiboot_tag)) {
+        return NULL;
+    }
+    struct multiboot_tag* tag = (struct multiboot_tag*)p;
+    if (tag->type == MULTIBOOT_TAG_TYPE_END) {
+        return tag;
+    }
+    if (tag->size < sizeof(struct multiboot_tag) || tag->size > (size_t)(end - p)) {
+        return NULL;
+    }
+    return tag;
+}
+
+static uint8_t* mbi_next_tag(struct multiboot_tag* tag) {
+    return (uint8_t*)tag + ((tag->size + 7u) & ~7u);
+}
+
+/* Entries in an MMAP tag whose size was already bounds-checked; 0 if malformed. */
+static uint32_t mmap_tag_entry_count(const struct multiboot_tag_mmap* mmap_tag) {
+    if (mmap_tag->size < sizeof(struct multiboot_tag_mmap) ||
+        mmap_tag->entry_size < sizeof(struct multiboot_mmap_entry)) {
+        return 0;
+    }
+    return (uint32_t)((mmap_tag->size - sizeof(struct multiboot_tag_mmap)) / mmap_tag->entry_size);
+}
+
 static void multiboot2_walk_tags(bool framebuffer_only) {
     FramebufferInfo tag8 = {0};
     FramebufferInfo tag7 = {0};
-    fb_info.present = false;
-    if (multiboot2_info_ptr == 0) {
-        boot_serial_putc('M');
+    uint8_t* end = NULL;
+    uint8_t* p = mbi_first_tag(&end);
+    struct multiboot_tag* tag;
+    /* fb_info is only replaced when a tag provides one: on UEFI it already
+     * holds the GOP handoff and the loader-built MBI has no tag 7/8. */
+    if (!p) {
+        boot_serial_putc(multiboot2_info_ptr == 0 ? 'M' : '?');
         return;
     }
-    uint32_t* mbi = (uint32_t*)(uintptr_t)multiboot2_info_ptr;
-    uint32_t total_size = mbi[0];
-    if (total_size < 8 || total_size > 0x100000) {
-        boot_serial_putc('?');
-        return;
-    }
-    struct multiboot_tag* tag = (struct multiboot_tag*)((uint8_t*)mbi + 8);
-    while (tag->type != MULTIBOOT_TAG_TYPE_END) {
+    while ((tag = mbi_tag_at(p, end)) != NULL && tag->type != MULTIBOOT_TAG_TYPE_END) {
         if (tag->type == MULTIBOOT_TAG_TYPE_FRAMEBUFFER &&
             tag->size >= sizeof(struct multiboot_tag_framebuffer)) {
             fb_info_from_framebuffer_tag((const struct multiboot_tag_framebuffer*)tag);
@@ -106,7 +148,7 @@ static void multiboot2_walk_tags(bool framebuffer_only) {
                 }
                 case MULTIBOOT_TAG_TYPE_MMAP: {
                     struct multiboot_tag_mmap* mmap_tag = (struct multiboot_tag_mmap*)tag;
-                    uint32_t num_entries = (mmap_tag->size - sizeof(struct multiboot_tag_mmap)) / mmap_tag->entry_size;
+                    uint32_t num_entries = mmap_tag_entry_count(mmap_tag);
                     for (uint32_t i = 0; i < num_entries; i++) {
                         struct multiboot_mmap_entry* entry = (struct multiboot_mmap_entry*)
                             ((uint8_t*)mmap_tag->entries + i * mmap_tag->entry_size);
@@ -121,18 +163,12 @@ static void multiboot2_walk_tags(bool framebuffer_only) {
                     break;
             }
         }
-        uint32_t tag_size = tag->size;
-        tag = (struct multiboot_tag*)((uint8_t*)tag + ((tag_size + 7) & ~7));
-        if ((uintptr_t)tag >= (uintptr_t)mbi + total_size) {
-            break;
-        }
+        p = mbi_next_tag(tag);
     }
     if (tag8.present) {
         fb_info = tag8;
     } else if (tag7.present) {
         fb_info = tag7;
-    } else {
-        fb_info.present = false;
     }
     if (framebuffer_only) {
         boot_serial_putc(fb_info.present ? 'F' : 'V');
@@ -155,13 +191,26 @@ bool multiboot2_is_uefi_boot(void) {
     return u->magic == POPCORN_UEFI_MAGIC;
 }
 
-void uefi_boot_mark_console(void) {
-    popcorn_apply_uefi_boot_info();
+/* Boot volume identity recorded by the UEFI loader (see uefi_boot.h).
+ * Returns 1 and fills serial/sectors when known, else 0 (GRUB, old loader). */
+int popcorn_boot_volume(uint32_t* serial, uint64_t* sectors) {
+    volatile PopcornUefiBootInfo* u = uefi_handoff_ptr();
+    if (u->magic != POPCORN_UEFI_MAGIC || u->boot_vol_valid != POPCORN_UEFI_BOOT_VOL_VALID) {
+        return 0;
+    }
+    *serial = u->boot_vol_serial;
+    *sectors = u->boot_vol_sectors;
+    return 1;
 }
 
 void popcorn_apply_uefi_boot_info(void) {
     volatile PopcornUefiBootInfo* u = uefi_handoff_ptr();
     if (u->magic != POPCORN_UEFI_MAGIC) {
+        return;
+    }
+    /* The loader sets the magic even without GOP; framebuffer_addr == 0 then
+     * means "no framebuffer" (BltOnly mode, headless, LocateProtocol failed). */
+    if (u->framebuffer_addr == 0 || u->framebuffer_width == 0) {
         return;
     }
 
@@ -194,20 +243,8 @@ void multiboot2_parse(void) {
     sys_info.total_memory = 0;
     sys_info.available_memory_regions = 0;
 
-    if (multiboot2_info_ptr == 0 && multiboot2_is_uefi_boot()) {
-        volatile PopcornUefiBootInfo* u = uefi_handoff_ptr();
-        strncpy_safe(sys_info.bootloader_name, "Popcorn UEFI", sizeof(sys_info.bootloader_name));
-        sys_info.mem_lower = 640;
-        /* Prefer full handoff bytes; mem_upper is KB and may clamp at 32-bit. */
-        sys_info.total_memory = u->available_ram_bytes;
-        {
-            uint64_t kb = u->available_ram_bytes / 1024ULL;
-            sys_info.mem_upper = (kb > 0xFFFFFFFFULL) ? 0xFFFFFFFFu : (uint32_t)kb;
-        }
-        sys_info.valid = true;
-        multiboot2_info_ptr = POPCORN_UEFI_MBI_PHYS;
-    }
-
+    /* UEFI: uefi_start already pointed multiboot2_info_ptr at the loader-built
+     * MBI (handoff mbi_phys), whose tags carry the name, meminfo and mmap. */
     if (multiboot2_info_ptr == 0) {
         sys_info.mem_lower = 640;
         sys_info.mem_upper = 0;
@@ -226,30 +263,23 @@ void multiboot2_foreach_mmap(multiboot_mmap_fn fn, void* user) {
     if (!fn) {
         return;
     }
-    if (multiboot2_info_ptr == 0) {
+    uint8_t* end = NULL;
+    uint8_t* p = mbi_first_tag(&end);
+    struct multiboot_tag* tag;
+    if (!p) {
         return;
     }
-    uint32_t* mbi = (uint32_t*)(uintptr_t)multiboot2_info_ptr;
-    uint32_t total_size = mbi[0];
-    if (total_size < 8 || total_size > 0x100000) {
-        return;
-    }
-    struct multiboot_tag* tag = (struct multiboot_tag*)((uint8_t*)mbi + 8);
-    while (tag->type != MULTIBOOT_TAG_TYPE_END) {
+    while ((tag = mbi_tag_at(p, end)) != NULL && tag->type != MULTIBOOT_TAG_TYPE_END) {
         if (tag->type == MULTIBOOT_TAG_TYPE_MMAP) {
             struct multiboot_tag_mmap* mmap_tag = (struct multiboot_tag_mmap*)tag;
-            uint32_t num_entries = (mmap_tag->size - sizeof(struct multiboot_tag_mmap)) / mmap_tag->entry_size;
+            uint32_t num_entries = mmap_tag_entry_count(mmap_tag);
             for (uint32_t i = 0; i < num_entries; i++) {
                 struct multiboot_mmap_entry* entry = (struct multiboot_mmap_entry*)
                     ((uint8_t*)mmap_tag->entries + i * mmap_tag->entry_size);
                 fn(entry->addr, entry->len, entry->type, user);
             }
         }
-        uint32_t tag_size = tag->size;
-        tag = (struct multiboot_tag*)((uint8_t*)tag + ((tag_size + 7) & ~7U));
-        if ((uintptr_t)tag >= (uintptr_t)mbi + total_size) {
-            break;
-        }
+        p = mbi_next_tag(tag);
     }
 }
 
@@ -291,11 +321,12 @@ const char* multiboot2_get_command_line(void) {
  * Get total memory in bytes
  */
 uint64_t multiboot2_get_total_memory(void) {
-    /* Prefer conventional RAM from handoff / basic meminfo — NOT the sum of
-     * every mmap entry (reserved MMIO windows make laptops look like 64GiB+). */
+    /* total_memory is the sum of AVAILABLE mmap entries only (reserved MMIO
+     * windows are excluded), and already includes conventional RAM below 1 MiB. */
     if (sys_info.valid && sys_info.total_memory > 0) {
-        return sys_info.total_memory + (1024ULL * 1024);
+        return sys_info.total_memory;
     }
+    /* mem_upper counts RAM above 1 MiB only, so add the first MiB back. */
     if (sys_info.mem_upper > 0) {
         return (1024ULL * 1024) + ((uint64_t)sys_info.mem_upper * 1024);
     }
@@ -357,7 +388,9 @@ void boot_identity_uncache_range(uint64_t phys, uint64_t len) {
         }
     }
 
-    /* UEFI path: low identity uses 1 GiB pages in page_table_l3. Mark the
+    /* UEFI path on CPUs with PDPE1GB: low identity uses 1 GiB pages in
+     * page_table_l3 (without PDPE1GB uefi_start builds the 2 MiB layout above
+     * and these L3 entries are non-leaf, so they are skipped). Mark the
      * covering 1 GiB page(s) uncacheable (PCD|PWT) so MMIO framebuffer writes
      * are not absorbed by the cache on real hardware. */
     uint64_t start1g = phys & ~((1ULL << 30) - 1ULL);
@@ -369,39 +402,6 @@ void boot_identity_uncache_range(uint64_t phys, uint64_t len) {
         if (page_table_l3[idx] & 0x80ULL) {
             page_table_l3[idx] = (page_table_l3[idx] & ~0x18ULL) | 0x18ULL;
             __asm__ volatile("invlpg (%0)" : : "r"((uintptr_t)a) : "memory");
-        }
-    }
-}
-
-void boot_fb_solid_fill(volatile uint8_t* base, uint32_t pitch, uint32_t width,
-                        uint32_t height, uint8_t bytespp, uint32_t rgb) {
-    if (!base || pitch == 0 || width == 0 || height == 0 || bytespp < 3) {
-        return;
-    }
-    uint8_t b = (uint8_t)(rgb & 0xFFu);
-    uint8_t g = (uint8_t)((rgb >> 8) & 0xFFu);
-    uint8_t r = (uint8_t)((rgb >> 16) & 0xFFu);
-    if (bytespp == 4 && pitch >= width * 4u) {
-        uint32_t pix = (uint32_t)b | ((uint32_t)g << 8) | ((uint32_t)r << 16);
-        for (uint32_t y = 0; y < height; y++) {
-            volatile uint32_t* row =
-                (volatile uint32_t*)(base + (uint64_t)y * pitch);
-            for (uint32_t x = 0; x < width; x++) {
-                row[x] = pix;
-            }
-        }
-        return;
-    }
-    for (uint32_t y = 0; y < height; y++) {
-        volatile uint8_t* row = base + (uint64_t)y * pitch;
-        for (uint32_t x = 0; x < width; x++) {
-            volatile uint8_t* px = row + (uint64_t)x * bytespp;
-            px[0] = b;
-            px[1] = g;
-            px[2] = r;
-            if (bytespp >= 4) {
-                px[3] = 0;
-            }
         }
     }
 }

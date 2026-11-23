@@ -114,6 +114,9 @@ static void pmm_give_free_range(uint64_t pstart, uint64_t plen) {
     if (end > PMM_TRACK_BYTES) {
         end = PMM_TRACK_BYTES;
     }
+    /* Only whole pages inside the region: a partial tail page may share its
+     * frame with the next (reserved / ACPI) region. */
+    end &= ~(uint64_t)(PAGE_SIZE - 1);
     if (end <= pstart) {
         return;
     }
@@ -174,11 +177,17 @@ static void mmap_unreserve_cb(uint64_t base, uint64_t len, uint32_t type, void* 
     ctx->did_free = 1;
 }
 
-static int32_t pmm_alloc_contig(uint32_t n) {
-    if (n == 0 || (uint64_t)n > PMM_MAX_4K_FRAMES) {
+/* ZONE_DMA: frames below 4 GiB, for controllers limited to 32-bit DMA addresses. */
+#define PMM_DMA32_FRAMES ((uint32_t)((4ULL << 30) / PAGE_SIZE))
+
+/* First-fit run of n free frames, all with index < limit. */
+static int32_t pmm_alloc_contig(uint32_t n, uint32_t limit) {
+    if ((uint64_t)limit > PMM_MAX_4K_FRAMES) {
+        limit = (uint32_t)PMM_MAX_4K_FRAMES;
+    }
+    if (n == 0 || n > limit) {
         return -1;
     }
-    const uint32_t limit = (uint32_t)PMM_MAX_4K_FRAMES;
     uint32_t start = pmm_scan_hint;
     for (uint32_t pass = 0; pass < 2; pass++) {
         for (uint32_t i = start; i + n <= limit; ) {
@@ -271,20 +280,34 @@ void physmem_init(void) {
     }
 }
 
+/* "<n> GiB" / "<n> MiB" / "<n> KiB" / "<n> B", truncated to bufsz. */
 static void format_memory_size(uint64_t bytes, char* buffer, size_t bufsz) {
-    (void)bufsz;
-    if (bytes >= 1024 * 1024 * 1024) {
-        uint64_t g = bytes / (1024 * 1024 * 1024);
-        int_to_str((int)g, buffer);
-    } else if (bytes >= 1024 * 1024) {
-        uint64_t m = bytes / (1024 * 1024);
-        int_to_str((int)m, buffer);
-    } else if (bytes >= 1024) {
-        uint64_t k = bytes / 1024;
-        int_to_str((int)k, buffer);
-    } else {
-        int_to_str((int)bytes, buffer);
+    if (!buffer || bufsz == 0) {
+        return;
     }
+    const char* unit = " B";
+    uint64_t v = bytes;
+    /* Whole GiB only from 16 GiB up: 4040 MiB used to print as a misleading "3 GiB". */
+    if (bytes >= (16ULL << 30)) {
+        v = bytes >> 30;
+        unit = " GiB";
+    } else if (bytes >= (1ULL << 20)) {
+        v = bytes >> 20;
+        unit = " MiB";
+    } else if (bytes >= (1ULL << 10)) {
+        v = bytes >> 10;
+        unit = " KiB";
+    }
+    char num[24];
+    uint64_to_str(v, num);
+    size_t n = 0;
+    for (const char* p = num; *p && n + 1 < bufsz; ++p) {
+        buffer[n++] = *p;
+    }
+    for (const char* p = unit; *p && n + 1 < bufsz; ++p) {
+        buffer[n++] = *p;
+    }
+    buffer[n] = '\0';
 }
 
 void memory_init(void) {
@@ -297,7 +320,8 @@ void memory_init(void) {
 }
 
 void* kmalloc(size_t size, uint32_t flags) {
-    if (size == 0) {
+    /* Bound first: larger requests can never succeed, and align_size would wrap. */
+    if (size == 0 || (uint64_t)size > PMM_TRACK_BYTES) {
         return NULL;
     }
     size = align_size(size, PAGE_SIZE);
@@ -314,12 +338,16 @@ void* kmalloc(size_t size, uint32_t flags) {
     return p;
 }
 
+/* Match by physical address so both the identity pointer kmalloc returned and
+ * its direct-map alias (phys_to_virt) find the same block. */
 static mem_block* find_block(void* ptr) {
     if (!ptr) {
         return NULL;
     }
+    uint64_t phys = virt_to_phys_direct(ptr);
     for (uint32_t i = 0; i < memory_block_index; i++) {
-        if (memory_blocks[i].base == ptr && !memory_blocks[i].is_free) {
+        if (!memory_blocks[i].is_free &&
+            virt_to_phys_direct(memory_blocks[i].base) == phys) {
             return &memory_blocks[i];
         }
     }
@@ -355,28 +383,9 @@ bool is_valid_allocation(void* ptr) {
     return b != NULL && !b->is_free;
 }
 
-void* krealloc(void* ptr, size_t size) {
-    if (!ptr) {
-        return kmalloc(size, MEM_ALLOC_NORMAL);
-    }
-    if (size == 0) {
-        kfree(ptr);
-        return NULL;
-    }
-    void* n = kmalloc(size, MEM_ALLOC_NORMAL);
-    if (n) {
-        memory_copy(n, ptr, size);
-        kfree(ptr);
-    }
-    return n;
-}
-
-void* kcalloc(size_t c, size_t s) {
-    return kmalloc(c * s, MEM_ALLOC_ZERO);
-}
-
 void* alloc_pages(size_t num_pages, uint32_t f) {
-    if (num_pages == 0) {
+    /* Bound before multiplying so num_pages * PAGE_SIZE cannot wrap. */
+    if (num_pages == 0 || (uint64_t)num_pages > PMM_MAX_4K_FRAMES) {
         return NULL;
     }
     return kmalloc(num_pages * PAGE_SIZE, f);
@@ -385,26 +394,6 @@ void* alloc_pages(size_t num_pages, uint32_t f) {
 void free_pages(void* p, size_t n) {
     (void)n;
     kfree(p);
-}
-
-bool is_page_allocated(void* ptr) {
-    if (!ptr || !pmm_ready) {
-        return false;
-    }
-    uint64_t phys = virt_to_phys_direct(ptr);
-    uint32_t f = (uint32_t)(phys / PAGE_SIZE);
-    if ((uint64_t)f >= PMM_MAX_4K_FRAMES) {
-        return false;
-    }
-    return (pmm_bitmap[f >> 3U] & (1U << (f & 7U))) != 0;
-}
-
-void* page_to_virt(uint64_t page) {
-    return phys_to_virt(page * PAGE_SIZE);
-}
-
-uint64_t virt_to_page(void* p) {
-    return virt_to_phys_direct(p) >> PAGE_SHIFT;
 }
 
 KernelMemoryStats* memory_get_stats(void) {
@@ -441,15 +430,20 @@ void kernel_memory_print_stats(void) {
 
 void* zone_alloc(MemoryZone zone, size_t size, uint32_t flags) {
     (void)flags;
-    (void)zone;
     if (!pmm_ready || size == 0) {
         return NULL;
     }
-    uint32_t npg = (uint32_t)((size + PAGE_SIZE - 1) / PAGE_SIZE);
+    /* Reject before the uint32_t page count: a bigger request would truncate
+     * (e.g. 16 TiB + 4 KiB -> 1 page) and "succeed" with a tiny buffer. */
+    if ((uint64_t)size > PMM_TRACK_BYTES) {
+        return NULL;
+    }
+    uint32_t npg = (uint32_t)(((uint64_t)size + PAGE_SIZE - 1) / PAGE_SIZE);
     if (npg == 0) {
         return NULL;
     }
-    int32_t st = pmm_alloc_contig(npg);
+    uint32_t limit = (zone == ZONE_DMA) ? PMM_DMA32_FRAMES : (uint32_t)PMM_MAX_4K_FRAMES;
+    int32_t st = pmm_alloc_contig(npg, limit);
     if (st < 0) {
         return NULL;
     }
@@ -469,7 +463,8 @@ void* zone_alloc(MemoryZone zone, size_t size, uint32_t flags) {
         }
         b = &memory_blocks[memory_block_index++];
     }
-    void* base = (void*)(uintptr_t)((uint32_t)st * PAGE_SIZE);
+    /* 64-bit multiply: frames at or above 4 GiB (index >= 0x100000) must not wrap. */
+    void* base = (void*)(uintptr_t)((uint64_t)(uint32_t)st * PAGE_SIZE);
     b->base = base;
     b->size = (size_t)npg * PAGE_SIZE;
     b->is_free = false;
@@ -482,12 +477,6 @@ void* zone_alloc(MemoryZone zone, size_t size, uint32_t flags) {
         mem_stats.used_pages = mem_stats.total_pages - mem_stats.free_pages;
     }
     return base;
-}
-
-void zone_free(MemoryZone z, void* p, size_t s) {
-    (void)z;
-    (void)s;
-    kfree(p);
 }
 
 size_t align_size(size_t s, size_t a) {
@@ -525,8 +514,4 @@ void memory_debug_print(void) {
     int_to_str((int)pmm_count_free(), b);
     console_print_color("Free 4K frames: ", CONSOLE_INFO_COLOR);
     console_println_color(b, CONSOLE_FG_COLOR);
-}
-
-bool memory_check_integrity(void) {
-    return mem_stats.total_bytes == mem_stats.free_bytes + mem_stats.used_bytes;
 }

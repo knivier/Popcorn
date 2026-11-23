@@ -232,6 +232,21 @@ pub extern "C" fn rust_screen_fill_panel() {
 }
 
 #[no_mangle]
+pub extern "C" fn rust_screen_idle_flush() {
+    drivers::screen_idle_flush();
+}
+
+#[no_mangle]
+pub extern "C" fn rust_screen_enable_shadow() -> i32 {
+    drivers::screen_enable_shadow()
+}
+
+#[no_mangle]
+pub extern "C" fn rust_screen_scroll_up(rows: u32, attr: u8) -> i32 {
+    drivers::screen_scroll_up(rows, attr)
+}
+
+#[no_mangle]
 pub extern "C" fn rust_screen_invalidate() {
     drivers::screen_invalidate();
 }

@@ -70,9 +70,11 @@ static int64_t console_ioctl(Device* dev, uint64_t request, void* argp) {
             return 0;
         case 0x540B:
             if (argp) {
+                /* struct winsize {ws_row, ws_col, ws_xpixel, ws_ypixel}: live
+                 * grid; rows = scroll region (heartbeat + status rows excluded). */
                 uint16_t* winsize = (uint16_t*)argp;
-                winsize[0] = 80;
-                winsize[1] = 25;
+                winsize[0] = (uint16_t)CONSOLE_SCROLL_ROWS;
+                winsize[1] = (uint16_t)console_cols();
                 winsize[2] = 0;
                 winsize[3] = 0;
             }

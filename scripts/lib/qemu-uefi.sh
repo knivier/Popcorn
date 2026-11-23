@@ -74,7 +74,13 @@ qemu_assert_boot_img() {
         log WARNING "QEMU test-install: UNSAFE image (scratch files under target/ only)"
         return 0
       fi
-      die "REFUSING to boot $UEFI_IMG. Interactive/flash path is target/popcorn-uefi.img"
+      # core.sh test-shell: serial-console test image. Still subject to the
+      # auto-install check below.
+      if [[ "${POPCORN_SHELL_TEST:-}" == 1 && "$(basename "$UEFI_IMG")" == UNSAFE-popcorn-shelltest.img ]]; then
+        :
+      else
+        die "REFUSING to boot $UEFI_IMG. Interactive/flash path is target/popcorn-uefi.img"
+      fi
       ;;
   esac
   if grep -aE -q 'install-selftest|rust_test_disk_install' "$UEFI_IMG"; then
@@ -96,14 +102,17 @@ qemu_prepare_scratch_disks() {
   qemu_assert_guest_file "$INTERNAL_IMG" "emulated NVMe scratch"
 }
 
+# Fills QEMU_DATA_DISK_ARGS. An array (not printf + unquoted $(...)) keeps disk
+# paths intact when the checkout path contains spaces.
 qemu_uefi_data_disk_args() {
-  printf '%s\n' \
-    -drive "if=none,id=popmsc,format=raw,file=$USB_DATA_IMG" \
-    -device "usb-storage,bus=xhci.0,drive=popmsc" \
-    -drive "if=none,id=popusb,format=raw,file=$DATA_IMG" \
-    -device "virtio-blk-pci,drive=popusb,disable-modern=on" \
-    -drive "if=none,id=popnvme,format=raw,file=$INTERNAL_IMG" \
+  QEMU_DATA_DISK_ARGS=(
+    -drive "if=none,id=popmsc,format=raw,file=$USB_DATA_IMG"
+    -device "usb-storage,bus=xhci.0,drive=popmsc"
+    -drive "if=none,id=popusb,format=raw,file=$DATA_IMG"
+    -device "virtio-blk-pci,drive=popusb,disable-modern=on"
+    -drive "if=none,id=popnvme,format=raw,file=$INTERNAL_IMG"
     -device "nvme,drive=popnvme,serial=POPCORN1"
+  )
 }
 
 # Video for UEFI/GOP: std VGA often leaves a blank GTK window while the kernel
@@ -159,16 +168,20 @@ qemu_uefi_usb_args() {
   qemu_assert_boot_img
   qemu_assert_guest_file "$OVMF_VARS" "OVMF vars"
   qemu_prepare_scratch_disks
+  qemu_uefi_data_disk_args
+  qemu_kill_guest
+  # Video args carry no paths, so word-splitting them is safe.
   # shellcheck disable=SC2046
   qemu-system-x86_64 \
-    -machine q35 -m 4096 -cpu max \
+    -machine q35 -accel kvm -accel tcg -m 4096 -cpu max \
     -drive "if=pflash,format=raw,readonly=on,file=$code" \
     -drive "if=pflash,format=raw,file=$OVMF_VARS" \
-    -drive "if=none,id=usbstick,format=raw,file=$UEFI_IMG" \
+    -drive "if=none,id=usbstick,format=raw,file=$UEFI_IMG${QEMU_BOOT_DRIVE_OPTS:-}" \
     -device qemu-xhci,id=xhci \
     -device usb-storage,bus=xhci.0,drive=usbstick \
-    $(qemu_uefi_data_disk_args) \
+    "${QEMU_DATA_DISK_ARGS[@]}" \
     $(qemu_uefi_video_args) \
+    -pidfile "$QEMU_PIDFILE" \
     "${extra[@]}"
 }
 
@@ -184,7 +197,7 @@ qemu_uefi_test_stability() {
   rm -f "$OVMF_VARS"
   ensure_ovmf_vars "$OVMF_VARS"
   rm -f "$dbg" "$serial"
-  qemu_kill_all
+  qemu_kill_guest
   sleep 1
 
   qemu_uefi_usb_args "$code" \
@@ -195,7 +208,7 @@ qemu_uefi_test_stability() {
 
   local waited=0
   while [[ $waited -lt "$boot_timeout" ]]; do
-    if ! pgrep -f qemu-system-x86_64 >/dev/null; then
+    if ! qemu_guest_alive; then
       echo "FAIL: QEMU exited before boot completed (${waited}s)"
       echo "debugcon: $(cat "$dbg" 2>/dev/null || true)"
       echo "serial: $(cat "$serial" 2>/dev/null || true)"
@@ -210,14 +223,14 @@ qemu_uefi_test_stability() {
 
   # Stay alive a bit after reaching kmain.
   sleep 5
-  if ! pgrep -f qemu-system-x86_64 >/dev/null; then
+  if ! qemu_guest_alive; then
     echo "FAIL: QEMU exited after reaching kmain"
     echo "debugcon: $(cat "$dbg" 2>/dev/null || true)"
     echo "serial: $(cat "$serial" 2>/dev/null || true)"
     return 1
   fi
 
-  qemu_kill_all
+  qemu_kill_guest
   local body
   body="$(cat "$dbg" 2>/dev/null || true)"
   echo "debugcon: $body"
@@ -246,7 +259,7 @@ qemu_uefi_test_alive() {
   mkdir -p "$out_dir" "$RUNTIME_DIR"
   rm -f "$mon" "$debug"
   find "$out_dir" -maxdepth 1 -name 't*.ppm' -delete 2>/dev/null || true
-  qemu_kill_all
+  qemu_kill_guest
 
   qemu_uefi_usb_args "$code" \
     -monitor "unix:$mon,server,nowait" \
@@ -272,7 +285,7 @@ qemu_uefi_test_alive() {
   dump_screen t20
   sleep 12
   dump_screen t30
-  qemu_kill_all
+  qemu_kill_guest
 
   TARGET_DIR="$POPCORN_TARGET" python3 - <<'PY'
 import os
@@ -294,7 +307,8 @@ if dbg.exists():
 
 def read_ppm(path):
     data = path.read_bytes()
-    m = re.search(br"P6\s+(\d+)\s+(\d+)\s+(\d+)", data)
+    # Exactly one whitespace byte separates maxval from the raster.
+    m = re.search(br"P6\s+(\d+)\s+(\d+)\s+(\d+)\s", data)
     if not m:
         return None
     w, h = int(m.group(1)), int(m.group(2))
@@ -341,7 +355,7 @@ def ppm_diff_count(a_path, b_path):
 
 first, last = ppm_files[0], ppm_files[-1]
 diff_px = ppm_diff_count(first, last)
-print(f"pixel diffs {first.name} vs {last.name}: {diff_px // 3}")
+print(f"pixel diffs {first.name} vs {last.name}: {diff_px}")
 
 dbg_body = dbg.read_text(errors="replace") if dbg.exists() else ""
 probes = [pr for _, pr, _ in rows]
@@ -370,7 +384,7 @@ qemu_uefi_test_debugcon() {
   dbg="$POPCORN_TARGET/uefi-smoke-debugcon.log"
   ensure_ovmf_vars "$OVMF_VARS"
   rm -f "$dbg"
-  qemu_kill_all
+  qemu_kill_guest
 
   qemu_uefi_usb_args "$code" \
     -debugcon "file:$dbg" -global isa-debugcon.iobase=0xe9 \
@@ -378,52 +392,92 @@ qemu_uefi_test_debugcon() {
     -display none -no-reboot -no-shutdown \
     -daemonize
 
-  local waited=0
+  # Wait for Phase2 to finish ('2' after 'M') or for an exception dump.
+  local waited=0 body=""
   while [[ $waited -lt 40 ]]; do
-    if [[ -f "$dbg" ]] && grep -q 'M' "$dbg" 2>/dev/null; then
-      break
-    fi
+    body="$(cat "$dbg" 2>/dev/null || true)"
+    case "$body" in *M*2*) break ;; esac
+    boot_log_has_exception "$body" && break
+    qemu_guest_alive || break
     sleep 1
     waited=$((waited + 1))
   done
-  qemu_kill_all
+  qemu_kill_guest
   [[ -f "$dbg" ]] || die "no debugcon log"
 
-  local body
   body="$(cat "$dbg")"
   echo "debugcon: ${body:0:40}..."
+  # Exception dump text contains I/S/r/a/2 and would satisfy the tag checks.
+  if boot_log_has_exception "$body"; then
+    die "CPU exception during boot: ${body:0:240}"
+  fi
   case "$body" in *icd*KL*) ;; *) die "expected boot trace icd..KL" ;; esac
   case "$body" in *R*) ;; *) die "expected R (UEFI RAM / MBI parsed)" ;; esac
-  case "$body" in *r*) ;; *) die "expected r (rust_init / Rust active)" ;; esac
-  case "$body" in *a*) ;; *) die "expected a (Rust GlobalAlloc / kmalloc)" ;; esac
+  case "$body" in *r*M*) ;; *) die "expected r (rust_init / Rust active) before M" ;; esac
+  case "$body" in *a*M*) ;; *) die "expected a (Rust GlobalAlloc / kmalloc) before M" ;; esac
   case "$body" in *M*) ;; *) die "expected M (kmain loop entered)" ;; esac
-  case "$body" in *I*) ;; *) die "expected I (Phase2 ioctl→device)" ;; esac
-  case "$body" in *B*) ;; *) die "expected B (Phase2 wait-queue wake)" ;; esac
-  case "$body" in *S*) ;; *) die "expected S (Phase2 sleep wake)" ;; esac
-  case "$body" in *2*) ;; *) die "expected 2 (Phase2 self-test passed)" ;; esac
+  # Phase2 tags are emitted in order after kmain's M.
+  case "$body" in *M*I*) ;; *) die "expected I (Phase2 ioctl→device) after M" ;; esac
+  case "$body" in *M*I*B*) ;; *) die "expected B (Phase2 wait-queue wake)" ;; esac
+  case "$body" in *M*I*B*S*) ;; *) die "expected S (Phase2 sleep wake)" ;; esac
+  case "$body" in *M*I*B*S*2*) ;; *) die "expected 2 (Phase2 self-test passed)" ;; esac
   echo "PASS: debugcon boot trace"
+}
+
+_qemu_uefi_pf_restore_cflags() {
+  if [[ -n "${_POPCORN_PF_HAD_CFLAGS:-}" ]]; then
+    export POPCORN_CFLAGS="$_POPCORN_PF_SAVED_CFLAGS"
+  else
+    unset POPCORN_CFLAGS
+  fi
+}
+
+# Put the hardware-safe build back after the POPCORN_TEST_PF kernel. Runs on
+# every exit path (failed check, QEMU error, die, set -e via the EXIT trap) so
+# target/kernel and the flashable popcorn-uefi.img never keep a kernel that
+# page-faults on boot. Pass "exit" when called from the EXIT trap.
+_qemu_uefi_pf_restore() {
+  local on_exit="${1:-}"
+  trap - EXIT
+  if [[ -z "$on_exit" && -n "${_POPCORN_PF_PREV_EXIT:-}" ]]; then
+    trap -- "$_POPCORN_PF_PREV_EXIT" EXIT
+  fi
+  _qemu_uefi_pf_restore_cflags
+  log INFO "Rebuilding kernel without POPCORN_TEST_PF"
+  build_all_uefi
+  if [[ -n "$on_exit" && -n "${_POPCORN_PF_PREV_EXIT:-}" ]]; then
+    eval "$_POPCORN_PF_PREV_EXIT"
+  fi
 }
 
 # Rebuild with -DPOPCORN_TEST_PF, boot briefly, expect #PF dump on debugcon/COM1.
 qemu_uefi_test_pf() {
-  local code dbg serial
+  local code dbg serial rc=0
   code="$(find_edk_code || true)"
   [[ -n "$code" ]] || { echo "FAIL: edk2-x86_64-code.fd not found" >&2; return 1; }
 
   log INFO "Building kernel with POPCORN_TEST_PF for exception dump check"
-  export POPCORN_CFLAGS="-DPOPCORN_TEST_PF"
+  _POPCORN_PF_HAD_CFLAGS="${POPCORN_CFLAGS+1}"
+  _POPCORN_PF_SAVED_CFLAGS="${POPCORN_CFLAGS:-}"
+  _POPCORN_PF_PREV_EXIT=""
+  if [[ -n "$(trap -p EXIT)" ]]; then
+    # Chain any EXIT trap the caller already installed.
+    eval "set -- $(trap -p EXIT)"
+    _POPCORN_PF_PREV_EXIT="$3"
+  fi
+  trap '_qemu_uefi_pf_restore exit' EXIT
+  export POPCORN_CFLAGS="${POPCORN_CFLAGS:-} -DPOPCORN_TEST_PF"
   build_all_uefi
-  unset POPCORN_CFLAGS
+  _qemu_uefi_pf_restore_cflags
 
   dbg="$POPCORN_TARGET/pf-debugcon.log"
   serial="$POPCORN_TARGET/pf-serial.log"
   rm -f "$OVMF_VARS"
   ensure_ovmf_vars "$OVMF_VARS"
   rm -f "$dbg" "$serial"
-  qemu_kill_all
+  qemu_kill_guest
   sleep 1
 
-  # shellcheck disable=SC2046
   qemu_uefi_usb_args "$code" \
     -debugcon "file:$dbg" -global isa-debugcon.iobase=0xe9 \
     -serial "file:$serial" \
@@ -436,24 +490,32 @@ qemu_uefi_test_pf() {
     if grep -q 'CR2=' "$dbg" 2>/dev/null || grep -q 'CR2=' "$serial" 2>/dev/null; then
       break
     fi
-    if ! pgrep -f qemu-system-x86_64 >/dev/null; then
+    if ! qemu_guest_alive; then
       break
     fi
     sleep 1
     waited=$((waited + 1))
   done
-  qemu_kill_all
+  qemu_kill_guest
 
   local body
   body="$(cat "$dbg" 2>/dev/null || true)$(cat "$serial" 2>/dev/null || true)"
   echo "pf log: ${body:0:240}"
-  case "$body" in *'#PF'*) ;; *) echo "FAIL: no #PF dump on serial/debugcon"; return 1 ;; esac
-  case "$body" in *CR2=*) ;; *) echo "FAIL: #PF dump missing CR2="; return 1 ;; esac
-  case "$body" in *RIP=*) ;; *) echo "FAIL: #PF dump missing RIP="; return 1 ;; esac
-  echo "PASS: #PF serial dump"
+  if [[ "$body" != *'#PF'* ]]; then
+    echo "FAIL: no #PF dump on serial/debugcon"
+    rc=1
+  elif [[ "$body" != *CR2=* ]]; then
+    echo "FAIL: #PF dump missing CR2="
+    rc=1
+  elif [[ "$body" != *RIP=* ]]; then
+    echo "FAIL: #PF dump missing RIP="
+    rc=1
+  else
+    echo "PASS: #PF serial dump"
+  fi
 
-  log INFO "Rebuilding kernel without POPCORN_TEST_PF"
-  build_all_uefi
+  _qemu_uefi_pf_restore
+  return "$rc"
 }
 
 qemu_uefi_smoke() {
@@ -470,9 +532,41 @@ qemu_uefi_smoke() {
   echo "PASS: UEFI QEMU smoke"
 }
 
+# Classify the install selftest from the debugcon text; prints pass, fail or
+# pending. Single-letter tags collide (every boot starts with init's 'i', and
+# Phase2 emits 'I' after kmain), so only the window between boot_stage('t') and
+# boot_stage('e') is read: init_transition_to_console() runs
+# rust_test_disk_install there, which emits 'I' (pass) or 'i' (fail). Unique
+# INSTOK / INSTFAIL markers take precedence if the kernel emits them.
+install_selftest_verdict() {
+  local body="$1" window
+  if boot_log_has_exception "$body"; then
+    echo fail
+    return 0
+  fi
+  case "$body" in
+    *INSTFAIL*) echo fail; return 0 ;;
+    *INSTOK*) echo pass; return 0 ;;
+  esac
+  case "$body" in
+    *icd*t*e*) ;;
+    *) echo pending; return 0 ;;
+  esac
+  window="${body#*icd}"
+  window="${window#*t}"
+  window="${window%%e*}"
+  case "$window" in
+    *i*) echo fail ;;
+    *I*) echo pass ;;
+    # No marker: the C side refused the selftest (not QEMU) or it never ran.
+    *) echo fail ;;
+  esac
+}
+
 # Boot with POPCORN_TEST_INSTALL kernel (QEMU hypervisor only): runs
 # rust_test_disk_install during init onto USB/virtio, never NVMe.
-# expects debugcon 'I', then verifies BOOT/KERNEL on the USB data image via mtools.
+# expects the install 'I' (see install_selftest_verdict), then verifies
+# BOOT/KERNEL on the USB data image via mtools.
 qemu_uefi_test_install() {
   local code dbg serial boot_timeout
   code="$(find_edk_code || true)"
@@ -486,7 +580,7 @@ qemu_uefi_test_install() {
   ensure_ovmf_vars "$OVMF_VARS"
   ensure_raw_img "$USB_DATA_IMG" 64 "USB mass-storage data disk"
   rm -f "$dbg" "$serial"
-  qemu_kill_all
+  qemu_kill_guest
   sleep 1
 
   qemu_uefi_usb_args "$code" \
@@ -495,16 +589,12 @@ qemu_uefi_test_install() {
     -display none -no-reboot \
     -daemonize
 
-  local waited=0
+  local waited=0 body="" verdict=""
   while [[ $waited -lt "$boot_timeout" ]]; do
-    if [[ -f "$dbg" ]] && grep -q 'I' "$dbg" 2>/dev/null; then
-      break
-    fi
-    if [[ -f "$dbg" ]] && grep -q 'i' "$dbg" 2>/dev/null && grep -q 'M' "$dbg" 2>/dev/null; then
-      # reached kmain but install selftest failed
-      break
-    fi
-    if ! pgrep -f qemu-system-x86_64 >/dev/null; then
+    body="$(cat "$dbg" 2>/dev/null || true)"
+    verdict="$(install_selftest_verdict "$body")"
+    [[ "$verdict" != pending ]] && break
+    if ! qemu_guest_alive; then
       echo "FAIL: QEMU exited early (${waited}s)"
       echo "debugcon: $(cat "$dbg" 2>/dev/null || true)"
       echo "serial: $(cat "$serial" 2>/dev/null || true)"
@@ -515,18 +605,15 @@ qemu_uefi_test_install() {
   done
 
   sleep 2
-  qemu_kill_all
-  local body
+  qemu_kill_guest
   body="$(cat "$dbg" 2>/dev/null || true)"
+  verdict="$(install_selftest_verdict "$body")"
   echo "debugcon: $body"
-  case "$body" in
-    *I*) ;;
-    *)
-      echo "FAIL: install selftest marker I not seen (got fail=i if present)"
-      echo "serial: $(cat "$serial" 2>/dev/null || true)"
-      return 1
-      ;;
-  esac
+  if [[ "$verdict" != pass ]]; then
+    echo "FAIL: install selftest did not pass (verdict: $verdict)"
+    echo "serial: $(cat "$serial" 2>/dev/null || true)"
+    return 1
+  fi
 
   # Verify FAT contents on the data image the guest installed onto.
   if have mdir; then
@@ -537,6 +624,12 @@ qemu_uefi_test_install() {
     fi
     if ! mdir -i "$USB_DATA_IMG" ::/BOOT | grep -qi KERNEL; then
       echo "FAIL: KERNEL missing under ::/BOOT"
+      return 1
+    fi
+    # The test loader's UTF-16 banner (bootx64.c, POPCORN_TEST_INSTALL only).
+    if have mtype && mtype -i "$USB_DATA_IMG" ::/EFI/BOOT/BOOTX64.EFI 2>/dev/null \
+        | LC_ALL=C grep -qaP 't\x00e\x00s\x00t\x00-\x00i\x00n\x00s\x00t\x00a\x00l\x00l\x00 \x00l\x00o\x00a\x00d\x00e\x00r'; then
+      echo "FAIL: the test-only loader was installed onto the target"
       return 1
     fi
     if ! mdir -i "$USB_DATA_IMG" ::/EFI/BOOT | grep -qi BOOTX64; then
@@ -567,21 +660,92 @@ qemu_uefi_run_interactive() {
   qemu_assert_boot_img
   qemu_assert_guest_file "$OVMF_VARS" "OVMF vars"
   qemu_prepare_scratch_disks
+  qemu_uefi_data_disk_args
+  # Free the pidfile lock / VNC port held by an earlier Popcorn guest.
+  qemu_kill_guest
   log INFO "QEMU UEFI USB boot (interactive window)"
   log INFO "Video: virtio-vga/ramfb (GOP). Serial boot tags still print here."
   log INFO "Guest disks: files under target/ only (host Windows/NVMe never attached)"
 
+  # Video/display args carry no paths, so word-splitting them is safe.
   # shellcheck disable=SC2046
   exec qemu-system-x86_64 \
-    -machine q35 -m 4096 -cpu max \
+    -machine q35 -accel kvm -accel tcg -m 4096 -cpu max \
     -drive "if=pflash,format=raw,readonly=on,file=$code" \
     -drive "if=pflash,format=raw,file=$OVMF_VARS" \
     -drive "if=none,id=usbstick,format=raw,file=$UEFI_IMG" \
     -device qemu-xhci,id=xhci \
     -device usb-storage,bus=xhci.0,drive=usbstick \
-    $(qemu_uefi_data_disk_args) \
+    "${QEMU_DATA_DISK_ARGS[@]}" \
     $(qemu_uefi_video_args) \
     $(qemu_uefi_display_args) \
+    -pidfile "$QEMU_PIDFILE" \
     -serial stdio \
     -no-reboot
+}
+
+
+# --- Shell test harness (core.sh test-shell) --------------------------------
+# Boots for scripts/lib/shell_test.py. The kernel is built with
+# -DPOPCORN_SERIAL_CONSOLE, so COM1 carries the mirrored console plus a
+# prompt-ready marker; keys are typed through HMP sendkey on the monitor socket.
+# Inputs (env, all set by shell_test.py):
+#   SHELL_SERIAL    COM1 capture file
+#   SHELL_MON       HMP unix socket path (must be on a native Linux fs)
+#   SHELL_DEBUGCON  debugcon (0xE9) capture file
+#   SHELL_ALLOW_REBOOT=1  omit -no-reboot (needed for a <REBOOT> step; HMP
+#                   system_reset would otherwise power the guest off)
+# Daemonized; stop with qemu_kill_guest (pidfile = only this guest).
+_shell_boot_common_args() {
+  SHELL_QEMU_ARGS=(
+    -monitor "unix:${SHELL_MON:?SHELL_MON},server,nowait"
+    -debugcon "file:${SHELL_DEBUGCON:?SHELL_DEBUGCON}" -global isa-debugcon.iobase=0xe9
+    -display none
+  )
+  if [[ -n "${SHELL_SERIAL_SOCK:-}" ]]; then
+    # COM1 is bidirectional: the harness types bytes into the socket (fast input
+    # path of the POPCORN_SERIAL_CONSOLE kernel) and output is still logged.
+    rm -f "$SHELL_SERIAL_SOCK"
+    SHELL_QEMU_ARGS+=(
+      -chardev "socket,id=com1,path=$SHELL_SERIAL_SOCK,server=on,wait=off,logfile=${SHELL_SERIAL:?SHELL_SERIAL}"
+      -serial chardev:com1
+    )
+  else
+    SHELL_QEMU_ARGS+=(-serial "file:${SHELL_SERIAL:?SHELL_SERIAL}")
+  fi
+  [[ "${SHELL_ALLOW_REBOOT:-0}" == 1 ]] || SHELL_QEMU_ARGS+=(-no-reboot)
+}
+
+# UEFI: same machine/disks as qemu_uefi_usb_args. The boot stick is opened with
+# snapshot=on so a test that wipes or installs over the boot disk never touches
+# the image file (writes live in a temp overlay for this QEMU process only).
+qemu_uefi_shell_boot() {
+  local code
+  code="$(find_edk_code || true)"
+  [[ -n "$code" ]] || { echo "FAIL: edk2-x86_64-code.fd not found" >&2; return 1; }
+  ensure_ovmf_vars "$OVMF_VARS"
+  mkdir -p "$(dirname "$SHELL_MON")"
+  rm -f "$SHELL_MON"
+  _shell_boot_common_args
+  QEMU_BOOT_DRIVE_OPTS=",snapshot=on" qemu_uefi_usb_args "$code" \
+    "${SHELL_QEMU_ARGS[@]}" -daemonize
+}
+
+# GRUB/BIOS: the legacy Multiboot2 ISO (PIT IRQ mode) with the same scratch data
+# disks as UEFI (xHCI usb-storage, virtio-blk, NVMe) so both paths see a disk set.
+qemu_legacy_shell_boot() {
+  local iso="${SHELL_ISO:-$POPCORN_TARGET/UNSAFE/UNSAFE-popcorn-shelltest.iso}"
+  qemu_assert_guest_file "$iso" "shell-test ISO"
+  mkdir -p "$(dirname "$SHELL_MON")"
+  rm -f "$SHELL_MON"
+  qemu_kill_guest
+  qemu_prepare_scratch_disks
+  qemu_uefi_data_disk_args
+  _shell_boot_common_args
+  qemu-system-x86_64 -machine q35 -accel kvm -accel tcg -m 2048 -cpu max \
+    -cdrom "$iso" -boot d \
+    -device qemu-xhci,id=xhci \
+    "${QEMU_DATA_DISK_ARGS[@]}" \
+    -pidfile "$QEMU_PIDFILE" \
+    "${SHELL_QEMU_ARGS[@]}" -daemonize
 }

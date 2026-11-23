@@ -85,7 +85,6 @@ typedef struct {
     unsigned int cursor_y;
     unsigned char current_color;
     bool cursor_visible;
-    bool double_buffer_enabled;
     int scroll_offset;
     bool wrap_enabled;
 } ConsoleState;
@@ -118,7 +117,6 @@ void console_println_color(const char* str, unsigned char color);
 void console_scroll(void);
 void console_newline(void);
 void console_backspace(void);
-void console_draw_box(unsigned int x, unsigned int y, unsigned int width, unsigned int height, unsigned char color);
 void console_draw_header(const char* title);
 void console_draw_prompt(void);
 void console_draw_prompt_with_path(const char* path);
@@ -129,13 +127,7 @@ void console_print_success(const char* message);
 void console_print_info(const char* message);
 void console_print_warning(const char* message);
 
-unsigned char make_color(unsigned char foreground, unsigned char background);
-void console_center_text(const char* text, unsigned int y, unsigned char color);
 void console_draw_separator(unsigned int y, unsigned char color);
-
-void console_enable_double_buffer(bool enable);
-void console_swap_buffers(void);
-void console_flush(void);
 
 void console_scroll_up(void);
 void console_scroll_down(void);
@@ -143,6 +135,9 @@ void console_scroll_to_bottom(void);
 void console_save_line(unsigned int y);
 void console_restore_view(void);
 void console_set_wrap(bool enabled);
+#ifdef POPCORN_SERIAL_CONSOLE
+void console_test_idle_marker(uint64_t n);
+#endif
 bool console_wrap_enabled(void);
 
 #endif /* CONSOLE_H */

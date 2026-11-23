@@ -279,12 +279,14 @@ fn line_u32(label: &str, v: u32, color: u8) {
 }
 
 fn format_bytes(bytes: u64, buf: &mut [u8]) {
-    let (val, suf): (u64, &[u8]) = if bytes >= 1024 * 1024 * 1024 {
-        (bytes / (1024 * 1024 * 1024), b" GB")
-    } else if bytes >= 1024 * 1024 {
-        (bytes / (1024 * 1024), b" MB")
+    /* Whole GiB only from 16 GiB up (same rule as memory.c): truncating to
+     * whole GiB below that turned ~4040 MiB into a misleading "3 GB". */
+    let (val, suf): (u64, &[u8]) = if bytes >= 16 << 30 {
+        (bytes >> 30, b" GiB")
+    } else if bytes >= 1 << 20 {
+        (bytes >> 20, b" MiB")
     } else if bytes >= 1024 {
-        (bytes / 1024, b" KB")
+        (bytes >> 10, b" KiB")
     } else {
         (bytes, b" B")
     };

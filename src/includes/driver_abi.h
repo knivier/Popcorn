@@ -51,6 +51,13 @@ void rust_screen_paint_bg(uint32_t rgb);
 void rust_screen_relayout(void);
 void rust_screen_fill_panel(void);
 void rust_screen_invalidate(void);
+/* Framebuffer only: allocate the RAM text shadow (call after memory_init). */
+int rust_screen_enable_shadow(void);
+/* Push framebuffer rows a paced update left pending (idle loop). */
+void rust_screen_idle_flush(void);
+/* Scroll cell rows [0, rows) up one, blank the last with attr. 1 = handled
+ * (framebuffer); 0 = caller must scroll VGA text itself. */
+int rust_screen_scroll_up(uint32_t rows, uint8_t attr);
 
 void device_register_rust(const char* name);
 

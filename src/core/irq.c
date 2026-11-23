@@ -3,8 +3,8 @@
 
 extern void write_port(unsigned short port, unsigned char data);
 extern char read_port(unsigned short port);
-extern void timer_handler(void);
-extern void keyboard_handler(void);
+/* idt.asm: one generic entry stub per ISA IRQ (vectors 0x20-0x2F). */
+extern const uint64_t irq_stub_table[IRQ_COUNT];
 
 #define INTERRUPT_GATE 0x8eU
 #define PIC1_CMD 0x20
@@ -21,12 +21,6 @@ static uint32_t g_spurious_irq15;
 /* >0: timer must EOI but must NOT run the scheduler (USB/xHCI critical sections). */
 static volatile int g_irq_quiet;
 
-/* Known asm entry points for early IRQs; later IRQs can add stubs here. */
-static void (*const g_irq_stubs[IRQ_COUNT])(void) = {
-    [0] = timer_handler,
-    [1] = keyboard_handler,
-};
-
 /* Port 0x80 delay — lets ancient PIC/ISA bridges settle between ICWs. */
 static void io_wait(void) {
     write_port(0x80, 0);
@@ -40,6 +34,15 @@ void irq_init(void) {
     g_spurious_irq7 = 0;
     g_spurious_irq15 = 0;
     g_irq_quiet = 0;
+
+    /*
+     * Present gates for every remapped PIC vector, not only registered ones: the 8259
+     * delivers spurious IRQ7/IRQ15 even while those lines are masked, and a stray IRQ
+     * on a not-present gate would raise #NP instead of reaching irq_dispatch.
+     */
+    for (uint8_t i = 0; i < IRQ_COUNT; i++) {
+        idt_set_gate((uint8_t)(0x20U + i), irq_stub_table[i], INTERRUPT_GATE, 0U);
+    }
 }
 
 void irq_quiet_enter(void) {
@@ -57,12 +60,12 @@ int irq_quiet_active(void) {
 }
 
 bool irq_register(uint8_t irq, irq_handler_t handler) {
-    if (irq >= IRQ_COUNT || !handler || !g_irq_stubs[irq]) {
+    if (irq >= IRQ_COUNT || !handler) {
         return false;
     }
     g_irq_handlers[irq] = handler;
-    idt_set_gate((uint8_t)(0x20U + irq), (uint64_t)(uintptr_t)g_irq_stubs[irq],
-                 INTERRUPT_GATE, 0U);
+    /* Gate already present from irq_init; re-set it so registration alone is enough. */
+    idt_set_gate((uint8_t)(0x20U + irq), irq_stub_table[irq], INTERRUPT_GATE, 0U);
     return true;
 }
 

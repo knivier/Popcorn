@@ -10,6 +10,8 @@ TARGET_TRIPLE="x86_64-unknown-elf"
 KERNEL_OUT="${KERNEL_OUT:-$POPCORN_TARGET/kernel}"
 ISO_OUT="${ISO_OUT:-$POPCORN_TARGET/popcorn.iso}"
 ISO_STAGING="${ISO_STAGING:-$POPCORN_TARGET/isodir}"
+# POPCORN_CFLAGS the current $KERNEL_OUT was linked with (detects leftover test kernels).
+KERNEL_CFLAGS_STAMP="${KERNEL_CFLAGS_STAMP:-$POPCORN_TARGET/kernel.cflags}"
 QEMU_MEMORY="${QEMU_MEMORY:-256}"
 QEMU_CORES="${QEMU_CORES:-1}"
 
@@ -56,7 +58,7 @@ build_rust_kernel() {
   [[ -f "$rust_dir/Cargo.toml" ]] || die "Missing Rust workspace: $rust_dir/Cargo.toml"
   if [[ "${POPCORN_CFLAGS:-}" == *POPCORN_TEST_INSTALL* ]]; then
     extra=(--features qemu-install-selftest)
-    log WARN "Rust: qemu-install-selftest ON — this kernel must not be flashed"
+    log WARNING "Rust: qemu-install-selftest ON — this kernel must not be flashed"
   fi
   log INFO "Building Rust crate popcorn_kernel (build-std, large code model)"
   (
@@ -164,11 +166,23 @@ compile_c() {
 link_kernel() {
   [[ -f "$POPCORN_SRC/link.ld" ]] || die "Missing linker script: link.ld"
   log INFO "Linking kernel"
+  rm -f "$KERNEL_CFLAGS_STAMP"
   "$LD" -m elf_x86_64 -T "$POPCORN_SRC/link.ld" -o "$KERNEL_OUT" "$@" >>"$BUILD_LOG" 2>&1 \
     || die "Link failed"
   [[ -f "$KERNEL_OUT" ]] || die "Kernel output missing: $KERNEL_OUT"
   assert_kernel_not_auto_install
+  printf '%s' "${POPCORN_CFLAGS:-}" >"$KERNEL_CFLAGS_STAMP"
   log SUCCESS "Kernel built: $KERNEL_OUT"
+}
+
+# True if $KERNEL_OUT must be rebuilt: missing, linked with different
+# POPCORN_CFLAGS (e.g. a leftover POPCORN_TEST_PF kernel), or older than src/.
+kernel_stale() {
+  [[ -f "$KERNEL_OUT" && -f "$KERNEL_CFLAGS_STAMP" ]] || return 0
+  [[ "$(cat "$KERNEL_CFLAGS_STAMP")" == "${POPCORN_CFLAGS:-}" ]] || return 0
+  find "$POPCORN_SRC" \
+    \( -name '*.c' -o -name '*.h' -o -name '*.asm' -o -name '*.rs' -o -name '*.toml' -o -name '*.ld' \) \
+    -newer "$KERNEL_OUT" -print -quit 2>/dev/null | grep -q .
 }
 
 # Flashable kernels must not contain the QEMU auto-install symbol or strings.
@@ -270,52 +284,80 @@ EOF
 }
 
 run_legacy_qemu() {
-  [[ -f "$ISO_OUT" ]] || create_legacy_iso
+  # Repackage when the kernel is newer than the ISO so source edits reach the guest.
+  if [[ ! -f "$ISO_OUT" || "$KERNEL_OUT" -nt "$ISO_OUT" ]]; then
+    assert_kernel_not_auto_install
+    create_legacy_iso
+  fi
+  qemu_kill_guest
   log INFO "Starting QEMU (legacy ISO): RAM=${QEMU_MEMORY}MB cores=${QEMU_CORES}"
-  qemu-system-x86_64 -cdrom "$ISO_OUT" -cpu qemu64 -m "$QEMU_MEMORY" -smp "$QEMU_CORES" -serial stdio
+  qemu-system-x86_64 -accel kvm -accel tcg -cdrom "$ISO_OUT" -cpu qemu64 -m "$QEMU_MEMORY" -smp "$QEMU_CORES" -serial stdio \
+    -pidfile "$QEMU_PIDFILE"
+}
+
+# Debugcon text that only a CPU exception dump (exception.c) produces. Its free
+# text contains letters (I, S, r, a, 2) that would otherwise satisfy tag checks.
+boot_log_has_exception() {
+  case "$1" in
+    *EXCEPTION*|*'#PF'*|*'#GP'*|*'#DF'*) return 0 ;;
+  esac
+  return 1
 }
 
 # GRUB Multiboot2 ISO smoke: reach kmain (debugcon 'M') under IRQ PIT path.
 qemu_legacy_smoke() {
   local dbg serial
-  [[ -f "$KERNEL_OUT" ]] || build_kernel
+  if kernel_stale; then
+    build_kernel
+  fi
+  assert_kernel_not_auto_install
   create_legacy_iso
   dbg="$POPCORN_TARGET/legacy-smoke-debugcon.log"
   serial="$POPCORN_TARGET/legacy-smoke-serial.log"
   rm -f "$dbg" "$serial"
   echo "== GRUB ISO (Multiboot2) =="
-  qemu_kill_all || true
+  qemu_kill_guest
   qemu-system-x86_64 \
-    -cdrom "$ISO_OUT" -cpu qemu64 -m "${QEMU_MEMORY:-512}" \
+    -accel kvm -accel tcg -cdrom "$ISO_OUT" -cpu qemu64 -m "${QEMU_MEMORY:-512}" \
     -debugcon "file:$dbg" -global isa-debugcon.iobase=0xe9 \
     -serial "file:$serial" \
     -display none -no-reboot -no-shutdown \
+    -pidfile "$QEMU_PIDFILE" \
     -daemonize
 
-  local waited=0
+  # Wait for Phase2 to finish ('2' after 'M') or for an exception dump.
+  local waited=0 body=""
   while [[ $waited -lt 45 ]]; do
-    if [[ -f "$dbg" ]] && grep -q 'M' "$dbg" 2>/dev/null; then
-      break
-    fi
+    body="$(cat "$dbg" 2>/dev/null || true)"
+    case "$body" in *M*2*) break ;; esac
+    boot_log_has_exception "$body" && break
+    qemu_guest_alive || break
     sleep 1
     waited=$((waited + 1))
   done
-  qemu_kill_all || true
+  qemu_kill_guest
 
-  local body
-  body="$(cat "$dbg" 2>/dev/null || true)$(cat "$serial" 2>/dev/null || true)"
-  echo "legacy debugcon/serial: ${body:0:80}"
+  # Every tag goes through boot_serial_putc (debugcon + COM1), so debugcon alone
+  # is authoritative; COM1 is only shown for context.
+  body="$(cat "$dbg" 2>/dev/null || true)"
+  echo "legacy debugcon: ${body:0:80}"
+  if boot_log_has_exception "$body"; then
+    echo "FAIL: GRUB ISO hit a CPU exception"
+    echo "serial: $(cat "$serial" 2>/dev/null || true)"
+    return 1
+  fi
   case "$body" in *M*) ;; *)
     echo "FAIL: GRUB ISO did not reach kmain (no debugcon M)"
     return 1
     ;;
   esac
-  case "$body" in *r*) ;; *) echo "FAIL: GRUB missing r (rust_init)"; return 1 ;; esac
-  case "$body" in *a*) ;; *) echo "FAIL: GRUB missing a (Rust alloc)"; return 1 ;; esac
-  case "$body" in *I*) ;; *) echo "FAIL: GRUB missing Phase2 I (ioctl)"; return 1 ;; esac
-  case "$body" in *B*) ;; *) echo "FAIL: GRUB missing Phase2 B (wait-queue)"; return 1 ;; esac
-  case "$body" in *S*) ;; *) echo "FAIL: GRUB missing Phase2 S (sleep)"; return 1 ;; esac
-  case "$body" in *2*) ;; *) echo "FAIL: GRUB missing Phase2 2"; return 1 ;; esac
+  # Boot order: rust_init (r, a) during init, then kmain M, then Phase2 I B S 2.
+  case "$body" in *r*M*) ;; *) echo "FAIL: GRUB missing r (rust_init) before M"; return 1 ;; esac
+  case "$body" in *a*M*) ;; *) echo "FAIL: GRUB missing a (Rust alloc) before M"; return 1 ;; esac
+  case "$body" in *M*I*) ;; *) echo "FAIL: GRUB missing Phase2 I (ioctl)"; return 1 ;; esac
+  case "$body" in *M*I*B*) ;; *) echo "FAIL: GRUB missing Phase2 B (wait-queue)"; return 1 ;; esac
+  case "$body" in *M*I*B*S*) ;; *) echo "FAIL: GRUB missing Phase2 S (sleep)"; return 1 ;; esac
+  case "$body" in *M*I*B*S*2*) ;; *) echo "FAIL: GRUB missing Phase2 2"; return 1 ;; esac
   echo "PASS: GRUB ISO reached kmain (+ Phase2)"
 }
 

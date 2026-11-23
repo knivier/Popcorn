@@ -1,6 +1,7 @@
 /*
  * Popcorn native UEFI loader (BOOTX64.EFI).
- * Loads /boot/kernel ELF segments and jumps to kernel entry (0x100030).
+ * Loads /boot/kernel ELF segments and jumps to the kernel symbol uefi_start
+ * (looked up in the ELF symbol table; not e_entry, which is the GRUB `start`).
  */
 #include "../includes/uefi_boot.h"
 #include <stdint.h>
@@ -38,13 +39,23 @@ typedef CHAR16*  CHAR16_P;
 #define EFI_OPEN_PROTOCOL_BY_HANDLE_PROTOCOL 0x00000001
 #define EFI_LOADER_DATA                      0x00000002
 #define EFI_ALLOCATE_ANY_PAGES               0x00000000
+#define EFI_ALLOCATE_MAX_ADDRESS             0x00000001
 #define EFI_ALLOCATE_ADDRESS                 0x00000002
 #define EFI_MEMORY_WB                        0x00000006
 #define EFI_MMAP_PAGES                       8
 #define PT_LOAD                              1
-#define GOP_PIXEL_BGR_8BIT_PER_CHANNEL       6
-#define GOP_PIXEL_RGB_8BIT_PER_CHANNEL       1
+/* EFI_GRAPHICS_PIXEL_FORMAT (UEFI spec 12.9). */
+#define GOP_PIXEL_RGB_8BIT_PER_CHANNEL       0 /* PixelRedGreenBlueReserved8BitPerColor */
+#define GOP_PIXEL_BGR_8BIT_PER_CHANNEL       1 /* PixelBlueGreenRedReserved8BitPerColor */
+#define GOP_PIXEL_BIT_MASK                   2 /* PixelBitMask: layout in PixelInformation */
+#define GOP_PIXEL_BLT_ONLY                   3 /* PixelBltOnly: no linear framebuffer */
 #define MAX_KERNEL_FILE_BYTES                (16U * 1024U * 1024U)
+/* Kernel physical span sanity limits (link.ld loads at 1 MiB). */
+#define KERNEL_SPAN_MIN_PHYS                 0x100000ULL
+#define KERNEL_SPAN_MAX_BYTES                (256ULL * 1024ULL * 1024ULL)
+/* The kernel reads the MBI through its low identity map; keep it below 4 GiB. */
+#define MBI_MAX_PHYS                         0xFFFFFFFFULL
+#define MBI_MIN_PAGES                        16u /* 64 KiB */
 
 typedef struct {
     UINT32 Data1;
@@ -55,6 +66,8 @@ typedef struct {
 
 static const EFI_GUID gEfiLoadedImageGuid =
     {0x5B1B31A1, 0x9562, 0x11d2, {0x8E, 0x3F, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B}};
+static const EFI_GUID gEfiBlockIoProtocolGuid =
+    {0x964E5B21, 0x6459, 0x11d2, {0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B}};
 static const EFI_GUID gEfiSimpleFileSystemGuid =
     {0x964E5B22, 0x6459, 0x11d2, {0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B}};
 static const EFI_GUID gEfiGraphicsOutputProtocolGuid =
@@ -91,13 +104,14 @@ typedef EFI_STATUS (EFIAPI *EFI_GET_MEMORY_MAP)(UINTN* MemoryMapSize, EFI_MEMORY
 typedef EFI_STATUS (EFIAPI *EFI_ALLOCATE_POOL)(UINTN PoolType, UINTN Size, void** Buffer);
 typedef EFI_STATUS (EFIAPI *EFI_FREE_POOL)(void* Buffer);
 typedef EFI_STATUS (EFIAPI *EFI_ALLOCATE_PAGES)(UINTN Type, UINTN MemoryType, UINTN Pages, EFI_PHYSICAL_ADDRESS* Memory);
+typedef EFI_STATUS (EFIAPI *EFI_FREE_PAGES)(EFI_PHYSICAL_ADDRESS Memory, UINTN Pages);
 
 typedef struct {
     EFI_TABLE_HEADER Hdr;
     void* RaiseTPL;
     void* RestoreTPL;
     EFI_ALLOCATE_PAGES AllocatePages;
-    void* FreePages;
+    EFI_FREE_PAGES FreePages;
     EFI_GET_MEMORY_MAP GetMemoryMap;
     EFI_ALLOCATE_POOL AllocatePool;
     EFI_FREE_POOL FreePool;
@@ -349,6 +363,10 @@ static void gop_prefer_720p(EFI_GRAPHICS_OUTPUT_PROTOCOL* gop) {
         if (EFI_ERROR(query(gop, i, &info_size, &mi)) || !mi) {
             continue;
         }
+        /* Never switch to a mode without a usable linear framebuffer. */
+        if (mi->PixelFormat > GOP_PIXEL_BIT_MASK) {
+            continue;
+        }
         if (mi->HorizontalResolution == 1280 && mi->VerticalResolution == 720) {
             best = i;
             best_score = 0;
@@ -373,6 +391,29 @@ static void gop_prefer_720p(EFI_GRAPHICS_OUTPUT_PROTOCOL* gop) {
     if (best != 0xFFFFFFFFu && best != pm->Mode) {
         (void)set_mode(gop, best);
     }
+}
+
+/* Bit position of the lowest set bit of a GOP PixelBitMask channel mask. */
+static UINT8 mask_shift(UINT32 m) {
+    UINT8 s = 0;
+    if (m == 0) {
+        return 0;
+    }
+    while ((m & 1u) == 0) {
+        m >>= 1;
+        s++;
+    }
+    return s;
+}
+
+/* Number of set bits in a channel mask (channel width). */
+static UINT8 mask_width(UINT32 m) {
+    UINT8 n = 0;
+    while (m) {
+        n += (UINT8)(m & 1u);
+        m >>= 1;
+    }
+    return n;
 }
 
 static BOOLEAN fill_boot_info_from_gop(EFI_SYSTEM_TABLE* st, PopcornUefiBootInfo* info) {
@@ -404,28 +445,52 @@ static BOOLEAN fill_boot_info_from_gop(EFI_SYSTEM_TABLE* st, PopcornUefiBootInfo
         return FALSE;
     }
 
-    memset_local(info, 0, sizeof(PopcornUefiBootInfo));
-    info->magic = POPCORN_UEFI_MAGIC;
-    info->framebuffer_addr = pm->FrameBufferBase;
-    info->framebuffer_width = mi->HorizontalResolution;
-    info->framebuffer_height = mi->VerticalResolution;
-    info->framebuffer_pitch = mi->PixelsPerScanLine * 4;
-    if (info->framebuffer_pitch == 0) {
-        info->framebuffer_pitch = info->framebuffer_width * 4;
+    /* BltOnly modes have no linear framebuffer (FrameBufferBase is not valid). */
+    if (mi->PixelFormat > GOP_PIXEL_BIT_MASK || pm->FrameBufferBase == 0) {
+        return FALSE;
     }
-    info->framebuffer_bpp = 32;
-    info->framebuffer_type = 1;
+
+    UINT32 bytespp = 4;
     if (mi->PixelFormat == GOP_PIXEL_BGR_8BIT_PER_CHANNEL) {
         info->red_pos = 16;
         info->green_pos = 8;
         info->blue_pos = 0;
         info->red_size = info->green_size = info->blue_size = 8;
-    } else {
+    } else if (mi->PixelFormat == GOP_PIXEL_RGB_8BIT_PER_CHANNEL) {
         info->red_pos = 0;
         info->green_pos = 8;
         info->blue_pos = 16;
         info->red_size = info->green_size = info->blue_size = 8;
+    } else {
+        UINT32 all = mi->PixelInformation[0] | mi->PixelInformation[1] |
+                     mi->PixelInformation[2] | mi->PixelInformation[3];
+        UINT32 bits = 32;
+        if (mi->PixelInformation[0] == 0 || mi->PixelInformation[1] == 0 ||
+            mi->PixelInformation[2] == 0) {
+            return FALSE;
+        }
+        while (bits > 0 && (all & (1u << (bits - 1))) == 0) {
+            bits--;
+        }
+        bytespp = (bits + 7u) / 8u;
+        info->red_pos = mask_shift(mi->PixelInformation[0]);
+        info->red_size = mask_width(mi->PixelInformation[0]);
+        info->green_pos = mask_shift(mi->PixelInformation[1]);
+        info->green_size = mask_width(mi->PixelInformation[1]);
+        info->blue_pos = mask_shift(mi->PixelInformation[2]);
+        info->blue_size = mask_width(mi->PixelInformation[2]);
     }
+
+    /* Caller zeroed *info and owns info->magic (set even without GOP). */
+    info->framebuffer_addr = pm->FrameBufferBase;
+    info->framebuffer_width = mi->HorizontalResolution;
+    info->framebuffer_height = mi->VerticalResolution;
+    info->framebuffer_pitch = mi->PixelsPerScanLine * bytespp;
+    if (info->framebuffer_pitch == 0) {
+        info->framebuffer_pitch = info->framebuffer_width * bytespp;
+    }
+    info->framebuffer_bpp = (UINT8)(bytespp * 8u);
+    info->framebuffer_type = 1;
     return TRUE;
 }
 
@@ -580,6 +645,82 @@ static int kernel_is_auto_install(const void* buf, UINTN size) {
     return 0;
 }
 
+#ifdef POPCORN_TEST_INSTALL
+/* scripts refuse to put a loader carrying this marker into a flashable image. */
+__attribute__((used)) static const char popcorn_unsafe_loader_marker[] =
+    "POPCORN-UNSAFE-TEST-INSTALL-LOADER";
+
+/* CPUID.1:ECX[31]: set by hypervisors, clear on bare metal. */
+static int running_under_hypervisor(void) {
+    /* Volatile read keeps the marker from being discarded at link time. */
+    const volatile char* marker = popcorn_unsafe_loader_marker;
+    (void)marker[0];
+    UINT32 a = 1, b, c = 0, d;
+    __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "+c"(c), "=d"(d));
+    (void)b;
+    (void)d;
+    return (c & (1u << 31)) != 0;
+}
+#endif
+
+typedef struct {
+    UINT32 MediaId;
+    BOOLEAN RemovableMedia;
+    BOOLEAN MediaPresent;
+    BOOLEAN LogicalPartition;
+    BOOLEAN ReadOnly;
+    BOOLEAN WriteCaching;
+    UINT32 BlockSize;
+    UINT32 IoAlign;
+    UINT64 LastBlock;
+} EFI_BLOCK_IO_MEDIA_PARTIAL;
+
+typedef struct _EFI_BLOCK_IO_PROTOCOL EFI_BLOCK_IO_PROTOCOL;
+typedef EFI_STATUS (EFIAPI *EFI_BLOCK_READ)(EFI_BLOCK_IO_PROTOCOL* This, UINT32 MediaId,
+                                            UINT64 Lba, UINTN BufferSize, void* Buffer);
+struct _EFI_BLOCK_IO_PROTOCOL {
+    UINT64 Revision;
+    EFI_BLOCK_IO_MEDIA_PARTIAL* Media;
+    void* Reset;
+    EFI_BLOCK_READ ReadBlocks;
+};
+
+/* Record the boot volume's identity for the kernel: the BPB serial and total
+ * sectors of the FAT volume that holds BOOTX64.EFI. Best effort: on any
+ * failure the fields stay zero and the kernel falls back to its own guess. */
+static void fill_boot_volume_info(EFI_HANDLE image, EFI_SYSTEM_TABLE* st, PopcornUefiBootInfo* info) {
+    static UINT8 sec[4096] __attribute__((aligned(4096)));
+    EFI_BOOT_SERVICES_PARTIAL* bs = st->BootServices;
+    EFI_LOADED_IMAGE_PROTOCOL* loaded = NULL;
+    EFI_BLOCK_IO_PROTOCOL* bio = NULL;
+    if (EFI_ERROR(bs->HandleProtocol(image, &gEfiLoadedImageGuid, (void**)&loaded)) ||
+        !loaded || !loaded->DeviceHandle) {
+        return;
+    }
+    if (EFI_ERROR(bs->HandleProtocol(loaded->DeviceHandle, &gEfiBlockIoProtocolGuid, (void**)&bio)) ||
+        !bio || !bio->Media || !bio->Media->MediaPresent) {
+        return;
+    }
+    UINT32 bsz = bio->Media->BlockSize;
+    if (bsz < 512 || bsz > sizeof(sec)) {
+        return;
+    }
+    if (EFI_ERROR(bio->ReadBlocks(bio, bio->Media->MediaId, 0, bsz, sec))) {
+        return;
+    }
+    if (sec[510] != 0x55 || sec[511] != 0xAA) {
+        return;
+    }
+    UINT16 spf16 = (UINT16)(sec[22] | (sec[23] << 8));
+    UINT16 tot16 = (UINT16)(sec[19] | (sec[20] << 8));
+    UINT32 tot32 = (UINT32)sec[32] | ((UINT32)sec[33] << 8) | ((UINT32)sec[34] << 16) | ((UINT32)sec[35] << 24);
+    UINTN so = spf16 == 0 ? 67 : 39; /* FAT32 vs FAT12/16 extended BPB */
+    info->boot_vol_serial = (UINT32)sec[so] | ((UINT32)sec[so + 1] << 8) |
+                            ((UINT32)sec[so + 2] << 16) | ((UINT32)sec[so + 3] << 24);
+    info->boot_vol_sectors = tot16 ? tot16 : tot32;
+    info->boot_vol_valid = POPCORN_UEFI_BOOT_VOL_VALID;
+}
+
 static EFI_STATUS read_kernel_file(EFI_HANDLE image, EFI_SYSTEM_TABLE* st, void** out_buf, UINTN* out_size) {
     EFI_BOOT_SERVICES_PARTIAL* bs = st->BootServices;
 
@@ -595,6 +736,14 @@ static EFI_STATUS read_kernel_file(EFI_HANDLE image, EFI_SYSTEM_TABLE* st, void*
         return status;
     }
     if (kernel_is_auto_install(*out_buf, *out_size)) {
+#ifdef POPCORN_TEST_INSTALL
+        /* QEMU test-install loader only (target/UNSAFE, never the flashable
+         * image): boot the auto-install kernel, but only inside a VM. */
+        if (running_under_hypervisor()) {
+            print_err(st, L"UNSAFE test loader: booting auto-install kernel (VM only)");
+            return EFI_SUCCESS;
+        }
+#endif
         bs->FreePool(*out_buf);
         *out_buf = NULL;
         *out_size = 0;
@@ -604,35 +753,150 @@ static EFI_STATUS read_kernel_file(EFI_HANDLE image, EFI_SYSTEM_TABLE* st, void*
     return EFI_SUCCESS;
 }
 
-static BOOLEAN load_elf_segments(void* kernel_buf, UINTN kernel_size, EFI_BOOT_SERVICES_PARTIAL* bs) {
+/* Validated ELF program headers, or NULL. */
+static Elf64_Phdr* elf_phdrs(void* kernel_buf, UINTN kernel_size, UINT16* count) {
     if (kernel_size < sizeof(Elf64_Ehdr)) {
-        return FALSE;
+        return NULL;
     }
     Elf64_Ehdr* eh = (Elf64_Ehdr*)kernel_buf;
     if (eh->e_ident[0] != 0x7F || eh->e_ident[1] != 'E' || eh->e_ident[2] != 'L' || eh->e_ident[3] != 'F') {
+        return NULL;
+    }
+    if (eh->e_machine != 0x3E || eh->e_phoff == 0 || eh->e_phnum == 0 ||
+        eh->e_phentsize != sizeof(Elf64_Phdr)) {
+        return NULL;
+    }
+    if (eh->e_phoff > kernel_size ||
+        (UINT64)eh->e_phnum * sizeof(Elf64_Phdr) > kernel_size - eh->e_phoff) {
+        return NULL;
+    }
+    *count = eh->e_phnum;
+    return (Elf64_Phdr*)((UINT8*)kernel_buf + eh->e_phoff);
+}
+
+/*
+ * Whole physical span [lo, hi) of every PT_LOAD, page-aligned. Segments share
+ * pages (link.ld packs .rodata right after .text), so per-segment
+ * AllocatePages(ADDRESS) used to fail on the shared page and leave the rest of
+ * that segment free in the firmware map.
+ */
+static BOOLEAN elf_load_span(void* kernel_buf, UINTN kernel_size, UINT64* lo_out, UINT64* hi_out) {
+    UINT16 n = 0;
+    Elf64_Phdr* ph = elf_phdrs(kernel_buf, kernel_size, &n);
+    UINT64 lo = ~0ULL;
+    UINT64 hi = 0;
+    if (!ph) {
         return FALSE;
     }
-    if (eh->e_machine != 0x3E || eh->e_phoff == 0 || eh->e_phnum == 0) {
+    for (UINT16 i = 0; i < n; i++) {
+        if (ph[i].p_type != PT_LOAD || ph[i].p_memsz == 0) {
+            continue;
+        }
+        if (ph[i].p_filesz > ph[i].p_memsz || ph[i].p_paddr + ph[i].p_memsz < ph[i].p_paddr) {
+            return FALSE;
+        }
+        if (ph[i].p_paddr < lo) {
+            lo = ph[i].p_paddr;
+        }
+        if (ph[i].p_paddr + ph[i].p_memsz > hi) {
+            hi = ph[i].p_paddr + ph[i].p_memsz;
+        }
+    }
+    if (hi == 0) {
         return FALSE;
+    }
+    lo &= ~0xFFFULL;
+    hi = (hi + 0xFFFULL) & ~0xFFFULL;
+    if (lo < KERNEL_SPAN_MIN_PHYS || hi - lo > KERNEL_SPAN_MAX_BYTES) {
+        return FALSE;
+    }
+    *lo_out = lo;
+    *hi_out = hi;
+    return TRUE;
+}
+
+static BOOLEAN phys_overlaps(UINT64 a, UINT64 alen, UINT64 b, UINT64 blen) {
+    return a < b + blen && b < a + alen;
+}
+
+/*
+ * Own the kernel's physical span before copying into it, so nothing the
+ * firmware allocates before ExitBootServices (GOP SetMode, the memory map
+ * buffer, timer callbacks) can land on the kernel. kernel_buf came from
+ * AllocatePool before the span was known; if it sits inside the span, move it
+ * out first. *buf_pages != 0 means *kernel_buf is now a page allocation.
+ */
+static BOOLEAN reserve_kernel_span(EFI_BOOT_SERVICES_PARTIAL* bs, void** kernel_buf, UINTN kernel_size,
+    UINTN* buf_pages, UINT64 lo, UINT64 hi) {
+    UINTN span_pages = (UINTN)((hi - lo) / 4096ULL);
+    EFI_PHYSICAL_ADDRESS addr = lo;
+    EFI_PHYSICAL_ADDRESS blockers[8];
+    UINTN nblockers = 0;
+    UINTN pages = (kernel_size + 4095u) / 4096u;
+    EFI_PHYSICAL_ADDRESS moved = 0;
+
+    if (!EFI_ERROR(bs->AllocatePages(EFI_ALLOCATE_ADDRESS, EFI_LOADER_DATA, span_pages, &addr))) {
+        return TRUE;
+    }
+    if (!phys_overlaps((UINT64)(UINTN)*kernel_buf, kernel_size, lo, hi - lo)) {
+        return FALSE; /* firmware owns part of the span: copying would corrupt it */
     }
 
-    Elf64_Phdr* ph = (Elf64_Phdr*)((UINT8*)kernel_buf + eh->e_phoff);
-    for (UINT16 i = 0; i < eh->e_phnum; i++) {
+    /* Relocate the file image; hold any page run that lands in the span. */
+    while (nblockers < 8) {
+        EFI_PHYSICAL_ADDRESS cand = 0;
+        if (EFI_ERROR(bs->AllocatePages(EFI_ALLOCATE_ANY_PAGES, EFI_LOADER_DATA, pages, &cand))) {
+            break;
+        }
+        if (!phys_overlaps(cand, (UINT64)pages * 4096ULL, lo, hi - lo)) {
+            moved = cand;
+            break;
+        }
+        blockers[nblockers++] = cand;
+    }
+    for (UINTN i = 0; i < nblockers; i++) {
+        bs->FreePages(blockers[i], pages);
+    }
+    if (moved == 0) {
+        return FALSE;
+    }
+    memcpy_local((void*)(UINTN)moved, *kernel_buf, kernel_size);
+    bs->FreePool(*kernel_buf);
+    *kernel_buf = (void*)(UINTN)moved;
+    *buf_pages = pages;
+
+    addr = lo;
+    return !EFI_ERROR(bs->AllocatePages(EFI_ALLOCATE_ADDRESS, EFI_LOADER_DATA, span_pages, &addr));
+}
+
+static void free_kernel_buf(EFI_BOOT_SERVICES_PARTIAL* bs, void* kernel_buf, UINTN buf_pages) {
+    if (!kernel_buf) {
+        return;
+    }
+    if (buf_pages) {
+        bs->FreePages((EFI_PHYSICAL_ADDRESS)(UINTN)kernel_buf, buf_pages);
+    } else {
+        bs->FreePool(kernel_buf);
+    }
+}
+
+/* Copy PT_LOAD segments into the span reserve_kernel_span() already owns. */
+static BOOLEAN load_elf_segments(void* kernel_buf, UINTN kernel_size) {
+    UINT16 n = 0;
+    Elf64_Phdr* ph = elf_phdrs(kernel_buf, kernel_size, &n);
+    if (!ph) {
+        return FALSE;
+    }
+    for (UINT16 i = 0; i < n; i++) {
         if (ph[i].p_type != PT_LOAD) {
             continue;
         }
         if (ph[i].p_memsz == 0) {
             continue;
         }
-        /* Reserve the kernel's fixed physical pages best-effort. Firmware may
-         * refuse a fixed address if it already owns it; the low conventional
-         * RAM the kernel targets is writable before ExitBootServices either way. */
-        UINTN pages = (UINTN)((ph[i].p_memsz + 4095) / 4096);
-        EFI_PHYSICAL_ADDRESS dest = ph[i].p_paddr & ~0xFFFULL;
-        bs->AllocatePages(EFI_ALLOCATE_ADDRESS, EFI_LOADER_DATA, pages, &dest);
 
         if (ph[i].p_filesz > 0) {
-            if (ph[i].p_offset + ph[i].p_filesz > kernel_size) {
+            if (ph[i].p_offset > kernel_size || ph[i].p_filesz > kernel_size - ph[i].p_offset) {
                 return FALSE;
             }
             memcpy_local((void*)(UINTN)ph[i].p_paddr, (UINT8*)kernel_buf + ph[i].p_offset, (UINTN)ph[i].p_filesz);
@@ -716,14 +980,24 @@ static UINT32 mb2_align(UINT32 n) {
     return (n + 7u) & ~7u;
 }
 
-static void build_multiboot_mbi(EFI_MEMORY_DESCRIPTOR* mmap, UINTN map_size, UINTN desc_size) {
-    UINT8* out = (UINT8*)(UINTN)POPCORN_UEFI_MBI_PHYS;
+/* MBI bytes besides the mmap entries: header, loader-name, mmap header, meminfo, end. */
+#define MB2_FIXED_BYTES (8u + 24u + 16u + 16u + 8u)
+
+/*
+ * Build the Multiboot2 MBI in `out` (cap bytes, AllocatePages'd before the
+ * ExitBootServices loop so it is LoaderData in the final map and never part of
+ * the kernel image). Calls no boot services: it runs between GetMemoryMap and
+ * ExitBootServices, including on retries.
+ */
+static void build_multiboot_mbi(UINT8* out, UINTN cap, EFI_MEMORY_DESCRIPTOR* mmap, UINTN map_size,
+    UINTN desc_size, PopcornUefiBootInfo* info) {
     UINT32 total = 8;
     UINT64 mem_upper_kb = 0;
+    UINT32 max_entries = (cap > MB2_FIXED_BYTES)
+                             ? (UINT32)((cap - MB2_FIXED_BYTES) / MB2_MMAP_ENTRY_SIZE)
+                             : 0;
 
-    for (UINT32 i = 0; i < 65536; i++) {
-        out[i] = 0;
-    }
+    memset_local(out, 0, cap);
 
     {
         const char loader_name[] = "Popcorn UEFI";
@@ -749,6 +1023,9 @@ static void build_multiboot_mbi(EFI_MEMORY_DESCRIPTOR* mmap, UINTN map_size, UIN
         }
         mmap_count++;
     }
+    if (mmap_count > max_entries) {
+        mmap_count = max_entries; /* cap is sized from the map buffer; never expected */
+    }
 
     {
         UINT32 tag_sz = mb2_align(16u + mmap_count * MB2_MMAP_ENTRY_SIZE);
@@ -759,7 +1036,7 @@ static void build_multiboot_mbi(EFI_MEMORY_DESCRIPTOR* mmap, UINTN map_size, UIN
         tag[3] = 0;
         UINT32 entry_off = total + 16u;
         UINT32 written = 0;
-        for (UINTN i = 0; i < num_desc; i++) {
+        for (UINTN i = 0; i < num_desc && written < mmap_count; i++) {
             EFI_MEMORY_DESCRIPTOR* d =
                 (EFI_MEMORY_DESCRIPTOR*)((UINT8*)mmap + i * desc_size);
             UINT64 len = d->NumberOfPages * 4096ULL;
@@ -806,55 +1083,75 @@ static void build_multiboot_mbi(EFI_MEMORY_DESCRIPTOR* mmap, UINTN map_size, UIN
 
     *(UINT32*)(out + 0) = total;
 
-    {
-        PopcornUefiBootInfo* info = (PopcornUefiBootInfo*)(UINTN)POPCORN_UEFI_HANDOFF_PHYS;
-        if (info->magic == POPCORN_UEFI_MAGIC) {
-            info->available_ram_bytes = mem_upper_kb * 1024ULL;
-        }
-    }
+    info->available_ram_bytes = mem_upper_kb * 1024ULL;
 }
 
-static BOOLEAN exit_boot_services(EFI_HANDLE image, EFI_SYSTEM_TABLE* st) {
+/*
+ * Allocate the memory-map buffer and the MBI once, with slack, then loop on
+ * GetMemoryMap + ExitBootServices only. After the first ExitBootServices call
+ * the firmware may have torn down parts of boot services, so a retry must not
+ * call AllocatePool/FreePool (or print). *ebs_attempted tells the caller
+ * whether ConOut is still safe to use.
+ */
+static BOOLEAN exit_boot_services(EFI_HANDLE image, EFI_SYSTEM_TABLE* st, PopcornUefiBootInfo* info,
+    BOOLEAN* ebs_attempted) {
     EFI_BOOT_SERVICES_PARTIAL* bs = st->BootServices;
     EFI_STATUS status;
     UINTN map_size = 0;
+    UINTN map_cap = 0;
     UINTN map_key = 0;
     UINTN desc_size = 0;
     UINT32 desc_ver = 0;
     EFI_MEMORY_DESCRIPTOR* mmap = NULL;
+    EFI_PHYSICAL_ADDRESS mbi = MBI_MAX_PHYS;
+    UINTN mbi_pages;
+    UINTN max_desc;
+
+    *ebs_attempted = FALSE;
+
+    status = bs->GetMemoryMap(&map_size, NULL, &map_key, &desc_size, &desc_ver);
+    if (status != EFI_BUFFER_TOO_SMALL || desc_size < sizeof(EFI_MEMORY_DESCRIPTOR)) {
+        return FALSE;
+    }
+    /* Slack for our own two allocations below plus firmware churn between calls. */
+    map_cap = map_size + EFI_MMAP_PAGES * 4096;
+    status = bs->AllocatePool(EFI_LOADER_DATA, map_cap, (void**)&mmap);
+    if (EFI_ERROR(status) || !mmap) {
+        return FALSE;
+    }
+
+    max_desc = map_cap / desc_size;
+    mbi_pages = (MB2_FIXED_BYTES + max_desc * MB2_MMAP_ENTRY_SIZE + 4095u) / 4096u;
+    if (mbi_pages < MBI_MIN_PAGES) {
+        mbi_pages = MBI_MIN_PAGES;
+    }
+    status = bs->AllocatePages(EFI_ALLOCATE_MAX_ADDRESS, EFI_LOADER_DATA, mbi_pages, &mbi);
+    if (EFI_ERROR(status) || mbi == 0) {
+        bs->FreePool(mmap);
+        return FALSE;
+    }
+    info->mbi_phys = (UINT64)mbi;
 
     for (UINTN attempt = 0; attempt < 8; attempt++) {
-        map_size = 0;
-        status = bs->GetMemoryMap(&map_size, NULL, &map_key, &desc_size, &desc_ver);
-        if (status != EFI_BUFFER_TOO_SMALL) {
-            return FALSE;
-        }
-        map_size += 8 * 4096;
-        if (mmap) {
-            bs->FreePool(mmap);
-            mmap = NULL;
-        }
-        status = bs->AllocatePool(EFI_LOADER_DATA, map_size, (void**)&mmap);
-        if (EFI_ERROR(status)) {
-            return FALSE;
-        }
+        map_size = map_cap;
         status = bs->GetMemoryMap(&map_size, mmap, &map_key, &desc_size, &desc_ver);
         if (EFI_ERROR(status)) {
-            bs->FreePool(mmap);
-            return FALSE;
+            break;
         }
-        build_multiboot_mbi(mmap, map_size, desc_size);
+        build_multiboot_mbi((UINT8*)(UINTN)mbi, mbi_pages * 4096u, mmap, map_size, desc_size, info);
+        *ebs_attempted = TRUE;
         status = bs->ExitBootServices(image, map_key);
         if (!EFI_ERROR(status)) {
             return TRUE;
         }
         if (status != EFI_INVALID_PARAMETER) {
-            bs->FreePool(mmap);
-            return FALSE;
+            break;
         }
     }
-    if (mmap) {
+    if (!*ebs_attempted) {
+        bs->FreePages(mbi, mbi_pages);
         bs->FreePool(mmap);
+        info->mbi_phys = 0;
     }
     return FALSE;
 }
@@ -870,10 +1167,17 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* system_table) {
     if (system_table->ConOut) {
         system_table->ConOut->ClearScreen(system_table->ConOut);
     }
-    print(system_table, L"Popcorn UEFI Loader v9\r\n");
+    print(system_table, L"Popcorn UEFI Loader v10\r\n");
+#ifdef POPCORN_TEST_INSTALL
+    print(system_table, L"UNSAFE QEMU test-install loader: never flash this image\r\n");
+#endif
 
     void* kernel_buf = NULL;
     UINTN kernel_size = 0;
+    UINTN kernel_buf_pages = 0; /* 0: kernel_buf is pool memory */
+    UINT64 span_lo = 0;
+    UINT64 span_hi = 0;
+    BOOLEAN ebs_attempted = FALSE;
     EFI_STATUS status = read_kernel_file(image, system_table, &kernel_buf, &kernel_size);
     if (EFI_ERROR(status)) {
         print_err(system_table, L"Could not read \\boot\\kernel");
@@ -886,27 +1190,43 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* system_table) {
     }
     /* Always write GOP handoff at the fixed boot .bss slot (see kernel.asm / uefi_boot.h). */
     UINT64 handoff = POPCORN_UEFI_HANDOFF_PHYS;
+    EFI_BOOT_SERVICES_PARTIAL* bs = system_table->BootServices;
     if (entry == 0) {
-        system_table->BootServices->FreePool(kernel_buf);
+        bs->FreePool(kernel_buf);
         print_err(system_table, L"uefi_start symbol missing");
         return EFI_LOAD_ERROR;
     }
 
-    EFI_BOOT_SERVICES_PARTIAL* bs = system_table->BootServices;
-    if (!load_elf_segments(kernel_buf, kernel_size, bs)) {
-        system_table->BootServices->FreePool(kernel_buf);
+    if (!elf_load_span(kernel_buf, kernel_size, &span_lo, &span_hi) ||
+        handoff < span_lo || handoff + sizeof(PopcornUefiBootInfo) > span_hi) {
+        bs->FreePool(kernel_buf);
+        print_err(system_table, L"ELF load failed (bad program headers)");
+        return EFI_LOAD_ERROR;
+    }
+    if (!reserve_kernel_span(bs, &kernel_buf, kernel_size, &kernel_buf_pages, span_lo, span_hi)) {
+        free_kernel_buf(bs, kernel_buf, kernel_buf_pages);
+        print_err(system_table, L"Kernel physical range is in use by firmware");
+        return EFI_LOAD_ERROR;
+    }
+    if (!load_elf_segments(kernel_buf, kernel_size)) {
+        free_kernel_buf(bs, kernel_buf, kernel_buf_pages);
         print_err(system_table, L"ELF load failed");
         return EFI_LOAD_ERROR;
     }
-    bs->FreePool(kernel_buf);
+    free_kernel_buf(bs, kernel_buf, kernel_buf_pages);
 
     {
         PopcornUefiBootInfo* info = (PopcornUefiBootInfo*)(UINTN)handoff;
         memset_local(info, 0, sizeof(PopcornUefiBootInfo));
+        /* Magic marks a Popcorn UEFI boot even without GOP: the kernel needs it
+         * to find the MBI and pick the UEFI timer/memory paths. framebuffer_addr
+         * stays 0 when there is no usable framebuffer. */
+        info->magic = POPCORN_UEFI_MAGIC;
         if (!fill_boot_info_from_gop(system_table, info)) {
             print(system_table, L"No GOP framebuffer available.\r\n");
         }
         fill_boot_info_firmware_input(system_table, info);
+        fill_boot_volume_info(image, system_table, info);
     }
 
     print(system_table, L"Starting Popcorn...\r\n");
@@ -917,8 +1237,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* system_table) {
      * and firmware-initiated resets (~6–8s after the shell appeared) on QEMU and
      * ThinkPad-class hardware. PS/2 polling handles keyboard after EBS.
      */
-    if (!exit_boot_services(image, system_table)) {
-        print_err(system_table, L"ExitBootServices failed");
+    if (!exit_boot_services(image, system_table, (PopcornUefiBootInfo*)(UINTN)handoff, &ebs_attempted)) {
+        if (!ebs_attempted) {
+            print_err(system_table, L"ExitBootServices failed");
+        }
         return EFI_LOAD_ERROR;
     }
 

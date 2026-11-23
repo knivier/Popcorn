@@ -19,6 +19,7 @@ const ERR_ALREADY_EXISTS: i32 = 5;
 const ERR_NO_SPACE: i32 = 6;
 const ERR_NAME_TOO_LONG: i32 = 8;
 const ERR_INVALID_OPERATION: i32 = 9;
+const ERR_UNKNOWN: i32 = 10; /* I/O or locked-disk failure (get_last_filesystem_error) */
 
 /// Longest file/dir/path argument accepted from C.
 const MAX_NAME: usize = 64;
@@ -71,13 +72,17 @@ fn name_arg<'a>(p: *const c_char) -> Option<&'a str> {
     s
 }
 
-fn err_code(e: fat32::FsError, fallback: i32) -> i32 {
+/// Exhaustive on purpose: a new `FsError` must get a deliberate code, not a
+/// per-caller guess (a bad name once surfaced as "no FAT volume, wipe the disk").
+fn err_code(e: fat32::FsError) -> i32 {
     match e {
         fat32::FsError::NotFound => ERR_NOT_FOUND,
         fat32::FsError::Exists => ERR_ALREADY_EXISTS,
         fat32::FsError::NoSpace => ERR_NO_SPACE,
         fat32::FsError::NameTooLong => ERR_NAME_TOO_LONG,
-        _ => fallback,
+        fat32::FsError::BadName => ERR_INVALID_INPUT,
+        fat32::FsError::NotMounted | fat32::FsError::NotFat => ERR_INVALID_OPERATION,
+        fat32::FsError::Io => ERR_UNKNOWN,
     }
 }
 
@@ -157,7 +162,7 @@ pub extern "C" fn write_file(name: *const c_char, content: *const c_char) -> boo
             remount_selected();
         }
         Err(e) => {
-            set_err(err_code(e, ERR_INVALID_OPERATION));
+            set_err(err_code(e));
             return false;
         }
     }
@@ -167,7 +172,7 @@ pub extern "C" fn write_file(name: *const c_char, content: *const c_char) -> boo
             true
         }
         Err(e) => {
-            set_err(err_code(e, ERR_INVALID_OPERATION));
+            set_err(err_code(e));
             false
         }
     }
@@ -184,15 +189,10 @@ pub extern "C" fn read_file(name: *const c_char) -> *const c_char {
             p
         }
         Err(e) => {
-            set_err(err_code(e, ERR_NOT_FOUND));
+            set_err(err_code(e));
             core::ptr::null()
         }
     }
-}
-
-#[no_mangle]
-pub extern "C" fn list_files() {
-    list_files_console();
 }
 
 #[no_mangle]
@@ -214,7 +214,7 @@ pub extern "C" fn delete_file(name: *const c_char) -> bool {
             true
         }
         Err(e) => {
-            set_err(err_code(e, ERR_NOT_FOUND));
+            set_err(err_code(e));
             false
         }
     }
@@ -231,7 +231,7 @@ pub extern "C" fn create_directory(name: *const c_char) -> bool {
             true
         }
         Err(e) => {
-            set_err(err_code(e, ERR_NO_SPACE));
+            set_err(err_code(e));
             false
         }
     }
@@ -248,7 +248,7 @@ pub extern "C" fn change_directory(name: *const c_char) -> bool {
             true
         }
         Err(e) => {
-            set_err(err_code(e, ERR_INVALID_OPERATION));
+            set_err(err_code(e));
             false
         }
     }
@@ -270,7 +270,7 @@ pub extern "C" fn search_file(name: *const c_char) -> *const c_char {
             p
         }
         Err(e) => {
-            set_err(err_code(e, ERR_NOT_FOUND));
+            set_err(err_code(e));
             core::ptr::null()
         }
     }
@@ -290,7 +290,7 @@ pub extern "C" fn copy_file(src: *const c_char, dest_path: *const c_char) -> boo
             true
         }
         Err(e) => {
-            set_err(err_code(e, ERR_NOT_FOUND));
+            set_err(err_code(e));
             false
         }
     }

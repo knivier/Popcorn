@@ -5,40 +5,29 @@
 #include "../includes/memory.h"
 #include "../includes/utils.h"
 #include "../includes/device.h"
+#include "../includes/irq.h"
 #include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
 
-extern char __kernel_start[];
-extern char __text_vend[];
-
-_Static_assert(offsetof(TaskStruct, context) == 72, "TaskStruct.context offset");
-_Static_assert(offsetof(CPUContext, r15) == 0, "asm context_save: update offsets");
-_Static_assert(offsetof(CPUContext, rax) == 112, "asm context_save: update offsets");
-_Static_assert(offsetof(CPUContext, rip) == 120, "asm context_save: mov [r10+120]");
-_Static_assert(offsetof(CPUContext, rsp) == 128, "asm context_save/restore: +128");
-_Static_assert(offsetof(CPUContext, rflags) == 136, "asm context_save: rflags");
-_Static_assert(offsetof(TaskStruct, address_space) == 584, "task_switch vmm: reload offsetof");
-
-static bool context_looks_sane(const CPUContext* c) {
-    if (!c) {
-        return false;
-    }
-    const uintptr_t rip = (uintptr_t)c->rip;
-    const uintptr_t sp = (uintptr_t)c->rsp;
-    const uintptr_t t0 = (uintptr_t)__kernel_start;
-    const uintptr_t t1 = (uintptr_t)__text_vend;
-    if (rip < t0 || rip >= t1) {
-        return false;
-    }
-    if (sp < 0x1000U || (sp & 7U) != 0U) {
-        return false;
-    }
-    if (sp < 24U) {
-        return false;
-    }
-    return true;
-}
+/*
+ * Kernel threads with one kernel stack each. A switch is a plain function call into
+ * switch_to() (context_switch.asm), which keeps the callee-saved registers on the
+ * outgoing stack and returns on the incoming one, so every switched-out task is parked
+ * inside task_switch() and resumes there. Timer preemption calls the scheduler from the
+ * IRQ handler after the EOI; the interrupted state stays on the task's own stack and is
+ * unwound by the IRQ stub when the task is resumed.
+ *
+ * Locking: single CPU. The ready queues, wait queues and task pool are changed only
+ * with interrupts disabled (irq_save_disable/irq_restore_flags). switch_to() is always
+ * entered with IF=0; each task restores its own saved flags when its scheduler call
+ * returns, and a brand-new task enables interrupts in scheduler_task_entry().
+ *
+ * Invariant: a task is linked on ready_queue[priority] iff its state is READY or
+ * RUNNING (the running task stays queued so round-robin can step past it). BLOCKED
+ * tasks are linked on exactly one WaitQueue (task->wait_queue); SLEEPING and ZOMBIE
+ * tasks are on no list.
+ */
 
 // Global scheduler state
 SchedulerState scheduler = {0};
@@ -46,8 +35,9 @@ SchedulerState scheduler = {0};
 /* Boot page-table root (asm identity map); all tasks use this until given another PML4. */
 static uint64_t g_kernel_pml4_phys;
 
-/* current_task may be the idle task while the CPU still runs kmain on the boot stack. Saving
- * that "idle" context would clobber setup_task_context() with kmain's RIP/RSP and fault on iretq. */
+/* current_task is the idle TCB (pid 0) while the CPU still runs kmain on the boot stack.
+ * Until scheduler_end_bootstrap() no switch is allowed; after it, the idle TCB carries
+ * kmain/shell and its saved stack pointer is written by the first switch away from it. */
 static bool idle_cpu_has_run;
 
 /* True while scheduler.current_task is synthetic idle but CPU still executes kmain boot stack. */
@@ -58,15 +48,44 @@ static bool bootstrap_on_kmain_stack(void) {
 }
 
 #define TASK_POOL_CAP 32u
+#define TASK_STACK_SIZE (16 * 1024)  // 16KB per task stack
+
 static TaskStruct g_task_pool[TASK_POOL_CAP];
-static uint32_t g_task_pool_index;
+static bool g_task_used[TASK_POOL_CAP];
+
+/* Static stacks: no dependency on the heap during early boot. */
+static char g_task_stacks[TASK_POOL_CAP][TASK_STACK_SIZE] __attribute__((aligned(16)));
+static bool g_stack_used[TASK_POOL_CAP];
+
+extern void boot_serial_putc(char c);
+
+static void serial_print(const char* str) {
+    while (str && *str) {
+        boot_serial_putc(*str++);
+    }
+}
 
 void scheduler_end_bootstrap(void) {
     /*
      * Entering the interactive shell: allow ticks/yields. The idle TCB becomes the
-     * carrier for kmain's context on the first real preempt (see task_switch fake_idle).
+     * carrier for kmain's context on the first switch away from it.
      */
     idle_cpu_has_run = true;
+}
+
+static bool prio_valid(int p) {
+    return p >= PRIORITY_IDLE && p <= PRIORITY_REALTIME;
+}
+
+static bool task_is_runnable(const TaskStruct* t) {
+    return t && (t->state == TASK_STATE_READY || t->state == TASK_STATE_RUNNING);
+}
+
+/* ---- Ready queues (IRQs off) ---- */
+
+static bool ready_is_queued(const TaskStruct* task) {
+    int p = (int)task->priority;
+    return task->prev != NULL || (prio_valid(p) && scheduler.ready_queue[p] == task);
 }
 
 static void ready_remove(TaskStruct* task) {
@@ -74,12 +93,14 @@ static void ready_remove(TaskStruct* task) {
         return;
     }
     int p = (int)task->priority;
-    if (p < PRIORITY_IDLE || p > PRIORITY_REALTIME) {
+    if (!prio_valid(p) || !ready_is_queued(task)) {
+        task->next = NULL;
+        task->prev = NULL;
         return;
     }
     if (task->prev) {
         task->prev->next = task->next;
-    } else if (scheduler.ready_queue[p] == task) {
+    } else {
         scheduler.ready_queue[p] = task->next;
     }
     if (task->next) {
@@ -94,8 +115,8 @@ static void ready_add(TaskStruct* task) {
         return;
     }
     int p = (int)task->priority;
-    if (p < PRIORITY_IDLE || p > PRIORITY_REALTIME) {
-        return;
+    if (!prio_valid(p) || ready_is_queued(task)) {
+        return;  // never link a task twice
     }
     task->next = scheduler.ready_queue[p];
     if (scheduler.ready_queue[p]) {
@@ -105,143 +126,100 @@ static void ready_add(TaskStruct* task) {
     task->prev = NULL;
 }
 
+/* ---- Wait queues (IRQs off) ---- */
+
+static void wait_enqueue(WaitQueue* wq, TaskStruct* t) {
+    t->wait_next = wq->head;
+    wq->head = t;
+    t->wait_queue = wq;
+}
+
+static void wait_unlink(TaskStruct* t) {
+    WaitQueue* wq = t->wait_queue;
+    if (wq) {
+        TaskStruct** pp = &wq->head;
+        while (*pp) {
+            if (*pp == t) {
+                *pp = t->wait_next;
+                break;
+            }
+            pp = &(*pp)->wait_next;
+        }
+    }
+    t->wait_next = NULL;
+    t->wait_queue = NULL;
+}
+
 static void wake_expired_sleepers(void) {
     uint64_t now = timer_get_ticks();
-    for (uint32_t i = 0; i < g_task_pool_index; i++) {
+    for (uint32_t i = 0; i < TASK_POOL_CAP; i++) {
         TaskStruct* t = &g_task_pool[i];
-        if (t->state == TASK_STATE_SLEEPING && now >= t->sleep_until_tick) {
+        if (g_task_used[i] && t->state == TASK_STATE_SLEEPING && now >= t->sleep_until_tick) {
             t->state = TASK_STATE_READY;
             ready_add(t);
         }
     }
 }
 
-void scheduler_block(WaitQueue* wq) {
-    TaskStruct* t = scheduler.current_task;
-    if (!t || !wq || bootstrap_on_kmain_stack()) {
-        return;
-    }
-    ready_remove(t);
-    t->state = TASK_STATE_BLOCKED;
-    t->wait_next = wq->head;
-    wq->head = t;
-    scheduler_schedule();
-}
-
-void scheduler_wake_one(WaitQueue* wq) {
-    if (!wq || !wq->head) {
-        return;
-    }
-    TaskStruct* t = wq->head;
-    wq->head = t->wait_next;
-    t->wait_next = NULL;
-    if (t->state == TASK_STATE_BLOCKED) {
-        t->state = TASK_STATE_READY;
-        ready_add(t);
-    }
-}
-
-void scheduler_wake_all(WaitQueue* wq) {
-    if (!wq) {
-        return;
-    }
-    while (wq->head) {
-        scheduler_wake_one(wq);
-    }
-}
-
-void scheduler_sleep_ms(uint32_t ms) {
-    TaskStruct* t = scheduler.current_task;
-    if (!t || bootstrap_on_kmain_stack()) {
-        return;
-    }
-    if (ms == 0) {
-        scheduler_yield();
-        return;
-    }
-    ready_remove(t);
-    t->sleep_until_tick = timer_get_ticks() + timer_ms_to_ticks(ms);
-    t->state = TASK_STATE_SLEEPING;
-    t->wait_next = NULL;
-    scheduler_schedule();
-}
-
-bool scheduler_park(TaskStruct* t, WaitQueue* wq) {
-    if (!t || !wq) {
-        return false;
-    }
-    ready_remove(t);
-    t->state = TASK_STATE_BLOCKED;
-    t->wait_next = wq->head;
-    wq->head = t;
-    return true;
-}
-
-bool scheduler_arm_sleep(TaskStruct* t, uint64_t sleep_until_tick) {
-    if (!t) {
-        return false;
-    }
-    ready_remove(t);
-    t->sleep_until_tick = sleep_until_tick;
-    t->state = TASK_STATE_SLEEPING;
-    t->wait_next = NULL;
-    return true;
-}
-
-void scheduler_service_sleepers(void) {
-    wake_expired_sleepers();
-}
-
-// External functions
-extern uint64_t timer_get_ticks(void);
-extern void boot_serial_putc(char c);
-
-// Stack management constants
-#define TASK_STACK_SIZE (16 * 1024)  // 16KB per task stack
-#define STACK_ALIGNMENT 16           // 16-byte alignment for x86-64
-
-static void serial_print(const char* str) {
-    while (str && *str) {
-        boot_serial_putc(*str++);
-    }
-}
+/* ---- Task pool and stacks ---- */
 
 static TaskStruct* task_pool_alloc(void) {
-    if (g_task_pool_index >= TASK_POOL_CAP) {
-        console_println_color("Task pool exhausted", CONSOLE_ERROR_COLOR);
-        serial_print("ERROR: Task pool exhausted\n");
-        return NULL;
+    for (uint32_t i = 0; i < TASK_POOL_CAP; i++) {
+        if (!g_task_used[i]) {
+            g_task_used[i] = true;
+            memset(&g_task_pool[i], 0, sizeof(g_task_pool[i]));
+            return &g_task_pool[i];
+        }
     }
-    return &g_task_pool[g_task_pool_index++];
+    console_println_color("Task pool exhausted", CONSOLE_ERROR_COLOR);
+    serial_print("ERROR: Task pool exhausted\n");
+    return NULL;
 }
 
-// Stack management functions
+static void task_pool_free(TaskStruct* task) {
+    if (task < &g_task_pool[0] || task >= &g_task_pool[TASK_POOL_CAP]) {
+        return;
+    }
+    task->state = TASK_STATE_ZOMBIE;
+    task->next = NULL;
+    task->prev = NULL;
+    task->wait_next = NULL;
+    task->wait_queue = NULL;
+    g_task_used[task - g_task_pool] = false;
+}
+
 void* task_allocate_stack(uint64_t size) {
-    (void)size;  // Suppress unused parameter warning
-    
-    // Use static stack allocation to avoid memory manager issues during early boot
-    static char static_stacks[TASK_POOL_CAP][16384];  // 32 tasks, 16KB each
-    static uint32_t stack_index = 0;
-    
-    if (stack_index >= TASK_POOL_CAP) {
+    if (size > TASK_STACK_SIZE) {
         return NULL;
     }
-    
-    void* stack = static_stacks[stack_index++];
-    
-    // Clear the stack
-    memset(stack, 0, 16384);
-    
+    uint64_t flags = irq_save_disable();
+    void* stack = NULL;
+    for (uint32_t i = 0; i < TASK_POOL_CAP; i++) {
+        if (!g_stack_used[i]) {
+            g_stack_used[i] = true;
+            stack = g_task_stacks[i];
+            break;
+        }
+    }
+    irq_restore_flags(flags);
+    if (stack) {
+        memset(stack, 0, TASK_STACK_SIZE);
+    }
     return stack;
 }
 
 void task_free_stack(void* stack) {
-    // For static allocation, we don't need to free anything
-    // Just mark as unused (simplified for debugging)
-    (void)stack;  // Suppress unused parameter warning
+    uintptr_t base = (uintptr_t)g_task_stacks;
+    uintptr_t p = (uintptr_t)stack;
+    if (!stack || p < base || p >= base + sizeof(g_task_stacks) ||
+        ((p - base) % TASK_STACK_SIZE) != 0) {
+        return;
+    }
+    uint64_t flags = irq_save_disable();
+    g_stack_used[(p - base) / TASK_STACK_SIZE] = false;
+    irq_restore_flags(flags);
 }
 
-// Initialize the scheduler
 /* Attach a private PML4 (shared identity + kernel half) for non-idle tasks. */
 static int task_attach_private_as(TaskStruct* task) {
     uint64_t pml4;
@@ -262,6 +240,235 @@ static int task_attach_private_as(TaskStruct* task) {
     return 0;
 }
 
+static void task_release_address_space(TaskStruct* task) {
+    if (task->address_space.pml4_phys != 0 &&
+        task->address_space.pml4_phys != g_kernel_pml4_phys) {
+        vmm_free_pml4(task->address_space.pml4_phys, g_kernel_pml4_phys);
+    }
+    task->address_space.pml4_phys = g_kernel_pml4_phys;
+}
+
+/* Unlink a task from whatever list it is on and mark it ZOMBIE (IRQs off). */
+static void task_make_zombie(TaskStruct* t) {
+    if (!t || t->state == TASK_STATE_ZOMBIE) {
+        return;
+    }
+    ready_remove(t);
+    wait_unlink(t);
+    t->state = TASK_STATE_ZOMBIE;
+    t->sleep_until_tick = 0;
+    if (scheduler.total_tasks > 0) {
+        scheduler.total_tasks--;
+    }
+}
+
+/* Return a ZOMBIE's fds, PML4, stack and pool slot. Never for the running task, whose
+ * stack and CR3 are still in use (IRQs off). */
+static void task_reclaim(TaskStruct* t) {
+    if (!t || t == scheduler.current_task || t->state != TASK_STATE_ZOMBIE) {
+        return;
+    }
+    for (int fd = 0; fd < FD_MAX; fd++) {
+        (void)fd_close(t->fds, fd);
+    }
+    task_release_address_space(t);
+    task_free_stack(t->stack_base);
+    t->stack_base = NULL;
+    t->stack_top = NULL;
+    task_pool_free(t);
+}
+
+/* Reclaim tasks that exited themselves (task context only: vmm_free_pml4 is not IRQ-safe). */
+static void reap_zombies(void) {
+    for (uint32_t i = 0; i < TASK_POOL_CAP; i++) {
+        if (g_task_used[i] && g_task_pool[i].state == TASK_STATE_ZOMBIE) {
+            task_reclaim(&g_task_pool[i]);
+        }
+    }
+}
+
+static TaskStruct* find_live_task(uint32_t pid) {
+    for (uint32_t i = 0; i < TASK_POOL_CAP; i++) {
+        TaskStruct* t = &g_task_pool[i];
+        if (g_task_used[i] && t->state != TASK_STATE_ZOMBIE && t->pid == pid) {
+            return t;
+        }
+    }
+    return NULL;
+}
+
+/* ---- Picking and switching ---- */
+
+/*
+ * Priority first, round-robin within a level:
+ *   1. the head of the highest non-empty queue above the current task's priority
+ *      (all levels when the current task is blocked/sleeping/exiting);
+ *   2. the next task at the current priority;
+ *   3. the head of the highest non-empty lower queue (so a lone task still lets
+ *      lower levels, e.g. the idle/shell carrier, run when it yields);
+ *   4. the current task itself if it is still runnable, else NULL.
+ */
+/* Anti-starvation: with strict priority, two runnable tasks at one level only
+ * ever round-robin with each other, so every lower level (including the shell,
+ * which rides the PRIORITY_IDLE TCB) never ran again ("mon -debug" twice hung
+ * the shell). Every STARVE_PICKS-th pick that passes over a non-empty lower
+ * queue runs that queue's head instead. Counts picks, not ticks: in UEFI poll
+ * mode ticks only advance when someone calls timer_poll(). */
+#define STARVE_PICKS 4u
+static uint32_t g_lower_passed_over;
+
+static TaskStruct* pick_next(TaskStruct* cur) {
+    const bool cur_runnable = task_is_runnable(cur) && prio_valid((int)cur->priority);
+    const int cur_prio = cur_runnable ? (int)cur->priority : PRIORITY_IDLE - 1;
+
+    for (int p = PRIORITY_REALTIME; p > cur_prio; p--) {
+        if (scheduler.ready_queue[p]) {
+            return scheduler.ready_queue[p];
+        }
+    }
+    if (!cur_runnable) {
+        return NULL;
+    }
+
+    TaskStruct* lower = NULL;
+    for (int p = cur_prio - 1; p >= PRIORITY_IDLE; p--) {
+        if (scheduler.ready_queue[p]) {
+            lower = scheduler.ready_queue[p];
+            break;
+        }
+    }
+
+    TaskStruct* cand = cur->next ? cur->next : scheduler.ready_queue[cur_prio];
+    if (cand && cand != cur) {
+        if (lower && ++g_lower_passed_over >= STARVE_PICKS) {
+            g_lower_passed_over = 0;
+            return lower;
+        }
+        return cand;
+    }
+    if (lower) {
+        g_lower_passed_over = 0;
+        return lower;
+    }
+    return cur;
+}
+
+/* Pick and switch with IRQs already off. Returns when the current task runs again
+ * (immediately if nothing else was picked). */
+static void schedule_locked(void) {
+    TaskStruct* cur = scheduler.current_task;
+    if (!scheduler.scheduler_active || !cur || bootstrap_on_kmain_stack()) {
+        return;
+    }
+
+    TaskStruct* next = pick_next(cur);
+    if (!next || next == cur) {
+        if (cur->state == TASK_STATE_READY) {
+            cur->state = TASK_STATE_RUNNING;
+        }
+        return;
+    }
+    if (next->context.rsp < 0x1000u) {
+        serial_print("ERROR: Invalid task context for switching\n");
+        return;
+    }
+
+    /* Charge the outgoing task up to now; the incoming one starts a fresh run. */
+    uint64_t now = timer_get_ticks();
+    cur->total_runtime += now - cur->last_run_time;
+    cur->last_run_time = now;
+    next->last_run_time = now;
+
+    if (cur->state == TASK_STATE_RUNNING) {
+        cur->state = TASK_STATE_READY;
+    }
+    next->state = TASK_STATE_RUNNING;
+    next->time_remaining = next->time_slice;
+
+    task_switch(cur, next);
+}
+
+/* Wait in place for an interrupt / poll tick (IRQs off on entry and exit). */
+static void idle_wait_once(void) {
+    if (timer_is_poll_mode()) {
+        /* UEFI poll path: sti;hlt can hang on a latent IRQ; ticks only advance here. */
+        timer_poll();
+        __asm__ volatile("pause");
+    } else {
+        /* sti's one-instruction shadow: an IRQ cannot slip in before hlt. */
+        __asm__ volatile("sti; hlt; cli" ::: "memory");
+    }
+}
+
+/* Current task t just became BLOCKED/SLEEPING (IRQs off). Run others until t is woken;
+ * when nothing else is runnable, idle here so the wake (IRQ or poll tick) can happen. */
+static void wait_until_runnable(TaskStruct* t) {
+    while (!task_is_runnable(t)) {
+        schedule_locked();
+        if (task_is_runnable(t)) {
+            break;
+        }
+        idle_wait_once();
+    }
+    t->state = TASK_STATE_RUNNING;
+}
+
+void task_switch(TaskStruct* from, TaskStruct* to) {
+    static uint64_t discard_rsp;
+    if (!to || to == from) {
+        return;
+    }
+    uint64_t flags = irq_save_disable();
+
+    /* Switch address space while still on the outgoing stack (kernel half is shared). */
+    if (to->address_space.pml4_phys != 0) {
+        uint64_t want = to->address_space.pml4_phys & VMM_PTE_ADDR_MASK;
+        uint64_t cur = vmm_get_cr3() & VMM_PTE_ADDR_MASK;
+        if (want != cur) {
+            vmm_load_cr3(want);
+        }
+    }
+
+    scheduler.current_task = to;
+    switch_to(from ? &from->context.rsp : &discard_rsp, to->context.rsp);
+
+    /* `from` resumed: back on its own stack, with its own saved flags. */
+    irq_restore_flags(flags);
+}
+
+void scheduler_task_entry(void (*fn)(void), void* data) {
+    (void)data;
+    /* Arrived from switch_to() with IF=0. New tasks run with interrupts on (as the old
+     * RFLAGS=0x202 frame intended) except on the UEFI poll-mode PIT path. */
+    if (!timer_is_poll_mode()) {
+        __asm__ volatile("sti" ::: "memory");
+    }
+    if (fn) {
+        fn();
+    }
+    scheduler_exit_current();
+}
+
+void scheduler_exit_current(void) {
+    (void)irq_save_disable();
+    TaskStruct* t = scheduler.current_task;
+    /* The idle TCB carries kmain/shell and cannot exit; it just stops returning. */
+    if (t && t->pid != 0) {
+        task_make_zombie(t);
+        schedule_locked();
+    }
+    /* Nothing else was runnable yet: idle on this stack until a switch takes us away.
+     * The stack is not reclaimed while this task is still current. */
+    for (;;) {
+        idle_wait_once();
+        schedule_locked();
+    }
+}
+
+// Initialize the scheduler
+static TaskStruct* task_create_internal(void (*function)(void), void* data, TaskPriority priority,
+                                        bool fixed_pid, uint32_t pid);
+
 void scheduler_init(void) {
     g_kernel_pml4_phys = vmm_get_cr3() & VMM_PTE_ADDR_MASK;
 
@@ -276,11 +483,10 @@ void scheduler_init(void) {
         scheduler.ready_queue[i] = NULL;
     }
 
-    // Create idle task
+    // Create idle task (PID 0)
     idle_cpu_has_run = false;
-    TaskStruct* idle = scheduler_create_task(idle_task, NULL, PRIORITY_IDLE);
+    TaskStruct* idle = task_create_internal(idle_task, NULL, PRIORITY_IDLE, true, 0);
     if (idle) {
-        idle->pid = 0;  // Special PID for idle task
         scheduler.current_task = idle;
         scheduler.current_task->state = TASK_STATE_RUNNING;
     } else {
@@ -302,10 +508,11 @@ void task_set_address_space(TaskStruct* task, uint64_t pml4_phys) {
     task->address_space.pml4_phys = pml4_phys & VMM_PTE_ADDR_MASK;
 }
 
-// Scheduler tick handler (called from timer interrupt)
+// Scheduler tick handler (timer IRQ after EOI, or timer_poll in poll mode)
 void scheduler_tick(void) {
     // Disable scheduler tick during early boot to avoid crashes
     static bool first_tick = true;
+    static int tick_counter = 0;
     if (first_tick) {
         first_tick = false;
         return;  // Skip first tick to avoid early crashes
@@ -315,39 +522,33 @@ void scheduler_tick(void) {
         return;
     }
 
+    uint64_t flags = irq_save_disable();
     wake_expired_sleepers();
 
     /* Until scheduler_end_bootstrap(), skip preempt — still on kmain boot stack. */
-    if (bootstrap_on_kmain_stack()) {
-        return;
-    }
+    if (!bootstrap_on_kmain_stack()) {
+        TaskStruct* cur = scheduler.current_task;
 
-    // Update current task runtime
-    uint64_t current_time = timer_get_ticks();
-    scheduler.current_task->total_runtime +=
-        current_time - scheduler.current_task->last_run_time;
-    scheduler.current_task->last_run_time = current_time;
+        // Update current task runtime
+        uint64_t current_time = timer_get_ticks();
+        cur->total_runtime += current_time - cur->last_run_time;
+        cur->last_run_time = current_time;
 
-    // Decrease time slice
-    if (scheduler.current_task->time_remaining > 0) {
-        scheduler.current_task->time_remaining--;
-    }
+        // Decrease time slice
+        if (cur->time_remaining > 0) {
+            cur->time_remaining--;
+        }
 
-    // Force preemption every few ticks to ensure responsiveness
-    static int tick_counter = 0;
-    tick_counter++;
-    
-    // Preempt every 10 ticks (much more frequent) regardless of time slice
-    if (tick_counter >= 10) {
-        tick_counter = 0;
-        scheduler_schedule();
-        return;
+        // Preempt every 10 ticks regardless of time slice, or when the slice runs out
+        tick_counter++;
+        if (tick_counter >= 10) {
+            tick_counter = 0;
+            schedule_locked();
+        } else if (cur->time_remaining == 0 && scheduler.total_tasks > 1) {
+            schedule_locked();
+        }
     }
-
-    // Check if task should be preempted (only if we have multiple tasks)
-    if (scheduler.current_task->time_remaining == 0 && scheduler.total_tasks > 1) {
-        scheduler_schedule();
-    }
+    irq_restore_flags(flags);
 }
 
 // Yield CPU to another task
@@ -357,21 +558,151 @@ void scheduler_yield(void) {
     }
 }
 
-// Create a new task
-TaskStruct* scheduler_create_task(void (*function)(void), void* data, TaskPriority priority) {
+void scheduler_block(WaitQueue* wq) {
+    TaskStruct* t = scheduler.current_task;
+    if (!t || !wq || bootstrap_on_kmain_stack()) {
+        return;
+    }
+    uint64_t flags = irq_save_disable();
+    /* Enqueue and switch in one IRQ-off section: no lost wakeup in between. */
+    ready_remove(t);
+    t->state = TASK_STATE_BLOCKED;
+    wait_enqueue(wq, t);
+    wait_until_runnable(t);
+    irq_restore_flags(flags);
+}
+
+void scheduler_wake_one(WaitQueue* wq) {
+    if (!wq) {
+        return;
+    }
+    uint64_t flags = irq_save_disable();
+    TaskStruct* t = wq->head;
+    if (t) {
+        wq->head = t->wait_next;
+        t->wait_next = NULL;
+        t->wait_queue = NULL;
+        if (t->state == TASK_STATE_BLOCKED) {
+            t->state = TASK_STATE_READY;
+            ready_add(t);
+        }
+    }
+    irq_restore_flags(flags);
+}
+
+void scheduler_wake_all(WaitQueue* wq) {
+    if (!wq) {
+        return;
+    }
+    uint64_t flags = irq_save_disable();
+    while (wq->head) {
+        scheduler_wake_one(wq);
+    }
+    irq_restore_flags(flags);
+}
+
+void scheduler_sleep_ms(uint32_t ms) {
+    TaskStruct* t = scheduler.current_task;
+    if (!t || bootstrap_on_kmain_stack()) {
+        return;
+    }
+    if (ms == 0) {
+        scheduler_yield();
+        return;
+    }
+    uint64_t ticks = timer_ms_to_ticks(ms);
+    if (ticks == 0) {
+        ticks = 1;
+    }
+    uint64_t flags = irq_save_disable();
+    ready_remove(t);
+    t->sleep_until_tick = timer_get_ticks() + ticks;
+    t->state = TASK_STATE_SLEEPING;
+    wait_until_runnable(t);
+    irq_restore_flags(flags);
+}
+
+bool scheduler_park(TaskStruct* t, WaitQueue* wq) {
+    if (!t || !wq || t == scheduler.current_task) {
+        return false;  // the running task must use scheduler_block()
+    }
+    uint64_t flags = irq_save_disable();
+    if (t->state == TASK_STATE_ZOMBIE) {
+        irq_restore_flags(flags);
+        return false;
+    }
+    ready_remove(t);
+    wait_unlink(t);
+    t->state = TASK_STATE_BLOCKED;
+    wait_enqueue(wq, t);
+    irq_restore_flags(flags);
+    return true;
+}
+
+bool scheduler_arm_sleep(TaskStruct* t, uint64_t sleep_until_tick) {
+    if (!t || t == scheduler.current_task) {
+        return false;  // the running task must use scheduler_sleep_ms()
+    }
+    uint64_t flags = irq_save_disable();
+    if (t->state == TASK_STATE_ZOMBIE) {
+        irq_restore_flags(flags);
+        return false;
+    }
+    ready_remove(t);
+    wait_unlink(t);
+    t->sleep_until_tick = sleep_until_tick;
+    t->state = TASK_STATE_SLEEPING;
+    irq_restore_flags(flags);
+    return true;
+}
+
+void scheduler_service_sleepers(void) {
+    uint64_t flags = irq_save_disable();
+    wake_expired_sleepers();
+    irq_restore_flags(flags);
+}
+
+static bool pid_in_use(uint32_t pid) {
+    return find_live_task(pid) != NULL;
+}
+
+/* Shared by scheduler_create_task / _with_pid / the idle task. */
+static TaskStruct* task_create_internal(void (*function)(void), void* data, TaskPriority priority,
+                                        bool fixed_pid, uint32_t pid) {
     if (!function) {
         serial_print("ERROR: No function provided for task creation\n");
+        return NULL;
+    }
+    if (!prio_valid((int)priority)) {
+        serial_print("ERROR: Invalid task priority\n");
+        return NULL;
+    }
+
+    uint64_t flags = irq_save_disable();
+    reap_zombies();
+
+    if (fixed_pid && pid_in_use(pid)) {
+        irq_restore_flags(flags);
+        serial_print("ERROR: PID already in use\n");
         return NULL;
     }
 
     TaskStruct* task = task_pool_alloc();
     if (!task) {
+        irq_restore_flags(flags);
         return NULL;
     }
 
     // Initialize task
     task_init(task, function, data, priority);
-    task->pid = scheduler.next_pid++;
+    if (fixed_pid) {
+        task->pid = pid;
+    } else {
+        while (scheduler.next_pid == 0 || pid_in_use(scheduler.next_pid)) {
+            scheduler.next_pid++;
+        }
+        task->pid = scheduler.next_pid++;
+    }
     task->start_time = timer_get_ticks();
     task->last_run_time = task->start_time;
 
@@ -379,14 +710,15 @@ TaskStruct* scheduler_create_task(void (*function)(void), void* data, TaskPriori
     task->stack_size = TASK_STACK_SIZE;
     task->stack_base = task_allocate_stack(task->stack_size);
     if (!task->stack_base) {
+        task_pool_free(task);
+        irq_restore_flags(flags);
         console_println_color("Failed to allocate task stack", CONSOLE_ERROR_COLOR);
         serial_print("ERROR: Failed to allocate task stack\n");
         return NULL;
     }
 
-    // Set stack top (stack grows downward, ensure 16-byte alignment)
+    // Stack grows downward; keep the top 16-byte aligned (x86-64 ABI)
     uintptr_t stack_top_addr = (uintptr_t)task->stack_base + task->stack_size;
-    // Align to 16 bytes (x86-64 ABI requirement)
     stack_top_addr = stack_top_addr & ~((uintptr_t)15);
     task->stack_top = (void*)stack_top_addr;
 
@@ -394,214 +726,69 @@ TaskStruct* scheduler_create_task(void (*function)(void), void* data, TaskPriori
     setup_task_context(task);
 
     /* Idle keeps the boot master CR3; everyone else gets a private PML4. */
-    if (priority != PRIORITY_IDLE) {
-        if (task_attach_private_as(task) != 0) {
-            task_free_stack(task->stack_base);
-            task->stack_base = NULL;
-            return NULL;
-        }
+    if (task->context.rsp == 0 ||
+        (priority != PRIORITY_IDLE && task_attach_private_as(task) != 0)) {
+        task_free_stack(task->stack_base);
+        task->stack_base = NULL;
+        task_pool_free(task);
+        irq_restore_flags(flags);
+        return NULL;
     }
 
     // Add to ready queue
-    task->next = scheduler.ready_queue[priority];
-    if (scheduler.ready_queue[priority]) {
-        scheduler.ready_queue[priority]->prev = task;
-    }
-    scheduler.ready_queue[priority] = task;
-    task->prev = NULL;
-
+    task->state = TASK_STATE_READY;
+    ready_add(task);
     scheduler.total_tasks++;
+    irq_restore_flags(flags);
     return task;
+}
+
+// Create a new task
+TaskStruct* scheduler_create_task(void (*function)(void), void* data, TaskPriority priority) {
+    return task_create_internal(function, data, priority, false, 0);
+}
+
+// Create a task with a specific PID (0 is reserved for the idle/shell carrier)
+TaskStruct* scheduler_create_task_with_pid(void (*function)(void), void* data, TaskPriority priority, uint32_t custom_pid) {
+    if (custom_pid == 0) {
+        serial_print("ERROR: PID 0 is reserved for the idle task\n");
+        return NULL;
+    }
+    return task_create_internal(function, data, priority, true, custom_pid);
+}
+
+bool scheduler_kill_task(uint32_t pid) {
+    if (pid == 0) {
+        return false;  // idle TCB carries kmain/shell
+    }
+    uint64_t flags = irq_save_disable();
+    reap_zombies();
+    TaskStruct* task = find_live_task(pid);
+    if (!task) {
+        irq_restore_flags(flags);
+        return false;
+    }
+    if (task == scheduler.current_task) {
+        scheduler_exit_current();
+    }
+    /* Any state: READY/RUNNING leave the ready queue, BLOCKED leaves its wait queue,
+     * SLEEPING is simply never woken. Not running, so reclaim right away. */
+    task_make_zombie(task);
+    task_reclaim(task);
+    irq_restore_flags(flags);
+    return true;
 }
 
 // Destroy a task
 void scheduler_destroy_task(uint32_t pid) {
-    // Find task in all queues
-    TaskStruct* task = NULL;
-    for (int priority = PRIORITY_REALTIME; priority >= PRIORITY_IDLE; priority--) {
-        TaskStruct* current = scheduler.ready_queue[priority];
-        while (current) {
-            if (current->pid == pid) {
-                task = current;
-                break;
-            }
-            current = current->next;
-        }
-        if (task) break;
-    }
-
-    if (!task) {
-        return;
-    }
-
-    // Remove from queue
-    if (task->prev) {
-        task->prev->next = task->next;
-    } else {
-        // Find which queue this task is in
-        for (int priority = PRIORITY_REALTIME; priority >= PRIORITY_IDLE; priority--) {
-            if (scheduler.ready_queue[priority] == task) {
-                scheduler.ready_queue[priority] = task->next;
-                break;
-            }
-        }
-    }
-    if (task->next) {
-        task->next->prev = task->prev;
-    }
-
-    // Free stack + private PML4 (shared tables stay with the master).
-    task_free_stack(task->stack_base);
-    if (task->address_space.pml4_phys != 0 &&
-        task->address_space.pml4_phys != g_kernel_pml4_phys) {
-        vmm_free_pml4(task->address_space.pml4_phys, g_kernel_pml4_phys);
-        task->address_space.pml4_phys = g_kernel_pml4_phys;
-    }
-
-    // Mark as zombie
-    task->state = TASK_STATE_ZOMBIE;
-    scheduler.total_tasks--;
+    (void)scheduler_kill_task(pid);
 }
 
 // Main scheduling function
 void scheduler_schedule(void) {
-    if (!scheduler.scheduler_active || !scheduler.current_task) {
-        return;
-    }
-
-    // Clean up zombie tasks first
-    for (int priority = PRIORITY_REALTIME; priority >= PRIORITY_IDLE; priority--) {
-        TaskStruct* task = scheduler.ready_queue[priority];
-        while (task) {
-            TaskStruct* next = task->next;
-            if (task->state == TASK_STATE_ZOMBIE) {
-                // Remove from queue
-                if (task->prev) {
-                    task->prev->next = task->next;
-                } else {
-                    scheduler.ready_queue[priority] = task->next;
-                }
-                if (task->next) {
-                    task->next->prev = task->prev;
-                }
-                
-                // Update task count
-                scheduler.total_tasks--;
-                
-                // If this was the current task, switch to idle
-                if (task == scheduler.current_task) {
-                    scheduler.current_task = NULL;  // Will be set to idle below
-                }
-            }
-            task = next;
-        }
-    }
-
-    TaskStruct* next_task = NULL;
-
-    // Find next task with proper multi-level scheduling
-    // First, try to find a different task in the same priority
-    if (scheduler.current_task && scheduler.current_task->priority >= PRIORITY_IDLE && 
-        scheduler.current_task->priority <= PRIORITY_REALTIME) {
-        
-        int current_priority = scheduler.current_task->priority;
-        if (scheduler.ready_queue[current_priority]) {
-            // Try to find next task in same priority
-            next_task = scheduler.current_task->next;
-            if (!next_task) {
-                // Wrap around to beginning of queue
-                next_task = scheduler.ready_queue[current_priority];
-            }
-            
-            // If we found the same task, look for tasks in other priorities
-            if (next_task == scheduler.current_task) {
-                // Look for tasks in other priority levels
-                for (int priority = PRIORITY_REALTIME; priority >= PRIORITY_IDLE; priority--) {
-                    if (priority != current_priority && scheduler.ready_queue[priority]) {
-                        next_task = scheduler.ready_queue[priority];
-                        break;
-                    }
-                }
-            }
-        }
-    } else {
-        // No current task, find highest priority task
-        for (int priority = PRIORITY_REALTIME; priority >= PRIORITY_IDLE; priority--) {
-            if (scheduler.ready_queue[priority]) {
-                next_task = scheduler.ready_queue[priority];
-                break;
-            }
-        }
-    }
-
-    /* If still unset (e.g. idle queue empty while NORMAL tasks exist), scan all queues. */
-    if (!next_task) {
-        for (int priority = PRIORITY_REALTIME; priority >= PRIORITY_IDLE; priority--) {
-            TaskStruct* cand = scheduler.ready_queue[priority];
-            while (cand) {
-                if (cand->state == TASK_STATE_READY || cand->state == TASK_STATE_RUNNING) {
-                    if (cand != scheduler.current_task || scheduler.total_tasks <= 1) {
-                        next_task = cand;
-                        break;
-                    }
-                }
-                cand = cand->next;
-            }
-            if (next_task && next_task != scheduler.current_task) {
-                break;
-            }
-        }
-    }
-
-    if (!next_task) {
-        next_task = scheduler.current_task;
-    }
-    
-    // Fallback: if no current task, find the idle task
-    if (!scheduler.current_task) {
-        // Find idle task (PID 0)
-        for (int priority = PRIORITY_REALTIME; priority >= PRIORITY_IDLE; priority--) {
-            TaskStruct* task = scheduler.ready_queue[priority];
-            while (task) {
-                if (task->pid == 0) {
-                    scheduler.current_task = task;
-                    break;
-                }
-                task = task->next;
-            }
-            if (scheduler.current_task) break;
-        }
-    }
-
-    // Switch to next task if different
-    if (next_task != scheduler.current_task) {
-        TaskStruct* old_task = scheduler.current_task;
-
-        // Update task states
-        if (old_task && old_task->state == TASK_STATE_RUNNING) {
-            old_task->state = TASK_STATE_READY;
-        }
-
-        next_task->state = TASK_STATE_RUNNING;
-        next_task->time_remaining = next_task->time_slice;
-
-        // Perform context switch only if we have a valid context
-        if (next_task->stack_base && next_task->context.rip) {
-            // Additional safety checks
-            if (next_task->context.rip < 0x1000) {
-                return;
-            }
-            if (next_task->context.rsp < 0x1000) {
-                return;
-            }
-            
-            task_switch(old_task, next_task);
-        } else {
-            serial_print("ERROR: Invalid task context for switching\n");
-        }
-    } else {
-        // Same task, no switch needed
-    }
+    uint64_t flags = irq_save_disable();
+    schedule_locked();
+    irq_restore_flags(flags);
 }
 
 // Get current running task
@@ -614,131 +801,126 @@ uint32_t scheduler_get_task_count(void) {
     return scheduler.total_tasks;
 }
 
-// Print all tasks
+// Print all live tasks (any state)
 void scheduler_print_tasks(void) {
     console_println_color("PID | State    | Priority | Runtime", CONSOLE_FG_COLOR);
     console_println_color("----|----------|----------|--------", CONSOLE_FG_COLOR);
-    
-    // Print idle task first
-    if (scheduler.current_task && scheduler.current_task->pid == 0) {
-        console_print_color("0   | Running  | Idle     | ", CONSOLE_FG_COLOR);
-        char buffer[32];
-        int_to_str((int)scheduler.current_task->total_runtime, buffer);
-        console_println_color(buffer, CONSOLE_FG_COLOR);
-    }
-    
-    // Print all other tasks
-    for (int priority = PRIORITY_REALTIME; priority >= PRIORITY_IDLE; priority--) {
-        TaskStruct* task = scheduler.ready_queue[priority];
-        while (task) {
-            if (task->pid != 0) {  // Skip idle task (already printed)
-                char buffer[32];
-                int_to_str(task->pid, buffer);
-                console_print_color(buffer, CONSOLE_FG_COLOR);
-                console_print_color("   | ", CONSOLE_FG_COLOR);
-                
-                // Print state
-                switch (task->state) {
-                    case TASK_STATE_READY:
-                        console_print_color("Ready    | ", CONSOLE_FG_COLOR);
-                        break;
-                    case TASK_STATE_RUNNING:
-                        console_print_color("Running  | ", CONSOLE_FG_COLOR);
-                        break;
-                    case TASK_STATE_BLOCKED:
-                        console_print_color("Blocked  | ", CONSOLE_FG_COLOR);
-                        break;
-                    case TASK_STATE_SLEEPING:
-                        console_print_color("Sleeping | ", CONSOLE_FG_COLOR);
-                        break;
-                    case TASK_STATE_ZOMBIE:
-                        console_print_color("Zombie   | ", CONSOLE_FG_COLOR);
-                        break;
-                    default:
-                        console_print_color("Unknown  | ", CONSOLE_FG_COLOR);
-                        break;
-                }
-                
-                // Print priority
-                switch (task->priority) {
-                    case PRIORITY_IDLE:
-                        console_print_color("Idle     | ", CONSOLE_FG_COLOR);
-                        break;
-                    case PRIORITY_LOW:
-                        console_print_color("Low      | ", CONSOLE_FG_COLOR);
-                        break;
-                    case PRIORITY_NORMAL:
-                        console_print_color("Normal   | ", CONSOLE_FG_COLOR);
-                        break;
-                    case PRIORITY_HIGH:
-                        console_print_color("High     | ", CONSOLE_FG_COLOR);
-                        break;
-                    case PRIORITY_REALTIME:
-                        console_print_color("Realtime | ", CONSOLE_FG_COLOR);
-                        break;
-                    default:
-                        console_print_color("Unknown  | ", CONSOLE_FG_COLOR);
-                        break;
-                }
-                
-                // Print runtime
-                int_to_str(task->total_runtime, buffer);
-                console_println_color(buffer, CONSOLE_FG_COLOR);
-            }
-            task = task->next;
+
+    for (uint32_t i = 0; i < TASK_POOL_CAP; i++) {
+        TaskStruct* task = &g_task_pool[i];
+        if (!g_task_used[i] || task->state == TASK_STATE_ZOMBIE) {
+            continue;
         }
+        char buffer[32];
+        int_to_str((int)task->pid, buffer);
+        console_print_color(buffer, CONSOLE_FG_COLOR);
+        console_print_color("   | ", CONSOLE_FG_COLOR);
+
+        // Print state
+        switch (task->state) {
+            case TASK_STATE_READY:
+                console_print_color("Ready    | ", CONSOLE_FG_COLOR);
+                break;
+            case TASK_STATE_RUNNING:
+                console_print_color("Running  | ", CONSOLE_FG_COLOR);
+                break;
+            case TASK_STATE_BLOCKED:
+                console_print_color("Blocked  | ", CONSOLE_FG_COLOR);
+                break;
+            case TASK_STATE_SLEEPING:
+                console_print_color("Sleeping | ", CONSOLE_FG_COLOR);
+                break;
+            case TASK_STATE_ZOMBIE:
+                console_print_color("Zombie   | ", CONSOLE_FG_COLOR);
+                break;
+            default:
+                console_print_color("Unknown  | ", CONSOLE_FG_COLOR);
+                break;
+        }
+
+        // Print priority
+        switch (task->priority) {
+            case PRIORITY_IDLE:
+                console_print_color("Idle     | ", CONSOLE_FG_COLOR);
+                break;
+            case PRIORITY_LOW:
+                console_print_color("Low      | ", CONSOLE_FG_COLOR);
+                break;
+            case PRIORITY_NORMAL:
+                console_print_color("Normal   | ", CONSOLE_FG_COLOR);
+                break;
+            case PRIORITY_HIGH:
+                console_print_color("High     | ", CONSOLE_FG_COLOR);
+                break;
+            case PRIORITY_REALTIME:
+                console_print_color("Realtime | ", CONSOLE_FG_COLOR);
+                break;
+            default:
+                console_print_color("Unknown  | ", CONSOLE_FG_COLOR);
+                break;
+        }
+
+        // Print runtime
+        int_to_str((int)task->total_runtime, buffer);
+        console_println_color(buffer, CONSOLE_FG_COLOR);
     }
 }
 
-// Set task priority
+// Set task priority (re-queues a runnable task on its new level)
 void scheduler_set_priority(uint32_t pid, TaskPriority priority) {
-    // Find and update task priority
-    for (int p = PRIORITY_IDLE; p <= PRIORITY_REALTIME; p++) {
-        TaskStruct* current = scheduler.ready_queue[p];
-        while (current) {
-            if (current->pid == pid) {
-                current->priority = priority;
-                return;
-            }
-            current = current->next;
+    if (!prio_valid((int)priority)) {
+        return;
+    }
+    uint64_t flags = irq_save_disable();
+    TaskStruct* task = find_live_task(pid);
+    if (task) {
+        bool queued = task_is_runnable(task);
+        if (queued) {
+            ready_remove(task);
+        }
+        task->priority = priority;
+        if (queued) {
+            ready_add(task);
         }
     }
+    irq_restore_flags(flags);
 }
 
 // Initialize a task structure
 void task_init(TaskStruct* task, void (*function)(void), void* data, TaskPriority priority) {
     if (!task || !function) return;
-    
+
     task->pid = 0;  // Will be set by caller
     task->ppid = 0;
     task->state = TASK_STATE_READY;
     task->priority = priority;
     task->nice = 0;
-    
+
     task->start_time = 0;  // Will be set by caller
     task->total_runtime = 0;
     task->last_run_time = 0;
-    
+
     task->stack_base = NULL;  // Will be set by caller
     task->stack_size = 0;
     task->stack_top = NULL;
-    
+
     // Initialize context
     memset(&task->context, 0, sizeof(task->context));
-    
+
     task->vruntime = 0;
     task->time_slice = 100;  // Default time slice
     task->time_remaining = task->time_slice;
-    
+
     task->task_function = function;
     task->task_data = data;
-    
+
     task->next = NULL;
     task->prev = NULL;
 
     task->address_space.pml4_phys = g_kernel_pml4_phys;
     task->sleep_until_tick = 0;
     task->wait_next = NULL;
+    task->wait_queue = NULL;
     fd_table_init(task->fds);
 }
 
@@ -754,138 +936,42 @@ void setup_task_context(TaskStruct* task) {
         serial_print("ERROR: Stack top <= stack base\n");
         return;
     }
-
-    // Calculate safe stack pointer with bounds checking
-    uintptr_t stack_size = (uintptr_t)task->stack_top - (uintptr_t)task->stack_base;
-    if (stack_size < 256) {  // Minimum 256 bytes for safety
+    uintptr_t top = (uintptr_t)task->stack_top & ~((uintptr_t)15);
+    if (top - (uintptr_t)task->stack_base < 256) {  // Minimum 256 bytes for safety
         serial_print("ERROR: Stack too small\n");
         return;
     }
 
-    // Pre-fill the stack with iretq frame
-    // iretq expects: SS, RSP, RFLAGS, CS, RIP (in that order, bottom to top)
-    uintptr_t stack_ptr = (uintptr_t)task->stack_top;
-    
-    // Reserve space for iretq frame (5 * 8 bytes = 40 bytes)
-    stack_ptr -= 40;
-    
-    // Ensure 16-byte alignment for x86-64 ABI
-    stack_ptr = stack_ptr & ~((uintptr_t)15);
+    /*
+     * Initial switch frame, consumed by the first switch_to() into this task (layout in
+     * context_switch.asm): it pops r15..rbp and `ret`s into task_entry_trampoline with
+     * RSP = top - 8, i.e. as if the trampoline had been called (RSP % 16 == 8). The
+     * trampoline calls scheduler_task_entry(r12 = function, r13 = data), which runs the
+     * function and exits the task if it ever returns.
+     */
+    uint64_t* sp = (uint64_t*)top;
+    *--sp = 0;                                        // fake return address
+    *--sp = (uint64_t)(uintptr_t)task_entry_trampoline;  // switch_to ret target
+    *--sp = 0;                                        // rbp
+    *--sp = 0;                                        // rbx
+    *--sp = (uint64_t)(uintptr_t)task->task_function; // r12
+    *--sp = (uint64_t)(uintptr_t)task->task_data;     // r13
+    *--sp = 0;                                        // r14
+    *--sp = 0;                                        // r15
 
-    // Bounds check - ensure we don't go below stack base
-    if (stack_ptr < (uintptr_t)task->stack_base + 64) {
-        serial_print("ERROR: Stack pointer too low\n");
-        stack_ptr = (uintptr_t)task->stack_base + 64;
-        stack_ptr = stack_ptr & ~((uintptr_t)15);  // Re-align
-    }
+    memset(&task->context, 0, sizeof(task->context));
+    task->context.rsp = (uint64_t)(uintptr_t)sp;
 
-    // Pre-fill the iretq frame on the stack
-    uint64_t* stack_frame = (uint64_t*)stack_ptr;
-    stack_frame[0] = (uint64_t)task->task_function;  // RIP
-    stack_frame[1] = 0x08;  // CS (kernel code segment)
-    stack_frame[2] = 0x202;  // RFLAGS (IF=1, bit 1 always 1)
-    stack_frame[3] = stack_ptr;  // RSP (points to this frame)
-    stack_frame[4] = 0x10;  // SS (kernel data segment)
-
-    task->context.rsp = stack_ptr;
-    
-    // Validate RSP
-    if (task->context.rsp == 0) {
-        serial_print("ERROR: NULL RSP in task context\n");
-        return;
-    }
-    if (task->context.rsp < 0x1000) {
-        serial_print("ERROR: RSP too low (< 0x1000)\n");
-        return;
-    }
-
-    // Set up segment registers for long mode
-    task->context.cs = 0x08;  
-    task->context.ss = 0x10;  
-    task->context.ds = 0x10;
-    task->context.es = 0x10;
-    task->context.fs = 0x10;
-    task->context.gs = 0x10;
-
-    // Set up flags register (interrupts enabled, bit 1 must be 1)
-    task->context.rflags = 0x202;  // IF=1, bit 1=1 (required)
-
-    // Set up function arguments
-    task->context.rdi = (uint64_t)task->task_data;  // First argument
-
-    // Clear other registers
-    task->context.rax = 0;
-    task->context.rbx = 0;
-    task->context.rcx = 0;
-    task->context.rdx = 0;
-    task->context.rsi = 0;
-    task->context.rbp = 0;
-    task->context.r8 = 0;
-    task->context.r9 = 0;
-    task->context.r10 = 0;
-    task->context.r11 = 0;
-    task->context.r12 = 0;
-    task->context.r13 = 0;
-    task->context.r14 = 0;
-    task->context.r15 = 0;
-
-    // Set up FPU state
-    task->context.fpu_control = 0x37F;  // Default FPU control word
-    memset(task->context.fpu_state, 0, sizeof(task->context.fpu_state));
-
-    task->context.rip = (uint64_t)task->task_function;
+    /* Informational only (not loaded by the switch). */
+    task->context.rip = (uint64_t)(uintptr_t)task->task_function;
+    task->context.rdi = (uint64_t)(uintptr_t)task->task_data;
+    task->context.rflags = 0x202;  // entry runs with IF=1 except in PIT poll mode
+    task->context.cs = 0x08;
+    task->context.ss = 0x10;
+    task->context.fpu_control = 0x37F;
 }
 
-// Context switch - now with real CPU register saving/restoring
-void task_switch(TaskStruct* from, TaskStruct* to) {
-    if (!to) return;
-
-    /* IF=0: pending IRQs (e.g. keyboard) wait; keep this section short to bound input latency. */
-    __asm__ volatile("cli");
-
-    // If we have a current task, save its context
-    if (from && from != to) {
-        const bool fake_idle =
-            (from->pid == 0 && !idle_cpu_has_run);
-        if (!fake_idle) {
-            context_save(&from->context);
-            if (!context_looks_sane(&from->context)) {
-                serial_print("FATAL: context_save produced invalid RIP/RSP; halting\n");
-                for (;;) {
-                    __asm__ volatile("cli; hlt");
-                }
-            }
-        }
-    }
-
-    /* Switch address space after saving outgoing state (identity + kernel shared). */
-    if (to->address_space.pml4_phys != 0) {
-        uint64_t want = to->address_space.pml4_phys & VMM_PTE_ADDR_MASK;
-        uint64_t cur = vmm_get_cr3() & VMM_PTE_ADDR_MASK;
-        if (want != cur) {
-            vmm_load_cr3(want);
-        }
-    }
-
-    // Switch to the new task
-    scheduler.current_task = to;
-
-    if (!context_looks_sane(&to->context)) {
-        serial_print("FATAL: would iretq to non-text RIP or bad RSP; halting\n");
-        for (;;) {
-            __asm__ volatile("cli; hlt");
-        }
-    }
-
-    // Restore the new task's context
-    context_restore(&to->context);
-
-    // This should never return, as context_restore executes iretq
-    // If we get here, something went wrong
-    __asm__ volatile("sti");
-}
-
-// Idle task - runs when no other tasks are ready
+// Idle task - runs only if the idle TCB is ever entered fresh (it normally carries kmain)
 void idle_task(void) {
     idle_cpu_has_run = true;
     while (1) {
@@ -915,111 +1001,27 @@ void debug_task_function(void) {
     }
 }
 
-// Create a task with a specific PID
-TaskStruct* scheduler_create_task_with_pid(void (*function)(void), void* data, TaskPriority priority, uint32_t custom_pid) {
-    if (!function) {
-        serial_print("ERROR: No function provided for task creation\n");
-        return NULL;
-    }
-
-    TaskStruct* task = task_pool_alloc();
-    if (!task) {
-        return NULL;
-    }
-
-    // Initialize task
-    task_init(task, function, data, priority);
-    task->pid = custom_pid;  // Use custom PID
-    task->start_time = timer_get_ticks();
-    task->last_run_time = task->start_time;
-
-    // Allocate and set up stack
-    task->stack_size = TASK_STACK_SIZE;
-    task->stack_base = task_allocate_stack(task->stack_size);
-    if (!task->stack_base) {
-        console_println_color("Failed to allocate task stack", CONSOLE_ERROR_COLOR);
-        serial_print("ERROR: Failed to allocate task stack\n");
-        return NULL;
-    }
-
-    // Set stack top (stack grows downward, ensure 16-byte alignment)
-    uintptr_t stack_top_addr = (uintptr_t)task->stack_base + task->stack_size;
-    // Align to 16 bytes (x86-64 ABI requirement)
-    stack_top_addr = stack_top_addr & ~((uintptr_t)15);
-    task->stack_top = (void*)stack_top_addr;
-
-    // Set up initial context for the task
-    setup_task_context(task);
-
-    if (priority != PRIORITY_IDLE) {
-        if (task_attach_private_as(task) != 0) {
-            task_free_stack(task->stack_base);
-            task->stack_base = NULL;
-            return NULL;
-        }
-    }
-
-    // Add to ready queue
-    task->next = scheduler.ready_queue[priority];
-    if (scheduler.ready_queue[priority]) {
-        scheduler.ready_queue[priority]->prev = task;
-    }
-    scheduler.ready_queue[priority] = task;
-    task->prev = NULL;
-
-    scheduler.total_tasks++;
-    return task;
-}
-
-// Kill all tasks except the idle task (PID 0)
+// Kill all tasks except the idle task (PID 0), in any state
 void scheduler_kill_all_except_idle(void) {
-    for (int priority = PRIORITY_REALTIME; priority >= PRIORITY_IDLE; priority--) {
-        TaskStruct* task = scheduler.ready_queue[priority];
-        while (task) {
-            TaskStruct* next = task->next;
-            if (task->pid != 0) {  // Don't kill idle task
-                // Remove from queue
-                if (task->prev) {
-                    task->prev->next = task->next;
-                } else {
-                    scheduler.ready_queue[priority] = task->next;
-                }
-                if (task->next) {
-                    task->next->prev = task->prev;
-                }
+    uint64_t flags = irq_save_disable();
+    TaskStruct* self = scheduler.current_task;
+    bool kill_self = false;
 
-                if (task->address_space.pml4_phys != 0 &&
-                    task->address_space.pml4_phys != g_kernel_pml4_phys) {
-                    vmm_free_pml4(task->address_space.pml4_phys, g_kernel_pml4_phys);
-                    task->address_space.pml4_phys = g_kernel_pml4_phys;
-                }
-                
-                // Update task count
-                scheduler.total_tasks--;
-                
-                // If this was the current task, switch to idle
-                if (task == scheduler.current_task) {
-                    scheduler.current_task = NULL;  // Will be set to idle below
-                }
-            }
-            task = next;
+    for (uint32_t i = 0; i < TASK_POOL_CAP; i++) {
+        TaskStruct* task = &g_task_pool[i];
+        if (!g_task_used[i] || task->pid == 0) {
+            continue;
         }
-    }
-    
-    // Ensure idle task is running
-    if (!scheduler.current_task) {
-        // Find idle task (PID 0)
-        for (int priority = PRIORITY_REALTIME; priority >= PRIORITY_IDLE; priority--) {
-            TaskStruct* task = scheduler.ready_queue[priority];
-            while (task) {
-                if (task->pid == 0) {
-                    scheduler.current_task = task;
-                    task->state = TASK_STATE_RUNNING;
-                    break;
-                }
-                task = task->next;
-            }
-            if (scheduler.current_task) break;
+        if (task == self) {
+            kill_self = task->state != TASK_STATE_ZOMBIE;
+            continue;
         }
+        task_make_zombie(task);
+        task_reclaim(task);
     }
+
+    if (kill_self) {
+        scheduler_exit_current();
+    }
+    irq_restore_flags(flags);
 }

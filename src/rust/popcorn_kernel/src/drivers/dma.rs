@@ -7,6 +7,9 @@ extern "C" {
     fn free_pages(p: *mut u8, num_pages: usize);
 }
 const MEM_ALLOC_ZERO: u32 = 0x01;
+/// Matches `MEM_ALLOC_DMA` in `src/includes/memory.h`: frames below 4 GiB, so
+/// controllers limited to 32-bit DMA addresses can reach the buffer.
+const MEM_ALLOC_DMA: u32 = 0x02;
 
 static NEXT_COOKIE: AtomicU64 = AtomicU64::new(1);
 
@@ -84,7 +87,7 @@ pub fn dma_alloc(len: usize) -> Option<DmaBuffer> {
         return None;
     }
     let pages = (len + 4095) / 4096;
-    let ptr = unsafe { alloc_pages(pages, MEM_ALLOC_ZERO) };
+    let ptr = unsafe { alloc_pages(pages, MEM_ALLOC_ZERO | MEM_ALLOC_DMA) };
     if ptr.is_null() {
         return None;
     }

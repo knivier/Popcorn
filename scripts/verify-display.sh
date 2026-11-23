@@ -17,8 +17,8 @@ source "$ROOT/scripts/lib/img-uefi.sh"
 # shellcheck source=lib/qemu-uefi.sh
 source "$ROOT/scripts/lib/qemu-uefi.sh"
 
-killall qemu-system-x86_64 2>/dev/null || true
-sleep 1
+# Only the Popcorn guest (pidfile) is stopped; other QEMU VMs are left alone.
+qemu_kill_guest
 code="$(find_edk_code)"
 ensure_ovmf_vars "$OVMF_VARS"
 mon="$RUNTIME_DIR/verify-mon.sock"
@@ -39,6 +39,7 @@ qemu-system-x86_64 \
   -display none \
   -monitor "unix:$mon,server,nowait" \
   -debugcon "file:$dbg" -global isa-debugcon.iobase=0xe9 \
+  -pidfile "$QEMU_PIDFILE" \
   -no-reboot -no-shutdown -daemonize
 
 sleep 12
@@ -47,7 +48,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
   sleep 1
 done
 { printf 'screendump %s\n' "$ppm"; sleep 0.5; } | nc -U "$mon" 2>/dev/null || true
-killall qemu-system-x86_64 2>/dev/null || true
+qemu_kill_guest
 
 echo "debugcon=$(cat "$dbg" 2>/dev/null || true)"
 echo "video=$(qemu_uefi_video_args | tr '\n' ' ')"

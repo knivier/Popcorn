@@ -46,10 +46,22 @@ pub fn cfg_read16(bus: u8, slot: u8, func: u8, offset: u8) -> u16 {
     }
 }
 
+/// 16-bit write via a 32-bit read-modify-write of the containing dword.
+///
+/// The dword at 0x04 is Command (low) + Status (high). Status error bits are
+/// write-1-to-clear, so writing back what we read would wipe latched errors.
+/// For Command writes we zero the Status half (0 is a no-op for RW1C / RO bits);
+/// for Status writes the caller's value is the intended clear mask.
 pub fn cfg_write16(bus: u8, slot: u8, func: u8, offset: u8, value: u16) {
     let aligned = offset & !3;
     let mut v = cfg_read32(bus, slot, func, aligned);
-    if (offset & 2) != 0 {
+    if aligned == 0x04 {
+        v = if (offset & 2) != 0 {
+            (v & 0x0000_FFFF) | ((value as u32) << 16)
+        } else {
+            value as u32
+        };
+    } else if (offset & 2) != 0 {
         v = (v & 0x0000_FFFF) | ((value as u32) << 16);
     } else {
         v = (v & 0xFFFF_0000) | (value as u32);
@@ -208,18 +220,29 @@ pub fn enable_bus_master(bus: u8, slot: u8, func: u8) {
     cfg_write16(bus, slot, func, 0x04, cmd);
 }
 
+/// Any virtio-blk function (transitional 0x1001 or modern-only 0x1042).
 fn is_virtio_blk(id: u32) -> bool {
     let v = (id & 0xFFFF) as u16;
     let d = ((id >> 16) & 0xFFFF) as u16;
     v == VENDOR_VIRTIO && (d == DEV_VIRTIO_BLK_LEGACY || d == DEV_VIRTIO_BLK_MODERN)
 }
 
-/// Nth virtio-blk on bus 0 (0 = first); we drive the legacy I/O-BAR path.
+/// Transitional virtio-blk only (0x1001): the one ID with a legacy I/O BAR0.
+/// Modern-only 0x1042 needs the capability/MMIO transport, which we lack.
+fn is_virtio_blk_legacy(id: u32) -> bool {
+    let v = (id & 0xFFFF) as u16;
+    let d = ((id >> 16) & 0xFFFF) as u16;
+    v == VENDOR_VIRTIO && d == DEV_VIRTIO_BLK_LEGACY
+}
+
+/// Nth transitional virtio-blk on any reachable PCI bus (bus 0 + bridges;
+/// 0 = first). Modern-only devices are not counted: we drive the legacy
+/// I/O-BAR path only, so they would fail to probe and shift the index.
 pub fn find_virtio_blk_n(n: usize) -> Option<PciAddr> {
     let mut seen = 0usize;
     let mut found = None;
     scan(|addr, id, _class_reg| {
-        if is_virtio_blk(id) {
+        if is_virtio_blk_legacy(id) {
             if seen == n {
                 found = Some(addr);
                 return false;
@@ -234,7 +257,7 @@ pub fn find_virtio_blk_n(n: usize) -> Option<PciAddr> {
 /// Mass-storage class codes for internal-disk enumeration (listing only; no I/O).
 pub fn foreach_storage_controller(mut f: impl FnMut(PciAddr, u8, u8)) {
     scan(|addr, id, class_reg| {
-        /* virtio-blk is handled as usb/virtio disks. */
+        /* virtio-blk (legacy or modern) is never an internal disk controller. */
         if is_virtio_blk(id) {
             return true;
         }
@@ -260,7 +283,7 @@ fn print_hex16(v: u16) {
 }
 
 /// Scan all reachable PCI buses and print present devices.
-pub fn scan_bus0_print() {
+pub fn scan_print() {
     println_color("PCI:", COLOR_LIGHT_CYAN);
     let mut found = 0u32;
     scan(|addr, id, class_reg| {

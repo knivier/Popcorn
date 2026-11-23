@@ -4,9 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .log import LogBuffer
-from .paths import SRC_DIR, TARGET_DIR
-from .runner import ensure_dir, run_core, run_streamed, rm_rf
-from .toolchain import Toolchain
+from .paths import TARGET_DIR
+from .runner import ensure_dir, run_core, rm_rf
 
 
 @dataclass(frozen=True)
@@ -16,11 +15,12 @@ class BuildOutputs:
 
 
 class KernelBuilder:
-    """Thin wrapper: prefers scripts/core.sh, falls back to direct toolchain."""
+    """Thin wrapper around scripts/core.sh (build / all / clean).
 
-    def __init__(self, *, src_dir: Path | None = None, toolchain: Toolchain, logs: LogBuffer, via_wsl: bool = False):
-        self.src_dir = src_dir or SRC_DIR
-        self.tc = toolchain
+    There is no direct-toolchain fallback: a failed core.sh build raises.
+    """
+
+    def __init__(self, *, logs: LogBuffer, via_wsl: bool = False):
         self.logs = logs
         self.via_wsl = via_wsl
         self.obj_dir = TARGET_DIR / "obj"

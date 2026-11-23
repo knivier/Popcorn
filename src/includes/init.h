@@ -6,17 +6,6 @@
 #include <stdbool.h>
 #include "console.h"
 
-// Boot screen states
-typedef enum {
-    INIT_STATE_START,
-    INIT_STATE_MEMORY,
-    INIT_STATE_TIMER,
-    INIT_STATE_SCHEDULER,
-    INIT_STATE_MODULES,
-    INIT_STATE_COMPLETE,
-    INIT_STATE_WAIT_ENTER
-} InitState;
-
 // Boot screen configuration
 /* Boot chrome width follows the live console grid (80 on VGA, ~160 on 720p). */
 #define BOOT_SCREEN_WIDTH ((int)console_cols())
@@ -41,7 +30,6 @@ void init_show_syscall_info(void);
 void init_show_modules(void);
 void init_wait_for_enter(void);
 void init_boot_hold(void);
-void init_clear_boot_screen(void);
 void init_transition_to_console(void);
 
 #endif // INIT_H

@@ -1,5 +1,5 @@
-Native UEFI test loader
-=======================
+Native UEFI loader
+==================
 
 This path bypasses GRUB/Multiboot and boots directly as `BOOTX64.EFI`.
 
@@ -7,15 +7,18 @@ Build (from repo root):
 
 ```bash
 ./scripts/core.sh all          # kernel + BOOTX64.EFI + popcorn-uefi.img → target/
-./scripts/core.sh test-uefi    # QEMU smoke (stability + alive + debugcon)
+./scripts/core.sh test-uefi    # QEMU smoke (stability + alive + debugcon + #PF dump + GRUB ISO)
 ```
 
 Artifacts (all under `target/`):
 
-- `target/BOOTX64.EFI`
+- `target/BOOTX64.EFI` — the loader alone; it cannot boot without the kernel next to it
 - `target/popcorn-uefi.img` — **the only file to flash** (Balena Etcher)
 - `target/UNSAFE/` — QEMU scratch + auto-install test images. **Do not flash.**
-- `target/uefi_usb/EFI/BOOT/BOOTX64.EFI` — manual FAT32 copy layout
+
+A hand-made FAT32 stick needs the loader at `\EFI\BOOT\BOOTX64.EFI` and the
+kernel at `\boot\kernel` (or `\EFI\BOOT\kernel`) on the same volume; flashing
+`popcorn-uefi.img` gives exactly that layout.
 
 Hardware:
 

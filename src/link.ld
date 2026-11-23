@@ -1,7 +1,10 @@
 /*
  * 64-bit kernel: physical load 1 MiB, virtual base 0xFFFF800000000000 (high half).
- * Boot code + early data live at 0x100000 LMA; C and most asm at VA = (high base + (LMA - 1M)).
+ * Boot code + early data live at 0x100000 LMA; C and most asm at VA = KERNEL_VMA_BASE + LMA
+ * (see the note above .text).
  * GRUB: ELF entry = start, still at LMA 0x100000.
+ * UEFI: BOOTX64.EFI jumps to the uefi_start symbol and writes its handoff at the
+ * fixed address POPCORN_UEFI_HANDOFF_PHYS (asserted at the end of this file).
  */
 OUTPUT_FORMAT(elf64-x86-64)
 ENTRY(start)
@@ -82,6 +85,20 @@ SECTIONS
   __kernel_lma_start = BOOT_LMA;
   __kernel_lma_end   = ALIGN(LOADADDR(.bss) + SIZEOF(.bss), 0x1000);
   __kernel_lma_size  = __kernel_lma_end - __kernel_lma_start;
+
+  /* UEFI handoff contract (uefi_boot.h / bootx64.c). .text.boot must stay under
+     one page so .bss.boot starts at 0x102000 and the handoff follows the 8-byte
+     multiboot2_info_ptr. The MBI is no longer a fixed address inside the image:
+     the loader AllocatePages() it and passes mbi_phys in the handoff.
+     No ';' after ASSERT here: ld.lld rejects ASSERT(...); inside SECTIONS. */
+  ASSERT(popcorn_uefi_handoff == 0x102008,
+         "popcorn_uefi_handoff moved: must equal POPCORN_UEFI_HANDOFF_PHYS (0x102008)")
+  ASSERT(uefi_start >= BOOT_LMA,
+         "uefi_start below 0x100000: bootx64.c only accepts 0x100000 to 0x2FFFFF")
+  ASSERT(uefi_start < 0x300000,
+         "uefi_start at or above 0x300000: bootx64.c only accepts 0x100000 to 0x2FFFFF")
+  ASSERT(__kernel_lma_size <= 0x10000000,
+         "kernel image exceeds KERNEL_SPAN_MAX_BYTES (256 MiB) in bootx64.c")
 
   /DISCARD/ : {
     *(.eh_frame)

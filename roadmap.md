@@ -6,11 +6,11 @@ Popcorn is a modular x86-64 kernel framework for learning operating system devel
 
 **Coding target met:** v0.7 — Rust driver network, screen backends, Rust pops, kbd/PCI, in-kernel catalog.
 
-**Next version:** v0.8 — block path (ramdisk → virtio-blk), thin remaining C I/O.
+**Next version:** v0.8 — remove the remaining C port I/O from `src/core/` (console, init, kernel, multiboot2, shell), then Phase 4.3 platform work (ACPI → IOAPIC, MMIO BAR mapping). Block storage (ram0 / virtio-blk / NVMe / USB MSC over xHCI) and FAT32 are done. Driver-framework direction (grants, submit/complete queues, LAPIC+MSI-X): `docs/drivers/virtio-net-review.md`.
 
-**Verified:** 3 Oct 2026 — Phase 1–3 coding gates green in QEMU (`test-uefi`: `#PF` dump, GRUB+UEFI smoke, debugcon `I/B/S/2`). Process leftovers: pre-release marking, real-hardware boot.
+**Verified:** 22 Nov 2026 — every checkbox and table row in this file re-checked against the working-tree source (a source review, not a fresh QEMU run). Covered: the `switch_to` + `task_entry_trampoline` context switch, IDT gates for all PIC vectors 0x20–0x2F, `int 0x80` returning RAX, PIT poll accounting, kernel GDT + CS reload on both boot paths, the UEFI MBI handoff via `mbi_phys`, the block / FAT32 stack, the multi-bus PCI walk, and DMA below 4 GiB. Last QEMU gate run: 3 Oct 2026 (`test-uefi`: `#PF` dump, GRUB+UEFI smoke, debugcon `I/B/S/2`). CI runs `test-uefi` on branch `prod`; `core.sh test-shell` drives shell commands over COM1 on both boots (not in CI yet). Process leftovers: pre-release marking, real-hardware boot.
 
-**Roadmap scope:** Phase 3 coding largely done. Next is Phase 4 block/storage. VFS, userspace, and a real NIC stack stay in Phase 5.
+**Roadmap scope:** Phases 3, 4.1 and 4.2 are done (FAT32 on the selected disk included; full VFS deferred). Next is Phase 4.3 (ACPI / IOAPIC interrupt routing, MMIO BAR mapping; the PDE splitter is already done) and the driver framework from `docs/drivers/virtio-net-review.md`. VFS, userspace, and the network stack stay in Phase 5.
 
 ---
 
@@ -21,19 +21,19 @@ Popcorn is a modular x86-64 kernel framework for learning operating system devel
 | Boot (GRUB + UEFI) | Done | `src/core/kernel.asm`, `src/uefi/bootx64.c`, `scripts/core.sh` |
 | Console / shell UX | Done (C client of Rust screen) | `src/core/console.c`, `src/core/shell.c` |
 | PMM + kmalloc | Done (prototype) | `src/core/memory.c` |
-| VMM (4-level paging) | Partial | direct map 64 GiB; process PML4 clones upper 256; no PDE splitter yet |
+| VMM (4-level paging) | Partial | `src/core/vmm.c` — direct map 64 GiB; process PML4 shares PML4[0] + clones upper 256; 2 MiB PDE splitter; no user (`VMM_PTE_US`) mappings yet |
 | PMM (bitmap) | Done (≤16 GiB track) | `memory.c` / `physmap.h` — was hard-capped at 1 GiB |
-| Scheduler + context switch | Partial | `src/core/scheduler.c` — wait queues, sleep, bootstrap guard |
+| Scheduler + context switch | Partial | `src/core/scheduler.c`, `context_switch.asm` — `switch_to` + `task_entry_trampoline`, per-task 16 KiB kernel stacks, wait queues, sleep, bootstrap guard; `TSS.RSP0` still static |
 | Syscalls (14 registered) | Partial | `src/core/syscall.c` — real fd/dev/time/heap/cwd only |
-| FAT32 on selected disk | Done (no VFS) | `rust/popcorn_kernel/src/fs/` (the in-memory FS pop was removed) |
-| Pop modules | All Rust (incl. Dolphin) | `rust/.../pops/`, `src/core/pop_module.c` |
+| FAT32 on selected disk | Done (no VFS) | `src/rust/popcorn_kernel/src/fs/` (the in-memory FS pop was removed) |
+| Pop modules | All Rust (incl. Dolphin) | `src/rust/popcorn_kernel/src/pops/`, `src/core/pop_module.c` |
 | Device / drive table | Done | Rust registry + C fd bridge |
 | Registry catalog (RAM DB) | Done | `catalog.rs` / `catalog.h` — `catalog` shell cmd |
 | IRQ table | Done (C + Rust claims) | `irq.c`, `drivers/irq.rs` |
-| Rust crate | Active | abi/device/driver/class/dma/pit + backends |
-| PCI walk | Done (bus 0) | `drivers/bus/pci.rs` |
+| Rust crate | Active | abi/catalog/device/driver/class/dma/irq/io/bus + backends, block, usb, fs, pops |
+| PCI walk | Done (multi-bus, bridge recursion) | `drivers/bus/pci.rs` |
 | Block / storage | Done (ram / virtio / NVMe / USB MSC) | `drivers/block/`, `drivers/usb/` |
-| CI | Done | `.github/workflows/ci.yml` — build + `test-uefi` |
+| CI | Done | `.github/workflows/ci.yml` — build + `test-uefi` on push to `prod` and on PRs |
 
 ---
 
@@ -49,7 +49,7 @@ New kernel work lands in Rust unless it has to stay C/asm.
 | `memory.c` PMM (allocator shim only) | All pops (incl. Dolphin) + `console_ffi` | VFS / ring 3 UX |
 | Linker script `link.ld` | `console_*` writing via `/dev/tty0` + `/dev/fb0` | virtio-net |
 
-C calls a small `extern "C"` surface (`driver_init`, `irq_dispatch`, `dev_read` / `dev_write`, `pop_register` / `pop_run`). Rust owns registration, probe, and class ops. Panic in Rust = serial dump + halt, same as a CPU exception.
+C calls a small `extern "C"` surface (`rust_init`, `init_drives` / `init_drive`, `rust_device_read` / `rust_device_write` / `rust_device_ioctl`, `rust_screen_*`, `rust_kbd_*`, `rust_pops_register` — see `src/includes/driver_abi.h` and `src/includes/rust_abi.h`). `irq_dispatch` stays in C (`irq.c`). Rust owns registration, probe, and class ops. A Rust panic currently just spins (`lib.rs` `panic_handler`); serial dump + halt like a CPU exception is still TODO.
 
 Do **not** rewrite `console.c` UX (scrollback, history, status bar) in the first Rust PR. Split the **backends** (0xB8000 CRTC + GOP blit) into drivers; keep the 80×25 cell API as a client of those drivers.
 
@@ -75,11 +75,11 @@ Verified present in tree.
 ### Console, pops, internals
 
 - [x] VGA text + GOP shadow buffer, scrollback, history, tab completion
-- [x] Pop registry (`src/core/pop_module.c`, max 10) — Shimjapii, Spinner, Uptime, Filesystem, Sysinfo, Memory, CPU, Dolphin
-- [x] Bitmap PMM + kmalloc; `vmm_init` from `memory_init`; 4-level map/unmap; `vmm_map_kernel_region`
+- [x] Pop registry (`src/core/pop_module.c`, max 10) — Shimjapii, Spinner, Uptime, Memory, CPU, Sysinfo, Dolphin (all Rust, via `rust_pops_register`)
+- [x] Bitmap PMM + kmalloc; `vmm_init` from `memory_init`; 4-level `vmm_map_4k` / `vmm_unmap_4k`; `vmm_clone_kernel_space`
 - [x] IDT, PIC remap, PIT, PS/2 IRQ1, INT `0x80` (DPL 3 gate `0xEE`)
-- [x] Preemptive scheduler skeleton with real `iretq` (`src/core/context_switch.asm`)
-- [x] 21 syscall handlers registered (behavior is still stubby — see Phase 1 / 2)
+- [x] Preemptive scheduler with per-task kernel stacks: `switch_to` (callee-saved push + `ret`) and `task_entry_trampoline` in `src/core/context_switch.asm`; timer IRQ preemption via `idt.asm` stubs
+- [x] 14 syscall handlers registered (`src/core/syscall.c`; behavior is still partial — see Phase 1 / 2)
 
 ### Bring-up I/O (inline, no framework)
 
@@ -87,12 +87,12 @@ These work as direct port I/O or firmware calls. v0.7 moves them into the Rust d
 
 | Device | Location today | v0.7 destination |
 |--------|----------------|------------------|
-| PIC 8259 | `src/core/kernel.c` `idt_init` | Rust `irq` + PIC backend |
+| PIC 8259 | `src/core/irq.c` (`pic_init_remap`, mask/EOI; called from `src/core/idt.c` `idt_init`) | Rust `irq` + PIC backend |
 | PIT 8254 | `src/core/timer.c` | Rust clock provider (`/dev` clock, 100 Hz) |
-| PS/2 keyboard | `src/core/kernel.c` | Rust chardev `/dev/kbd` (after IRQ table) |
-| VGA text | `src/core/console.c` → `0xB8000` + CRTC `0x3D4/0x3D5` | Rust `/dev/tty0` |
-| GOP framebuffer | `src/core/console.c` `console_fb_*` | Rust `/dev/fb0` |
-| Serial COM1 | `src/core/scheduler.c` `serial_putc`, boot stages | Rust `/dev/ttyS0` |
+| PS/2 keyboard | Rust `backends/kbd.rs` + C trampoline `src/core/kbd.c` (IRQ1/EOI, `kbd_read_scancode`) | Done: Rust chardev `/dev/kbd` |
+| VGA text | Rust `backends/vga.rs` (`0xB8000` + CRTC; `console.c` calls `rust_screen_*`) | Done: Rust `/dev/tty0` |
+| GOP framebuffer | Rust `drivers/backends/fb.rs` + `screen.rs` (C `console_fb_*` in `console.c` are thin wrappers) | Done: Rust `/dev/fb0` |
+| Serial COM1 | Rust `drivers/backends/serial.rs`; early `boot_serial_putc` in `src/core/multiboot2.c` (used by `scheduler.c`, boot stages) | Done: Rust `/dev/ttyS0` (early path stays C) |
 | UEFI ConIn | `src/core/uefi_input.c` | Stay C until kbd chardev exists |
 
 ---
@@ -133,7 +133,7 @@ Why DRAM looked “stuck at 1 GiB”: QEMU `-m 1024` **and** a PMM bitmap hard
 - [x] Shared `physmap.h` — `VMM_DIRECT_MAP_BASE`, 64 GiB identity window, 16 GiB PMM track cap
 - [x] PMM bitmap tracks up to 16 GiB from the multiboot/UEFI mmap (no 1 GiB fallback clamp)
 - [x] Direct-map accessors (`phys_to_virt` / table walks via high-half)
-- [x] Process PML4 split: clear lower 256, copy upper 256 from master (`vmm_clone_kernel_space`)
+- [x] Process PML4 split: share PML4[0] (identity), clear PML4[1..255], copy upper 256 from master (`vmm_clone_kernel_space`)
 - [x] `vmm_init_process_address_space` uses clone (not a fresh 1 GiB-only layout)
 - [x] QEMU UEFI smoke default RAM raised to 4 GiB (`-m 4096`)
 - [x] Non-idle tasks get a private PML4; idle keeps master; `vmm_load_cr3` on switch
@@ -143,7 +143,7 @@ Why DRAM looked “stuck at 1 GiB”: QEMU `-m 1024` **and** a PMM bitmap hard
 ### Can slip to v0.8+
 
 - [ ] `#PF` policy: demand-zero / guard / COW hooks
-- [ ] DMA helper (contiguous, below 4 GiB) — stub exists in Rust `dma.rs`
+- [x] DMA helper (contiguous, below 4 GiB) — `dma_alloc` / `dma_free` in Rust `dma.rs` (`MEM_ALLOC_DMA` → `ZONE_DMA`); used by NVMe, virtio-blk, xHCI
 - [ ] Dynamic tasks via kmalloc (delete both static pools)
 - [ ] Ring 3: user CS, `0xEE` → `0xEF` or `syscall`, TSS IST for user stacks
 - [ ] HPET / ACPI PM timer (optional; PIT stays fallback)
@@ -156,11 +156,11 @@ Why DRAM looked “stuck at 1 GiB”: QEMU `-m 1024` **and** a PMM bitmap hard
 
 ## Phase 3 — v0.7: Rust crate, driver network, screen, pops
 
-**Current focus.** `kernel.c` is thin (`kmain`); IDT/kbd/shell live in their own C files. Rust drive network starts `null`/`zero`/`ttyS0`/`tty0`/`fb0` at boot (`init_drive`); shell `drive`/`init_drive`/`dev` commands. Display (VGA CRTC + GOP font blit) is the Rust screen drive — `console.c` only calls `rust_screen_*`.
+**Current focus.** `kernel.c` is thin (`kmain`); IDT/kbd/shell live in their own C files (`idt.c`, `kbd.c`, `shell.c`). Rust `init_drives` starts `null`/`zero`/`ttyS0`/`kbd`/`mem`/`cpu`/`clock` + `tty0` (and `fb0` when GOP is active) at boot, then scans PCI and brings up block disks; shell `drive`/`drv` (`-list`/`-load`/`-info`/`-cmd`) and `dev` commands (legacy `init_drive <name>` still accepted). Display (VGA CRTC + GOP font blit) is the Rust screen drive — `console.c` only calls `rust_screen_*`.
 
 ### 3.1 Rust build (do first)
 
-Crate: `src/rust/popcorn_kernel` (workspace) producing `libpopcorn_kernel.a`, linked by `scripts/lib/kernel.sh` and `scripts/popcorn_build/builder.py`.
+Crate: `src/rust/popcorn_kernel` (workspace) producing `libpopcorn_kernel.a`, built and linked by `scripts/lib/kernel.sh` (`scripts/popcorn_build/builder.py` only invokes `core.sh`).
 
 ```
 src/rust/
@@ -174,7 +174,9 @@ src/rust/
       device.rs / driver.rs / irq.rs / io.rs / dma.rs
       bus/pci.rs
       class/{chardev,blockdev,fbdev}.rs
-      backends/{serial,vga,fb,pit,null,zero,kbd,screen,mem,cpu,clock}.rs
+      backends/{serial,vga,fb,font8x16,screen,null,zero,kbd,meminfo,cpuinfo,clock}.rs
+      block/{ramdisk,virtio_blk,nvme,usb_msc}.rs
+      usb/xhci.rs
       registry.rs                    — init_drive + /dev publish
     src/pops/                        — Rust pops (no halt toy)
   .cargo/config.toml                 — x86_64-unknown-none
@@ -184,7 +186,7 @@ src/rust/
 - [x] `cargo build` produces a staticlib; `ld` pulls it with existing `link.ld`
 - [x] `GlobalAlloc` shim → C `kmalloc`/`kfree` (`alloc_shim.rs`); `Box` probe emits debugcon `a`
 - [x] Link fix: nightly `build-std` (`core`/`alloc`/`compiler_builtins`) with `-C code-model=large`; link full `libpopcorn_kernel.a` (prebuilt sysroot uses `R_X86_64_32`, unusable in high-half)
-- [x] `rust_init()` called from `init.c` after IDT/PIC, before C pop registration — prints `Rust active`
+- [x] `rust_init()` called from `init.c` `init_transition_to_console()` (after IDT/PIC and after `rust_pops_register()` in `init_show_modules()`) — prints `Rust active`, then catalog, IRQ seed, `init_drives`, `fs::init`
 - [x] rustc added to `core.sh` dependency check (and documented for Fedora / macOS / Debian)
 
 ### 3.2 Driver network (Rust)
@@ -195,11 +197,11 @@ A small, explicit device model — not a Linux clone. “Driver network” here 
 - [x] `/dev` nodes via `device_register_rust` → C fd/`SYS_*` bridge
 - [x] Char backends: `null`, `zero`, `ttyS0`; screen: `tty0` (VGA), `fb0` (GOP present ioctl)
 - [x] Shell: `drv list|load|info|cmd`, `dev list`
-- [x] Info drives: `mem`, `cpu`, `clock` (PIT uptime); block I/O deferred (FS stays RAM)
+- [x] Info drives: `mem`, `cpu`, `clock` (PIT uptime + CMOS RTC); block I/O lives in `drivers/block/` (virtio-blk, NVMe, USB MSC, ramdisk) and the FS is FAT32 on the selected disk
 - [x] `ioctl` namespaces in `src/includes/ioctl.h` (mem/cpu/clock)
-- [x] Classes sketched: `class/{chardev,blockdev,fbdev}.rs` (+ `device`/`driver`/`dma`/`irq`/`pit`)
+- [x] Classes sketched: `class/{chardev,blockdev,fbdev}.rs` (+ `device`/`driver`/`dma`/`irq`/`io`)
 - [x] Rust IRQ claim table (`drivers/irq.rs`); PIC enable/EOI still C — IOAPIC later
-- [x] In-kernel catalog DB (`catalog.rs`) — shell `catalog` lists drives/devs/pops/syscalls
+- [x] In-kernel catalog DB (`catalog.rs`) — shell `catalog -list [all|drive|dev|pop|irq|sys|disk]`
 
 **Exit criteria:** adding a device is a Rust `Driver` + `probe` — no edits to the `kernel.c` shell loop.
 
@@ -250,16 +252,16 @@ C registry is a 10-slot array and `void (*pop_function)(unsigned int)`. Rust kee
 - [x] Serial `/dev/ttyS0` — Rust chardev (early `boot_serial_putc` still used pre-driver)
 - [x] Null / zero — Rust chardevs via fd bridge
 - [x] PIT clock info drive (`clock` / `/dev/clock`) — `timer.c` still owns IRQ/poll
-- [x] PCI config walk (bus 0 print at boot) — `drivers/bus/pci.rs`
+- [x] PCI config walk (multi-bus, bridge recursion; printed at boot) — `drivers/bus/pci.rs`
 - [x] Delete leftover `serial_putc` from `scheduler.c` — uses shared `boot_serial_putc`
 
 **v0.7 exit criteria:**
 
 - [x] `cargo` + existing C toolchain produce one kernel; `test-uefi` green
 - [x] Screen pixels/CRTC owned by Rust `tty0`/`fb0` backends (`rust_screen_*`; console is a client — not every putchar via `open`/`write` fd)
-- [x] At least three pops are Rust and registered through the Rust registry (six: shimjapii/spinner/uptime/memory/cpu/sysinfo)
+- [x] At least three pops are Rust and registered through the Rust registry (seven: shimjapii/spinner/uptime/memory/cpu/sysinfo/dolphin)
 - [x] Serial, null/zero, kbd are Rust devices (`dev list` / `drive list`). `mon -list` lists tasks only
-- [x] No new device port I/O under `src/core/` for drives that exist in Rust (kbd trampoline + PIC EOI only). `timer.c` / early `boot_serial_putc` remain until clock IRQ moves
+- [x] No new device port I/O under `src/core/` for drives that exist in Rust. Still in C: PIC remap/mask/EOI (`irq.c`), PIT program/poll/EOI (`timer.c`), early `boot_serial_putc` (`multiboot2.c`), fw_cfg probe (`init.c`, `POPCORN_TEST_INSTALL` only). Known exceptions to fix: PS/2 Enter poll in `init_wait_for_enter` (`init.c`, should use the Rust kbd drive), and COM1 RX/mirror under `POPCORN_SERIAL_CONSOLE` (`kernel.c`/`console.c`, test-shell builds only)
 
 ---
 
@@ -276,9 +278,9 @@ Refactor the rest of Phase 0 I/O, then storage.
 ### 4.2 Block (Windows-safe)
 
 **Policy (picker):** boot/USB medium auto-selected and writable. `internal`
-(NVMe/SATA / QEMU second virtio) stays **LOCKED** until `install <name> YES`.
+(NVMe/SATA / QEMU second virtio) stays **LOCKED** until `disk -master <name> YES` (this boot only); `disk -install <name> YES` refuses internal disks until then.
 ThinkPad Windows NVMe is never written unless the user explicitly unlocks it.
-QEMU: virtio[0]=`usb0` (`popcorn-data.img`), virtio[1]=`nvme0` (`popcorn-internal.img`).
+QEMU (`qemu_uefi_data_disk_args`, all under `target/UNSAFE/`): xHCI usb-storage → `usb0` (`UNSAFE-qemu-usb-data.img`), virtio-blk → `vda` (`UNSAFE-qemu-virtio.img`; named `usb0` only when no real USB MSC is present), `-device nvme` → `nvme0` (`UNSAFE-qemu-nvme.img`).
 
 | Wave | Deliverable | Status |
 |------|-------------|--------|
@@ -293,12 +295,12 @@ QEMU: virtio[0]=`usb0` (`popcorn-data.img`), virtio[1]=`nvme0` (`popcorn-interna
 | **ramdisk** (`ram0`) | P0 | Always present; proves write gate |
 | **virtio-blk** (`usb0`/`nvme0`) | P0 | QEMU stand-ins; legacy `disable-modern=on` |
 | **usb** (`usb0` real) | P1 | ThinkPad persistent store |
-| **ata/ahci/nvme** | P2 | Internal; locked until install |
+| **ata/ahci/nvme** | P2 | Internal; locked until `disk -master <name> YES` (SATA/IDE listed only, no driver) |
 
 - [x] Write-gated disk registry (`drivers/block/`, `disk.h`)
 - [x] Ramdisk `ram0` (4 MiB, 512 B sectors)
 - [x] Multi virtio-blk + boot auto-select / internal lock
-- [x] Shell `disk` + `install <name> [YES]`
+- [x] Shell `disk` (`-help/-list/-use/-info/-read/-write`, `-install <name> [YES]`, `-wipe <name> [YES]`, `-master <name> [YES]`); top-level `install` now just says to use `disk -install`
 - [x] QEMU two-disk picker test images
 - [x] Wave 2: NVMe driver (AHCI later)
 - [x] Wave 3: USB MSC over xHCI
@@ -309,8 +311,8 @@ QEMU: virtio[0]=`usb0` (`popcorn-data.img`), virtio[1]=`nvme0` (`popcorn-interna
 
 - [ ] ACPI (RSDP → XSDT) for IRQ routing / HPET — before IOAPIC
 - [ ] IOAPIC
-- [ ] PDE splitter + MMIO BAR map (`vmm_map_4k` + `VMM_PTE_NX`) if still open from Phase 2
-- [ ] NIC (RTL8139 / e1000 / virtio-net) **only after** block is stable — networking is Phase 5
+- [ ] MMIO BAR map hardening: UC (PWT|PCD) + `VMM_PTE_NX` for all BARs (today `map_mmio` in `drivers/dma.rs` returns the write-back direct map below 64 GiB and maps UC without NX above it; PDE splitter `vmm_split_2m_pde` already done in `vmm.c`)
+- [ ] NIC: virtio-net first (block gate met). Built on the driver framework in `docs/drivers/virtio-net-review.md`: in-kernel resource-granted drivers, universal submit/complete queues, hybrid LAPIC+MSI-X IRQ + poll budget. The hand-written no_std stack up to UDP (TCP decided later) is Phase 5
 
 **Exit criteria:** Phase 0 inline I/O is gone from `src/core/`; `open`/`read`/`write`/`ioctl` work on `ttyS0`, `kbd`, `fb0`; QEMU reads virtio-blk sectors; PCI lists devices at boot.
 
@@ -366,7 +368,7 @@ Assuming ~10–15 hours/week:
 When opening a PR against this roadmap:
 
 1. Reference the phase and checkbox (e.g. "Phase 3.3 — `/dev/fb0`").
-2. New drivers register through the Rust `driver_register` path — no new raw port I/O in `src/core/`.
+2. New drivers are a `DriveEntry` in `drivers/registry.rs` (catalog entry + `probe()` arm), started via `init_drive`; block disks go through `drivers/block/`. No new raw port I/O in `src/core/`. Follow `docs/drivers/virtio-net-review.md` for grants/queues.
 3. New pops are Rust and register via `rust_pops_register`. Prefer `console_ffi` + `CursorGuard` (`pop.md`).
 4. Do not rewrite boot, context switch, or the shell loop “because Rust” — those stay C/asm until a later version names them.
 5. Update this file when a phase’s exit criteria are met.

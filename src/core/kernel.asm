@@ -1,7 +1,6 @@
-;; kernel.asm - boot at 0x100000, kernel VA = 0xFFFF800000000000 + (LMA - 1M)
+;; kernel.asm - boot at 0x100000 (LMA), high-half kernel VA = 0xFFFF800000000000 + LMA
 
 %define NUM_L2_IDENTITY 64        ; 64 x 512 x 2 MiB = 64 GiB identity map
-%define MBI_STAGING_SIZE 65536
 
 section .note.GNU-stack noalloc noexec nowrite progbits
 
@@ -114,53 +113,12 @@ start:
 
 ;; UEFI firmware enters in 64-bit long mode. Do not jump to 32-bit `start`.
 %define POPCORN_UEFI_MAGIC_CONST 0x504F50434F524E42
-%define POPCORN_HANDOFF_PHYS     0x102008
-%define POPCORN_UEFI_MBI_PHYS    0x380000
+; offsetof(PopcornUefiBootInfo, mbi_phys); uefi_boot.h _Static_asserts the same value.
+%define POPCORN_HANDOFF_MBI_OFF  72
 
 bits 64
 global uefi_start
 extern kmain
-
-; If GOP handoff is valid, paint a cyan strip at the top (proves kernel CR3 + FB work).
-uefi_fb_alive_marker:
-  mov rax, [POPCORN_HANDOFF_PHYS]
-  cmp rax, POPCORN_UEFI_MAGIC_CONST
-  jne .done
-  mov rbx, [POPCORN_HANDOFF_PHYS + 8]
-  test rbx, rbx
-  jz .done
-  mov ecx, [POPCORN_HANDOFF_PHYS + 16]   ; pitch
-  mov edx, [POPCORN_HANDOFF_PHYS + 20]   ; width
-  mov esi, [POPCORN_HANDOFF_PHYS + 24]   ; height
-  test ecx, ecx
-  jz .done
-  test edx, edx
-  jz .done
-  cmp esi, 8
-  jl .done
-  xor edi, edi
-.row:
-  cmp edi, 8
-  jge .done
-  mov rax, rbx
-  mov r9, rdi
-  imul r9, rcx
-  add rax, r9
-  xor r8d, r8d
-.col:
-  cmp r8d, edx
-  jge .next_row
-  mov byte [rax + r8*4 + 0], 0xFF     ; B
-  mov byte [rax + r8*4 + 1], 0xFF     ; G
-  mov byte [rax + r8*4 + 2], 0x00     ; R
-  mov byte [rax + r8*4 + 3], 0
-  inc r8d
-  jmp .col
-.next_row:
-  inc edi
-  jmp .row
-.done:
-  ret
 
 uefi_start:
   cli
@@ -182,6 +140,19 @@ uefi_start:
   mov [rdi + 8 * 256], rax
   mov qword [rdi + 8 * 256 + 8], 0
 
+  ; 1 GiB leaves need CPUID.80000001h:EDX[26] (PDPE1GB). Without it PS is a
+  ; reserved bit in a PDPTE and the first fetch after the CR3 load triple-faults,
+  ; so fall back to the GRUB path's 2 MiB layout (64 GiB) on such CPUs.
+  mov eax, 0x80000000
+  cpuid
+  cmp eax, 0x80000001
+  jb .uefi_map_2m
+  mov eax, 0x80000001
+  cpuid
+  bt edx, 26
+  jnc .uefi_map_2m
+
+  ; 1 GiB pages: low identity covers 512 GiB (high-BAR GOP framebuffers), high half 64 GiB.
   xor ecx, ecx
 .uefi_l3_1g_loop:
   lea rdi, [rel page_table_l3]
@@ -203,6 +174,35 @@ uefi_start:
   inc ecx
   cmp ecx, NUM_L2_IDENTITY
   jl .uefi_l3h_1g_loop
+  jmp .uefi_map_done
+
+.uefi_map_2m:
+  ; 2 MiB pages: page_table_l2 maps 64 GiB; both halves link the same L2 tables.
+  lea rdi, [rel page_table_l2]
+  xor ecx, ecx
+.uefi_l2_2m_loop:
+  mov rax, rcx
+  shl rax, 21
+  or  rax, 0x083
+  mov [rdi + rcx*8], rax
+  inc ecx
+  cmp ecx, NUM_L2_IDENTITY * 512
+  jb .uefi_l2_2m_loop
+
+  lea rsi, [rel page_table_l3]
+  lea rdx, [rel page_table_l3_high]
+  xor ecx, ecx
+.uefi_l3_link_loop:
+  mov rax, rcx
+  shl rax, 12
+  add rax, rdi
+  or  rax, 0x003
+  mov [rsi + rcx*8], rax
+  mov [rdx + rcx*8], rax
+  inc ecx
+  cmp ecx, NUM_L2_IDENTITY
+  jb .uefi_l3_link_loop
+.uefi_map_done:
 
   mov rax, cr4
   or eax, 1 << 5
@@ -213,14 +213,34 @@ uefi_start:
 
   mov rsp, stack_top
 
-  mov rax, [POPCORN_HANDOFF_PHYS]
-  cmp rax, POPCORN_UEFI_MAGIC_CONST
+  ; Own GDT and selectors (CS=0x08, data=0x10), same as the GRUB path. The
+  ; firmware's selectors (OVMF: CS=0x38, SS=0x30) point past the kernel GDT
+  ; that idt_init loads, so the first iretq or segment reload would #GP.
+  ; gdt64 must be loaded BEFORE the far return: under the firmware GDT 0x08 is
+  ; not a 64-bit code segment (that is why an earlier bare retfq broke boots).
+  lgdt [rel gdt64_pointer]
+  lea rax, [rel .uefi_cs_reloaded]
+  push 0x08
+  push rax
+  o64 retf
+.uefi_cs_reloaded:
+  mov ax, 0x10
+  mov ds, ax
+  mov es, ax
+  mov fs, ax
+  mov gs, ax
+  mov ss, ax
+
+  ; The loader allocates the MBI with AllocatePages (outside the kernel image)
+  ; and passes its address in the handoff. 64-bit compare: the magic does not
+  ; fit a cmp imm32.
+  mov rax, POPCORN_UEFI_MAGIC_CONST
+  cmp rax, [rel popcorn_uefi_handoff]
   jne .uefi_no_mbi
-  mov qword [rel multiboot2_info_ptr], POPCORN_UEFI_MBI_PHYS
-  mov qword [rel multiboot2_info_ptr + 8], 0
+  mov rax, [rel popcorn_uefi_handoff + POPCORN_HANDOFF_MBI_OFF]
+  mov [rel multiboot2_info_ptr], rax
 .uefi_no_mbi:
 
-  ; Keep firmware GDT/segments — retfq + SS=0x10 breaks on many Lenovo/AMD UEFI boxes.
   mov rax, kmain
   call rax
 
@@ -267,6 +287,8 @@ start64_tramp:
   jmp .hang
 
 section .rodata.boot
+; Boot GDT for both entry paths (null, 0x08 code64, 0x10 data). idt_init then
+; installs the high-half GDT with the same selectors plus the TSS.
 align 8
 gdt64:
   dq 0
@@ -285,6 +307,8 @@ global multiboot2_info_ptr
 multiboot2_info_ptr:
   resq 1
 ; UEFI loader writes GOP handoff here (physical address in boot segment).
+; Must stay at POPCORN_UEFI_HANDOFF_PHYS (0x102008): link.ld ASSERTs it, and
+; the size is POPCORN_UEFI_HANDOFF_SIZE (uefi_boot.h).
 align 8
 global popcorn_uefi_handoff
 popcorn_uefi_handoff:
@@ -304,68 +328,16 @@ stack_bottom:
   resb 131072
 global stack_top
 stack_top:
-align 4096
-mbi_staging:
-  resb MBI_STAGING_SIZE
 
-; --- high-half linked code (handlers, I/O) ---
+; --- high-half linked code (I/O helpers) ---
+; Exception / IRQ / int 0x80 entry stubs live in idt.asm.
 section .text
-global keyboard_handler
-global timer_handler
-extern irq_dispatch
-global syscall_handler_asm
 global read_port
 global write_port
-global load_idt
 global cpuid_get_vendor
 global cpuid_get_features
 global cpuid_extended_brand
 global rdtsc
-global default_cpu_exception
-global exc_double_fault
-global exc_general_protection
-global exc_page_fault
-
-extern syscall_dispatch
-extern cpu_exception_panic
-
-; CPU exception vectors 0x00–0x1F: halt if unhandled. Presents a valid gate
-; so a fault (e.g. #PF) does not re-fault on an empty IDT entry.
-default_cpu_exception:
-  cli
-.hang_def:
-  hlt
-  jmp .hang_def
-
-; ---- Diagnosable exceptions: dump vector / error / RIP (/ CR2) on COM1 ----
-; Frame on entry to *_common (error-code exceptions):
-;   [rsp+0]=vector, [rsp+8]=error, [rsp+16]=RIP, [rsp+24]=CS, [rsp+32]=RFLAGS
-exc_double_fault:
-  push 8
-  jmp cpu_exception_common
-
-exc_general_protection:
-  push 13
-  jmp cpu_exception_common
-
-exc_page_fault:
-  push 14
-  jmp cpu_exception_common
-
-cpu_exception_common:
-  cli
-  mov rdi, [rsp]          ; vector
-  mov rsi, [rsp + 8]      ; error code
-  mov rdx, [rsp + 16]     ; RIP
-  mov rcx, [rsp + 24]     ; CS
-  mov r8,  [rsp + 32]     ; RFLAGS
-  mov r9, cr2             ; CR2 (meaningful for #PF)
-  and rsp, -16            ; 16-byte align for SysV call
-  sub rsp, 8
-  call cpu_exception_panic
-.hang_exc:
-  hlt
-  jmp .hang_exc
 
 read_port:
   mov rdx, rdi
@@ -378,121 +350,6 @@ write_port:
   mov rax, rsi
   out dx, al
   ret
-
-load_idt:
-  lidt [rdi]
-  sti
-  ret
-
-keyboard_handler:
-  push rax
-  push rbx
-  push rcx
-  push rdx
-  push rsi
-  push rdi
-  push rbp
-  push r8
-  push r9
-  push r10
-  push r11
-  push r12
-  push r13
-  push r14
-  push r15
-  sub rsp, 8
-  mov edi, 1
-  call irq_dispatch
-  add rsp, 8
-  pop r15
-  pop r14
-  pop r13
-  pop r12
-  pop r11
-  pop r10
-  pop r9
-  pop r8
-  pop rbp
-  pop rdi
-  pop rsi
-  pop rdx
-  pop rcx
-  pop rbx
-  pop rax
-  iretq
-
-timer_handler:
-  push rax
-  push rbx
-  push rcx
-  push rdx
-  push rsi
-  push rdi
-  push rbp
-  push r8
-  push r9
-  push r10
-  push r11
-  push r12
-  push r13
-  push r14
-  push r15
-  sub rsp, 8
-  mov edi, 0
-  call irq_dispatch
-  add rsp, 8
-  pop r15
-  pop r14
-  pop r13
-  pop r12
-  pop r11
-  pop r10
-  pop r9
-  pop r8
-  pop rbp
-  pop rdi
-  pop rsi
-  pop rdx
-  pop rcx
-  pop rbx
-  pop rax
-  iretq
-
-syscall_handler_asm:
-  push rax
-  push rbx
-  push rcx
-  push rdx
-  push rsi
-  push rdi
-  push rbp
-  push r8
-  push r9
-  push r10
-  push r11
-  push r12
-  push r13
-  push r14
-  push r15
-  mov rdi, rsp
-  add rdi, 120
-  call syscall_dispatch
-  pop r15
-  pop r14
-  pop r13
-  pop r12
-  pop r11
-  pop r10
-  pop r9
-  pop r8
-  pop rbp
-  pop rdi
-  pop rsi
-  pop rdx
-  pop rcx
-  pop rbx
-  pop rax
-  iretq
 
 cpuid_get_vendor:
   push rbx

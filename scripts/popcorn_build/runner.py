@@ -4,7 +4,6 @@ import shlex
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 from .log import LogBuffer
 from .paths import CORE_SH, ROOT_DIR, SCRIPTS_DIR, TARGET_DIR
@@ -119,12 +118,3 @@ def rm_rf(path: Path) -> None:
 
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
-
-
-def write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text)
-
-
-def list_exists(paths: Iterable[Path]) -> list[Path]:
-    return [p for p in paths if p.exists()]

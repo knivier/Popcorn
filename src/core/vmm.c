@@ -5,9 +5,8 @@
 #include <stdint.h>
 
 #define VMM_PDE_PS (1ull << 7)
-#define VMM_PDE_2M (VMM_PTE_P | VMM_PTE_RW | VMM_PDE_PS)
-#define VMM_2M_COUNT 512u
-#define VMM_2M_PHYS_MASK 0x000fffffffffe00000ull
+/* 2 MiB PDE frame field: bits 21..51 (excludes PAT bit 12, software/PKE bits 52+). */
+#define VMM_2M_PHYS_MASK 0x000FFFFFFFE00000ull
 
 #define EFER_MSR 0xC0000080u
 #define EFER_NXE (1u << 11)
@@ -28,12 +27,6 @@ static inline uint64_t* vmm_phys_to_ptr(uint64_t phys) {
 /* Leaf flags copied from a 2 MiB PDE when splitting (not PS). */
 #define SPLIT_FLAG_MASK (VMM_PTE_P | VMM_PTE_RW | VMM_PTE_US | (1ull << 3) | (1ull << 4) | \
                          (1ull << 8) | VMM_PTE_NX)
-
-static void vmm_fill_pd_2m(uint64_t* pd, uint64_t phys_base) {
-    for (uint32_t i = 0; i < VMM_2M_COUNT; i++) {
-        pd[i] = (phys_base + (uint64_t)i * (2ull * 1024ull * 1024ull)) | VMM_PDE_2M;
-    }
-}
 
 /*
  * Replace a 2 MiB PDE with a PT of 512 × 4 KiB PTEs covering the same range.
@@ -103,42 +96,9 @@ void vmm_free_pml4(uint64_t pml4_phys, uint64_t kernel_master_pml4_phys) {
     if (pml4_phys == 0 || pml4_phys == kernel_master_pml4_phys) {
         return;
     }
-    free_pages(phys_to_virt(pml4_phys), 1);
-}
-
-int vmm_map_kernel_region(uint64_t pml4_phys) {
-    if ((pml4_phys & (PAGE_SIZE - 1U)) != 0) {
-        return -2;
-    }
-    uint64_t* pml4 = vmm_phys_to_ptr(pml4_phys);
-    if (pml4[0] != 0 || pml4[256] != 0) {
-        return -3;
-    }
-
-    void* p_pdpt_lo = alloc_pages(1, MEM_ALLOC_ZERO);
-    void* p_pdpt_hi = alloc_pages(1, MEM_ALLOC_ZERO);
-    if (!p_pdpt_lo || !p_pdpt_hi) {
-        return -1;
-    }
-    uint64_t pdpt_lo = virt_to_phys_direct(p_pdpt_lo);
-    uint64_t pdpt_hi = virt_to_phys_direct(p_pdpt_hi);
-    pml4[0] = pdpt_lo | TABLE_ENT;
-    pml4[256] = pdpt_hi | TABLE_ENT;
-
-    uint64_t* lo = vmm_phys_to_ptr(pdpt_lo);
-    uint64_t* hi = vmm_phys_to_ptr(pdpt_hi);
-
-    for (uint32_t g = 0; g < VMM_PDPT_SLOTS; g++) {
-        void* p_pd = alloc_pages(1, MEM_ALLOC_ZERO);
-        if (!p_pd) {
-            return -1;
-        }
-        uint64_t pd_phys = virt_to_phys_direct(p_pd);
-        lo[g] = pd_phys | TABLE_ENT;
-        hi[g] = pd_phys | TABLE_ENT;
-        vmm_fill_pd_2m(vmm_phys_to_ptr(pd_phys), (uint64_t)g << 30);
-    }
-    return 0;
+    /* kmalloc recorded the identity pointer (VA == phys); free that, not the
+     * direct-map alias. */
+    free_pages((void*)(uintptr_t)pml4_phys, 1);
 }
 
 int vmm_clone_kernel_space(uint64_t dst_pml4_phys, uint64_t src_pml4_phys) {

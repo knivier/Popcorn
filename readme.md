@@ -16,7 +16,7 @@ All tooling lives under `scripts/`. All build outputs go to `target/`.
 ./scripts/core.sh clean      # wipe target/
 ```
 
-Platform wrappers (dialog menu when run with no args):
+Platform wrappers (thin stubs over `scripts/lib/wrapper.sh`; arguments are passed to `core.sh`, and a bare run opens a `dialog` menu, or prints `core.sh help` if `dialog` is not installed):
 
 | Script | Platform |
 |--------|----------|
@@ -56,8 +56,9 @@ Do not flash `target/UNSAFE/*`. Do not run `test-install` from Windows.
 - `help` — available commands
 - `sysinfo` — system information
 - `mem -map` — memory layout
-- `dol -new test.txt` — create a text file
-- `ls` — list files
+- `disk -list` / `disk -wipe <name> YES` — pick and FAT32-format a data disk (QEMU data disks start blank; nothing is auto-formatted)
+- `dol -new test.txt` — open the editor on a new file (`dol -save` writes it to the FAT32 disk)
+- `ls` — list files on the mounted FAT32 disk
 
 ## Layout
 
@@ -70,8 +71,8 @@ popcorn/
 │   ├── lib/           # shell modules
 │   └── popcorn_build/ # Python build library
 ├── src/               # kernel sources only
-│   ├── core/ pops/ includes/ uefi/
-│   ├── rust/          # no_std crate (libpopcorn_kernel.a)
+│   ├── core/ includes/ uefi/
+│   ├── rust/          # no_std crate (libpopcorn_kernel.a): drivers, FAT32, all pops (popcorn_kernel/src/pops/)
 │   └── link.ld
 └── target/            # ALL build outputs (gitignored)
     ├── kernel
@@ -98,7 +99,7 @@ rustup target add x86_64-unknown-none
 
 **macOS (Homebrew):**
 ```bash
-brew install nasm qemu xorriso mtools llvm i686-elf-grub x86_64-elf-grub x86_64-elf-binutils x86_64-elf-gcc
+brew install nasm qemu xorriso mtools llvm lld i686-elf-grub x86_64-elf-grub x86_64-elf-binutils x86_64-elf-gcc
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 rustup target add x86_64-unknown-none
 ```

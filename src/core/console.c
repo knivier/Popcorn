@@ -39,10 +39,6 @@ static unsigned int console_line_bytes(void) {
     return console_cols() * 2u;
 }
 
-// Double buffering support
-static char back_buffer[CONSOLE_MAX_CELL_BYTES];
-static bool buffer_dirty = false;
-
 // Scrollback buffer
 static ScrollbackBuffer scrollback = {{0}, 0, 0};
 
@@ -130,17 +126,10 @@ void console_init(void) {
     console_state.cursor_y = 0;
     console_state.current_color = CONSOLE_FG_COLOR;
     console_state.cursor_visible = true;
-    console_state.double_buffer_enabled = false;
     console_state.scroll_offset = 0;
     console_state.wrap_enabled = true;
     live_view_valid = false;
-    
-    // Initialize back buffer
-    for (unsigned int i = 0; i < CONSOLE_MAX_CELL_BYTES; i += 2) {
-        back_buffer[i] = ' ';
-        back_buffer[i + 1] = CONSOLE_BG_COLOR | CONSOLE_FG_COLOR;
-    }
-    
+
     // Initialize scrollback buffer
     for (unsigned int i = 0; i < SCROLLBACK_LINES * SCROLLBACK_LINE_SIZE; i++) {
         scrollback.buffer[i] = 0;
@@ -158,11 +147,81 @@ void console_init(void) {
     console_present();
 }
 
+#ifdef POPCORN_SERIAL_CONSOLE
+/*
+ * Test builds only (core.sh test-shell): mirror console text to COM1 so a host
+ * harness (scripts/lib/shell_test.py) can assert on shell output. Writes the
+ * UART directly — never boot_serial_putc, which also hits debugcon (0xE9),
+ * whose single-letter boot tags the smoke tests grep.
+ *
+ * Mapping: printable chars as-is, newline -> CRLF, backspace -> BS, a cursor
+ * jump to column 0 of another scroll row (Dolphin render, clear) -> CRLF, soft
+ * wraps -> nothing. The status bar is muted. Every drawn shell prompt is
+ * followed by a marker line "[[POPCORN:PROMPT:<n>]]" the harness syncs on.
+ */
+static int console_serial_muted;
+static uint64_t console_prompt_seq;
+
+static void console_serial_raw(char c) {
+    for (int i = 0; i < 100000; i++) {
+        unsigned char s;
+        __asm__ volatile("inb %1, %0" : "=a"(s) : "Nd"((unsigned short)0x3FD));
+        if (s & 0x20) {
+            break;
+        }
+    }
+    __asm__ volatile("outb %0, %1" : : "a"(c), "Nd"((unsigned short)0x3F8));
+}
+
+static void console_serial_mirror(char c) {
+    if (console_serial_muted) {
+        return;
+    }
+    if (c == '\n') {
+        console_serial_raw('\r');
+    }
+    console_serial_raw(c);
+}
+
+static void console_serial_puts(const char* p) {
+    while (*p) {
+        console_serial_raw(*p++);
+    }
+}
+
+static void console_serial_prompt_marker(void) {
+    char num[24];
+    console_prompt_seq++;
+    uint64_to_str(console_prompt_seq, num);
+    console_serial_puts("\r\n[[POPCORN:PROMPT:");
+    console_serial_puts(num);
+    console_serial_puts("]]\r\n");
+}
+/* Main loop went idle after handling keys; n = keys handled since boot. */
+void console_test_idle_marker(uint64_t n) {
+    char num[24];
+    uint64_to_str(n, num);
+    console_serial_puts("\r\n[[POPCORN:IDLE:");
+    console_serial_puts(num);
+    console_serial_puts("]]\r\n");
+}
+#define CONSOLE_MIRROR(c) console_serial_mirror(c)
+#define CONSOLE_MIRROR_MUTE(on) (console_serial_muted = (on))
+#define CONSOLE_PROMPT_MARKER() console_serial_prompt_marker()
+#else
+#define CONSOLE_MIRROR(c) ((void)0)
+#define CONSOLE_MIRROR_MUTE(on) ((void)0)
+#define CONSOLE_PROMPT_MARKER() ((void)0)
+#endif
+
 // Clear the entire screen
 void console_clear(void) {
     unsigned char attr = (unsigned char)(CONSOLE_BG_COLOR | CONSOLE_FG_COLOR);
     rust_screen_clear(attr);
     vga_memory = rust_screen_cells();
+    if (console_state.cursor_x != 0 || console_state.cursor_y != 0) {
+        CONSOLE_MIRROR('\n');
+    }
     console_state.cursor_x = 0;
     console_state.cursor_y = 0;
     current_loc = 0;
@@ -183,6 +242,10 @@ void console_set_cursor(unsigned int x, unsigned int y) {
     if (x >= console_cols()) x = console_cols() - 1;
     if (y >= console_rows()) y = console_rows() - 1;
     
+    /* Serial mirror: a jump to column 0 of another row starts a new line. */
+    if (x == 0 && (x != console_state.cursor_x || y != console_state.cursor_y)) {
+        CONSOLE_MIRROR('\n');
+    }
     console_state.cursor_x = x;
     console_state.cursor_y = y;
     current_loc = (y * console_cols() + x) * 2;
@@ -199,11 +262,16 @@ void console_get_cursor(unsigned int* x, unsigned int* y) {
     }
 }
 
+static void console_newline_nomirror(void);
+
 // Put a single character at current cursor position
 void console_putchar(char c) {
     if (c == '\n') {
         console_newline();
         return;
+    }
+    if (c != '\r' && c != '\b') {
+        CONSOLE_MIRROR(c);
     }
     
     if (c == '\r') {
@@ -219,7 +287,6 @@ void console_putchar(char c) {
     
     unsigned int cx = console_state.cursor_x;
     unsigned int cy = console_state.cursor_y;
-    unsigned int pos = (cy * console_cols() + cx) * 2;
 
     /* Always keep navy/black background so typed text stays readable. */
     unsigned char attr =
@@ -227,18 +294,12 @@ void console_putchar(char c) {
     if ((attr & 0x0Fu) == 0u) {
         attr = (unsigned char)(CONSOLE_BG_COLOR | CONSOLE_FG_COLOR);
     }
-    if (console_state.double_buffer_enabled) {
-        back_buffer[pos] = c;
-        back_buffer[pos + 1] = (char)attr;
-        buffer_dirty = true;
-    } else {
-        rust_screen_write_cell((uint32_t)cx, (uint32_t)cy, (uint8_t)c, attr);
-    }
+    rust_screen_write_cell((uint32_t)cx, (uint32_t)cy, (uint8_t)c, attr);
     
     // Move cursor (soft-wrap at edge when wrap_enabled)
     if (console_state.cursor_x + 1u >= console_cols()) {
         if (console_state.wrap_enabled) {
-            console_newline();
+            console_newline_nomirror(); /* soft wrap: no line break on serial */
         } else {
             console_state.cursor_x = console_cols() - 1u;
             current_loc = (console_state.cursor_y * console_cols() + console_state.cursor_x) * 2;
@@ -284,6 +345,11 @@ void console_println_color(const char* str, unsigned char color) {
 
 // Move to next line
 void console_newline(void) {
+    CONSOLE_MIRROR('\n');
+    console_newline_nomirror();
+}
+
+static void console_newline_nomirror(void) {
     console_state.cursor_x = 0;
     console_state.cursor_y++;
     if (console_state.cursor_y >= CONSOLE_SCROLL_ROWS) {
@@ -299,7 +365,16 @@ void console_scroll(void) {
     // Save top line to scrollback before scrolling
     console_save_line(0);
     vga_memory = rust_screen_cells();
-    
+
+    /* Framebuffer: the Rust screen layer shifts cells and pixels itself
+     * (memmove in its RAM shadow) and redraws only what changed. */
+    if (rust_screen_scroll_up((uint32_t)CONSOLE_SCROLL_ROWS,
+                              (uint8_t)(CONSOLE_BG_COLOR | CONSOLE_FG_COLOR))) {
+        console_state.scroll_offset = 0;
+        live_view_valid = false;
+        return;
+    }
+
     for (unsigned int y = 0; y + 1u < CONSOLE_SCROLL_ROWS; y++) {
         for (unsigned int x = 0; x < console_cols(); x++) {
             unsigned int src_pos = ((y + 1) * console_cols() + x) * 2;
@@ -330,6 +405,7 @@ void console_scroll(void) {
 // Handle backspace
 void console_backspace(void) {
     unsigned char attr = (unsigned char)(CONSOLE_BG_COLOR | CONSOLE_FG_COLOR);
+    CONSOLE_MIRROR('\b');
     if (console_state.cursor_x > 0) {
         console_state.cursor_x--;
         unsigned int pos = (console_state.cursor_y * console_cols() + console_state.cursor_x) * 2;
@@ -345,43 +421,6 @@ void console_backspace(void) {
     }
     
     update_hardware_cursor(console_state.cursor_x, console_state.cursor_y);
-}
-
-// Draw a box with borders
-void console_draw_box(unsigned int x, unsigned int y, unsigned int width, unsigned int height, unsigned char color) {
-    rust_screen_sync_begin();
-    // Draw top and bottom borders
-    for (unsigned int i = x; i < x + width; i++) {
-        if (i < console_cols()) {
-            // Top border
-            if (y < console_rows()) {
-                char ch = (i == x) ? '+' : (i == x + width - 1) ? '+' : '-';
-                rust_screen_write_cell(i, y, (uint8_t)ch, color);
-            }
-            // Bottom border
-            if (y + height - 1 < console_rows()) {
-                char ch = (i == x) ? '+' : (i == x + width - 1) ? '+' : '-';
-                rust_screen_write_cell(i, y + height - 1, (uint8_t)ch, color);
-            }
-        }
-    }
-    
-    // Draw left and right borders
-    for (unsigned int i = y; i < y + height; i++) {
-        if (i < console_rows()) {
-            // Left border
-            if (x < console_cols()) {
-                char ch = (i == y) ? '+' : (i == y + height - 1) ? '+' : '|';
-                rust_screen_write_cell(x, i, (uint8_t)ch, color);
-            }
-            // Right border
-            if (x + width - 1 < console_cols()) {
-                char ch = (i == y) ? '+' : (i == y + height - 1) ? '+' : '|';
-                rust_screen_write_cell(x + width - 1, i, (uint8_t)ch, color);
-            }
-        }
-    }
-    rust_screen_sync_end();
 }
 
 // Draw a header with title
@@ -417,6 +456,7 @@ void console_draw_header(const char* title) {
 // Draw command prompt
 void console_draw_prompt(void) {
     console_print_color("popcorn@kernel:~$ ", CONSOLE_PROMPT_COLOR);
+    CONSOLE_PROMPT_MARKER();
 }
 
 // Draw command prompt with current directory path
@@ -424,6 +464,7 @@ void console_draw_prompt_with_path(const char* path) {
     console_print_color("popcorn@kernel:", CONSOLE_PROMPT_COLOR);
     console_print_color(path, CONSOLE_INFO_COLOR);
     console_print_color("$ ", CONSOLE_PROMPT_COLOR);
+    CONSOLE_PROMPT_MARKER();
 }
 
 static uint64_t console_read_tsc(void) {
@@ -471,6 +512,13 @@ static void console_heartbeat_paint(uint64_t alive, uint64_t tsc_lo, uint64_t ue
                 (uint32_t)cx, (uint32_t)HEARTBEAT_ROW, (uint8_t)line[j],
                 (uint8_t)(CONSOLE_BG_COLOR | CONSOLE_SUCCESS_COLOR));
         }
+        /* Blank the rest of the field so a shorter repaint (T wrap, TSC
+         * fallback -> real ticks, u: segment gone) leaves no stale digits. */
+        for (; (hb_col + j) < console_cols(); j++) {
+            rust_screen_write_cell(
+                (uint32_t)(hb_col + j), (uint32_t)HEARTBEAT_ROW, ' ',
+                (uint8_t)(CONSOLE_BG_COLOR | CONSOLE_SUCCESS_COLOR));
+        }
     }
 }
 
@@ -491,8 +539,9 @@ void console_print_status_bar(void) {
     unsigned int prev_y = console_state.cursor_y;
     unsigned char prev_color = console_state.current_color;
     
+    CONSOLE_MIRROR_MUTE(1); /* repainted after every command; keep it off serial */
     console_set_cursor(0, CONSOLE_STATUS_ROW);
-    
+
     // Clear the line first
     rust_screen_sync_begin();
     for (unsigned int i = 0; i < console_cols(); i++) {
@@ -511,6 +560,7 @@ void console_print_status_bar(void) {
     // Restore cursor position
     console_set_color(prev_color);
     console_set_cursor(prev_x, prev_y);
+    CONSOLE_MIRROR_MUTE(0);
 }
 
 // Print error message
@@ -541,65 +591,16 @@ void console_print_warning(const char* message) {
     console_newline();
 }
 
-// Make a color from foreground and background
-unsigned char make_color(unsigned char foreground, unsigned char background) {
-    return foreground | background;
-}
-
-// Center text on a line
-void console_center_text(const char* text, unsigned int y, unsigned char color) {
-    unsigned int text_len = 0;
-    while (text[text_len]) text_len++;
-    
-    unsigned int x = (console_cols() - text_len) / 2;
-    console_set_cursor(x, y);
-    console_print_color(text, color);
-}
-
 // Draw a separator line
 void console_draw_separator(unsigned int y, unsigned char color) {
     console_set_cursor(0, y);
     for (unsigned int i = 0; i < console_cols(); i++) {
         console_print_color("-", color);
     }
-    console_newline();
-}
-
-// Enable or disable double buffering
-void console_enable_double_buffer(bool enable) {
-    console_state.double_buffer_enabled = enable;
-    if (enable) {
-        // Copy current VGA memory to back buffer
-        for (unsigned int i = 0; i < CONSOLE_MAX_CELL_BYTES; i++) {
-            back_buffer[i] = vga_memory[i];
-        }
-    } else {
-        // Flush any pending changes
-        console_flush();
-    }
-}
-
-// Swap buffers (copy back buffer to VGA memory)
-void console_swap_buffers(void) {
-    if (!console_state.double_buffer_enabled) {
-        return;
-    }
-    
-    if (buffer_dirty) {
-        vga_memory = rust_screen_cells();
-        for (unsigned int i = 0; i < CONSOLE_MAX_CELL_BYTES; i++) {
-            vga_memory[i] = back_buffer[i];
-        }
-        buffer_dirty = false;
-        rust_screen_invalidate();
-        console_present();
-    }
-}
-
-// Flush back buffer to screen
-void console_flush(void) {
-    if (console_state.double_buffer_enabled) {
-        console_swap_buffers();
+    /* With wrap on, the last dash already wrapped to the next row; only
+     * wrap-off leaves the cursor on the separator row. */
+    if (console_state.cursor_x != 0) {
+        console_newline();
     }
 }
 

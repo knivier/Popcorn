@@ -1,17 +1,18 @@
 #include "../includes/phase2_selftest.h"
+#include "../includes/console.h"
 #include "../includes/device.h"
 #include "../includes/scheduler.h"
 #include "../includes/syscall.h"
 #include "../includes/timer.h"
 #include "../includes/boot_fb.h"
+#include "../includes/irq.h"
 #include <stddef.h>
 #include <stdint.h>
 
 /*
- * Phase 2 exit criteria without relying on a full kmain→task context switch
- * (that path is still fragile while idle carries the shell). We exercise the
- * same APIs: SYS_IOCTL/OPEN/WRITE → fd → device, wait-queue park/wake,
- * sleep-deadline wake.
+ * Phase 2 exit criteria: SYS_IOCTL/OPEN/WRITE → fd → device, wait-queue
+ * park/wake, sleep-deadline wake. The helper task is only a subject for those
+ * state transitions; it is never run, and it is reclaimed before returning.
  */
 
 static void p2_noop_task(void) {
@@ -31,7 +32,10 @@ static int ioctl_via_syscall_ok(void) {
     if (sys_ioctl(&ctx) != 0) {
         return 0;
     }
-    if (winsize[0] != 80 || winsize[1] != 25) {
+    /* Linux struct winsize order: ws_row, ws_col — the live console grid. */
+    if (winsize[0] == 0 || winsize[1] == 0 ||
+        winsize[0] != (uint16_t)CONSOLE_SCROLL_ROWS ||
+        winsize[1] != (uint16_t)console_cols()) {
         return 0;
     }
 
@@ -69,33 +73,42 @@ void phase2_selftest(void) {
         return;
     }
 
+    /*
+     * Preemption is live here (scheduler_end_bootstrap already ran). Keep IRQs off
+     * from creation to teardown so a tick never picks the helper while it is READY.
+     */
+    uint64_t irq_flags = irq_save_disable();
     TaskStruct* parked = scheduler_create_task(p2_noop_task, NULL, PRIORITY_LOW);
     if (!parked) {
+        irq_restore_flags(irq_flags);
         return;
     }
+    const uint32_t parked_pid = parked->pid;
 
     WaitQueue wq;
     wq.head = NULL;
-    if (!scheduler_park(parked, &wq)) {
-        return;
+    bool ok = scheduler_park(parked, &wq);
+    if (ok) {
+        scheduler_wake_all(&wq);
+        ok = parked->state == TASK_STATE_READY;
     }
-    scheduler_wake_all(&wq);
-    if (parked->state != TASK_STATE_READY) {
-        return;
-    }
-    boot_serial_putc('B');
+    if (ok) {
+        boot_serial_putc('B');
 
-    /* Sleep-deadline wake (same path as scheduler_sleep_ms → wake_expired_sleepers). */
-    if (!scheduler_arm_sleep(parked, 0)) {
-        return;
+        /* Sleep-deadline wake (same path as scheduler_sleep_ms → wake_expired_sleepers). */
+        ok = scheduler_arm_sleep(parked, 0);
     }
-    scheduler_service_sleepers();
-    if (parked->state != TASK_STATE_READY) {
-        return;
+    if (ok) {
+        scheduler_service_sleepers();
+        ok = parked->state == TASK_STATE_READY;
     }
-    boot_serial_putc('S');
-    boot_serial_putc('2');
+    if (ok) {
+        boot_serial_putc('S');
+        boot_serial_putc('2');
+    }
 
-    /* Leave blocked — never schedule this stub (full switch still fragile). */
-    (void)scheduler_park(parked, &wq);
+    /* Reclaim the helper (slot, stack, PML4) while `wq` is still in scope; it also
+     * drops total_tasks back so `mon -debug` sees only the idle/shell carrier. */
+    (void)scheduler_kill_task(parked_pid);
+    irq_restore_flags(irq_flags);
 }

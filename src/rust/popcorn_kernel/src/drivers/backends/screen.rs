@@ -226,6 +226,14 @@ pub fn screen_present() {
             sync_row(cy);
         }
         sync_cursor();
+        fb::flush();
+    }
+}
+
+/// Push any shadow rows a paced flush left pending (call from idle loops).
+pub fn screen_idle_flush() {
+    if screen_backend() == 2 {
+        fb::flush();
     }
 }
 
@@ -363,4 +371,81 @@ fn sync_cursor() {
             PREV_CURSOR = cur;
         }
     }
+    /* Every update path ends here: push changed shadow rows to the fb
+     * (paced; the idle loop and screen_present push whatever is left). */
+    fb::flush_paced();
+}
+
+/// Allocate the framebuffer's write-back shadow (needs the kernel heap) and
+/// re-render the screen into it. No-op on VGA text.
+pub fn screen_enable_shadow() -> i32 {
+    if screen_backend() != 2 || !fb::enable_shadow() {
+        return 0;
+    }
+    unsafe {
+        for b in RENDERED.iter_mut() {
+            *b = 0xFF;
+        }
+        for d in DIRTY.iter_mut().take(ROWS) {
+            *d = 1;
+        }
+        PREV_CURSOR = 0xFFFF_FFFF;
+        if DEFER == 0 {
+            flush_dirty();
+        }
+    }
+    1
+}
+
+/// Scroll cell rows [0, n) up by one, blanking row n-1 with `attr`. Returns 1
+/// when handled (framebuffer backend), 0 to let the caller scroll VGA text.
+/// With the shadow the pixels move by memmove; without it only cells whose
+/// content changed are redrawn (RENDERED still describes the screen).
+pub fn screen_scroll_up(n: u32, attr: u8) -> i32 {
+    if screen_backend() != 2 {
+        return 0;
+    }
+    let n = if (n as usize) > rows() { rows() } else { n as usize };
+    if n == 0 {
+        return 1;
+    }
+    let line = cols() * 2;
+    unsafe {
+        if n >= 2 && fb::scroll_up(0, n as u32) {
+            /* The cursor underline moves up with the pixels. Poison its
+             * RENDERED entry before the shift below so the mark travels with
+             * it (to row oy-1, or off the top) and that cell gets redrawn. */
+            if PREV_CURSOR != 0xFFFF_FFFF {
+                let ox = PREV_CURSOR % cols() as u32;
+                let oy = PREV_CURSOR / cols() as u32;
+                if (oy as usize) < n {
+                    let off = cell_off(ox as usize, oy as usize);
+                    RENDERED[off] = 0xFF;
+                    RENDERED[off + 1] = 0xFF;
+                    PREV_CURSOR = 0xFFFF_FFFF;
+                }
+            }
+            /* RENDERED describes shadow pixels, which moved up with the memmove. */
+            let r = RENDERED.as_mut_ptr();
+            core::ptr::copy(r.add(line), r, (n - 1) * line);
+            for b in RENDERED[(n - 1) * line..n * line].iter_mut() {
+                *b = 0xFF;
+            }
+        }
+        let c = CELLS.as_mut_ptr();
+        core::ptr::copy(c.add(line), c, (n - 1) * line);
+        let mut i = (n - 1) * line;
+        while i < n * line {
+            CELLS[i] = b' ';
+            CELLS[i + 1] = attr;
+            i += 2;
+        }
+        for d in DIRTY.iter_mut().take(n) {
+            *d = 1;
+        }
+        if DEFER == 0 {
+            flush_dirty();
+        }
+    }
+    1
 }

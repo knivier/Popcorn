@@ -29,7 +29,15 @@ build_uefi_esp_part() {
 build_uefi_iso() {
   [[ -f "$UEFI_OUT" ]] || die "Build UEFI loader first: ./scripts/core.sh uefi"
   [[ -f "$KERNEL_OUT" ]] || die "Build kernel first: ./scripts/core.sh build"
-  [[ -f "$EFI_PART" ]] || build_uefi_esp_part
+  # UEFI firmware boots from this ESP (-efi-boot-part), so it must always carry
+  # the kernel + loader just built; a reused image would boot stale code.
+  have xorriso || die "xorriso is required for the UEFI ISO (install the xorriso package, e.g. apt/dnf install xorriso, brew install xorriso)"
+  if [[ "${POPCORN_CFLAGS:-}" == *POPCORN_TEST_INSTALL* ]]; then
+    die "REFUSING UEFI ISO with the auto-install kernel (POPCORN_TEST_INSTALL is QEMU-only)"
+  fi
+  assert_kernel_not_auto_install
+  assert_loader_not_test_install
+  build_uefi_esp_part
 
   rm -rf "$ISODIR"
   mkdir -p "$ISODIR/EFI/BOOT" "$ISODIR/boot"
@@ -37,22 +45,16 @@ build_uefi_iso() {
   cp "$KERNEL_OUT" "$ISODIR/boot/kernel"
   cp "$KERNEL_OUT" "$ISODIR/EFI/BOOT/kernel"
 
-  if have xorriso; then
-    xorriso -as mkisofs \
-      -R -J -joliet-long \
-      -o "$UEFI_ISO_OUT" \
-      --efi-boot EFI/BOOT/BOOTX64.EFI \
-      -efi-boot-part "$EFI_PART" \
-      --protective-msdos-label \
-      -isohybrid-gpt-basdat \
-      "$ISODIR"
-  elif have x86_64-elf-grub-mkrescue; then
-    x86_64-elf-grub-mkrescue -o "$UEFI_ISO_OUT" "$ISODIR" -- -efi-boot-part
-  elif have i686-elf-grub-mkrescue; then
-    i686-elf-grub-mkrescue -o "$UEFI_ISO_OUT" "$ISODIR" -- -efi-boot-part
-  else
-    die "Need xorriso or grub-mkrescue for UEFI ISO"
-  fi
+  # grub-mkrescue is not a fallback: it needs xorriso itself and would embed its
+  # own GRUB EFI image instead of booting our BOOTX64.EFI.
+  xorriso -as mkisofs \
+    -R -J -joliet-long \
+    -o "$UEFI_ISO_OUT" \
+    --efi-boot EFI/BOOT/BOOTX64.EFI \
+    -efi-boot-part "$EFI_PART" \
+    --protective-msdos-label \
+    -isohybrid-gpt-basdat \
+    "$ISODIR"
 
   rm -rf "$ISODIR"
   log SUCCESS "UEFI ISO: $UEFI_ISO_OUT"

@@ -15,11 +15,25 @@ static bool pit_poll_mode = false;
 
 // Initialize PIT (Programmable Interval Timer)
 void timer_init(uint32_t frequency_hz) {
-    // Calculate divisor for desired frequency
-    pit_divisor = (uint16_t)(PIT_FREQUENCY / frequency_hz);
-    
-    // Configure PIT channel 0 for mode 3 (square wave generator)
-    write_port(0x43, 0x36);  // Channel 0, mode 3, binary
+    if (frequency_hz == 0) {
+        frequency_hz = TIMER_FREQUENCY;
+    }
+    // Calculate divisor for desired frequency (16-bit reload; 0 would mean 65536)
+    uint32_t divisor = PIT_FREQUENCY / frequency_hz;
+    if (divisor < 2) {
+        divisor = 2;
+    } else if (divisor > 0xFFFF) {
+        divisor = 0xFFFF;
+    }
+    pit_divisor = (uint16_t)divisor;
+
+    /*
+     * Channel 0, mode 2 (rate generator), binary. IRQ0 still fires once per period,
+     * and the counter counts down by 1 per input clock and reloads once per period,
+     * so timer_poll() can turn counter deltas into whole periods (mode 3 counts by 2
+     * and reloads twice per period).
+     */
+    write_port(0x43, 0x34);
     write_port(0x40, pit_divisor & 0xFF);        // Low byte
     write_port(0x40, (pit_divisor >> 8) & 0xFF); // High byte
     
@@ -36,12 +50,18 @@ void timer_init(uint32_t frequency_hz) {
 void timer_interrupt_handler(void) {
     global_timer.ticks++;
 
+    /*
+     * EOI before the tick handler: scheduler_tick may switch to another task, and this
+     * frame then only finishes when the preempted task is resumed (a new task never
+     * comes back here at all). IRQ gates keep IF=0 until iretq, so the early EOI cannot
+     * nest IRQ0 on this stack.
+     */
+    pic_send_eoi(0);
+
     /* During USB BOT / xHCI: EOI only — never run the scheduler mid-transfer. */
     if (!irq_quiet_active() && global_timer.tick_handler) {
         global_timer.tick_handler();
     }
-
-    pic_send_eoi(0);
 }
 
 // Enable timer interrupts
@@ -87,9 +107,16 @@ bool timer_is_poll_mode(void) {
     return pit_poll_mode;
 }
 
+/*
+ * Poll-mode clock: one tick per PIT period (pit_divisor input clocks), the same rate
+ * as IRQ0. Counter deltas between polls are accumulated in input clocks and whole
+ * periods are emitted as ticks. A single poll can only see one reload, so a gap longer
+ * than one period between polls under-counts; it never over-counts.
+ */
 void timer_poll(void) {
     static uint16_t last_count;
     static bool have_last;
+    static uint32_t elapsed_clocks;
 
     if (!pit_poll_mode || pit_divisor == 0) {
         return;
@@ -98,11 +125,13 @@ void timer_poll(void) {
     uint16_t cur = pit_latch_count0();
     if (!have_last) {
         last_count = cur;
+        elapsed_clocks = 0;
         have_last = true;
         return;
     }
 
-    uint32_t advanced = 0;
+    /* Mode 2 counts pit_divisor..1 then reloads; each step is one input clock. */
+    uint32_t advanced;
     if (cur <= last_count) {
         advanced = (uint32_t)last_count - (uint32_t)cur;
     } else {
@@ -110,10 +139,9 @@ void timer_poll(void) {
     }
     last_count = cur;
 
-    if (advanced > 16) {
-        advanced = 16;
-    }
-    while (advanced-- > 0) {
+    elapsed_clocks += advanced;
+    while (elapsed_clocks >= pit_divisor) {
+        elapsed_clocks -= pit_divisor;
         global_timer.ticks++;
         if (global_timer.tick_handler) {
             global_timer.tick_handler();
@@ -128,6 +156,9 @@ uint64_t timer_get_ticks(void) {
 
 // Get uptime in milliseconds
 uint64_t timer_get_uptime_ms(void) {
+    if (global_timer.frequency == 0) {
+        return 0;
+    }
     return (global_timer.ticks * 1000) / global_timer.frequency;
 }
 

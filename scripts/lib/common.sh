@@ -36,7 +36,7 @@ log() {
   case "$level" in
     INFO) printf '%s%s%s\n' "$BLUE" "$message" "$NC" >&2 ;;
     SUCCESS) printf '%s%s%s\n' "$GREEN" "$message" "$NC" >&2 ;;
-    WARNING) printf '%s%s%s\n' "$YELLOW" "$message" "$NC" >&2 ;;
+    WARN|WARNING) printf '%s%s%s\n' "$YELLOW" "$message" "$NC" >&2 ;;
     ERROR) printf '%s%s%s\n' "$RED" "$message" "$NC" >&2 ;;
     *) printf '%s\n' "$message" >&2 ;;
   esac
@@ -82,28 +82,100 @@ find_edk_code() {
   return 1
 }
 
+# OVMF vars template that pairs with a given CODE image (same firmware build).
+# A mismatched vars size shifts the variable store away from where OVMF expects it.
+ovmf_vars_template_for() {
+  local code="$1" dir base candidate
+  dir="$(dirname "$code")"
+  base="$(basename "$code")"
+  case "$base" in
+    edk2-x86_64-code.fd) candidate="$dir/edk2-i386-vars.fd" ;;
+    OVMF_CODE_4M.fd) candidate="$dir/OVMF_VARS_4M.fd" ;;
+    OVMF_CODE.fd) candidate="$dir/OVMF_VARS.fd" ;;
+    *) candidate="" ;;
+  esac
+  if [[ -n "$candidate" && -f "$candidate" ]]; then
+    printf '%s' "$candidate"
+    return 0
+  fi
+  return 1
+}
+
 ensure_ovmf_vars() {
   local vars="${1:-$POPCORN_TARGET/ovmf_vars.fd}"
+  local code="" template=""
   mkdir -p "$(dirname "$vars")"
-  if [[ ! -f "$vars" ]]; then
-    local template=""
-    for template in \
+  code="$(find_edk_code || true)"
+  if [[ -n "$code" ]]; then
+    template="$(ovmf_vars_template_for "$code" || true)"
+  fi
+  if [[ -z "$template" ]]; then
+    local t
+    for t in \
       /usr/share/OVMF/OVMF_VARS_4M.fd \
       /usr/share/edk2/ovmf/OVMF_VARS_4M.fd \
       /usr/share/edk2/ovmf/OVMF_VARS.fd \
       /usr/share/OVMF/OVMF_VARS.fd \
-      /usr/share/edk2/x64/OVMF_VARS.fd; do
-      if [[ -f "$template" ]]; then
-        cp "$template" "$vars"
-        return 0
+      /usr/share/edk2/x64/OVMF_VARS.fd \
+      /opt/homebrew/share/qemu/edk2-i386-vars.fd \
+      /usr/local/share/qemu/edk2-i386-vars.fd \
+      /usr/share/qemu/edk2-i386-vars.fd; do
+      if [[ -f "$t" ]]; then
+        template="$t"
+        break
       fi
     done
+  fi
+  if [[ -n "$template" ]]; then
+    # Re-seed when missing or when a stale store has the wrong size for this firmware.
+    if [[ ! -f "$vars" ]] || [[ "$(wc -c <"$vars" | tr -d ' ')" != "$(wc -c <"$template" | tr -d ' ')" ]]; then
+      cp "$template" "$vars"
+    fi
+    return 0
+  fi
+  if [[ ! -f "$vars" ]]; then
     dd if=/dev/zero of="$vars" bs=1M count=4 status=none
   fi
 }
 
-qemu_kill_all() {
-  killall qemu-system-x86_64 2>/dev/null || true
+# QEMU guests started by these scripts write their PID here (-pidfile), so
+# stop/liveness checks only ever touch Popcorn's own guest, never other VMs.
+QEMU_PIDFILE="${QEMU_PIDFILE:-$RUNTIME_DIR/popcorn-qemu.pid}"
+
+# Print the PID of the running Popcorn guest; fail if there is none.
+qemu_guest_pid() {
+  local pid=""
+  [[ -f "$QEMU_PIDFILE" ]] || return 1
+  pid="$(tr -dc '0-9' <"$QEMU_PIDFILE" 2>/dev/null || true)"
+  [[ -n "$pid" ]] || return 1
+  # A stale pidfile (guest SIGKILLed) may name a reused PID: only trust QEMU.
+  case "$(ps -p "$pid" -o comm= 2>/dev/null || true)" in
+    *qemu-system*) printf '%s' "$pid" ;;
+    *) return 1 ;;
+  esac
+}
+
+qemu_guest_alive() {
+  qemu_guest_pid >/dev/null
+}
+
+# Stop the Popcorn guest (and wait for it to exit so its pidfile lock and VNC
+# port are free for the next launch). Unrelated QEMU instances are left alone.
+qemu_kill_guest() {
+  local pid="" i
+  if pid="$(qemu_guest_pid)"; then
+    kill "$pid" 2>/dev/null || true
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.25
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -9 "$pid" 2>/dev/null || true
+      sleep 0.5
+    fi
+  fi
+  rm -f "$QEMU_PIDFILE"
+  return 0
 }
 
 # Copy kernel + BOOTX64.EFI into a staging tree (ESP layout).
@@ -112,7 +184,14 @@ uefi_stage_layout() {
   mkdir -p "$stage/EFI/BOOT" "$stage/boot"
   cp "$UEFI_OUT" "$stage/EFI/BOOT/BOOTX64.EFI"
   cp "$KERNEL_OUT" "$stage/boot/kernel"
-  cp "$KERNEL_OUT" "$stage/EFI/BOOT/kernel"
+  # test-install only: a safe kernel beside the auto-install one, which the
+  # install selftest stages onto its target (it never copies an auto-install kernel).
+  cp "${STAGE_EFI_KERNEL:-$KERNEL_OUT}" "$stage/EFI/BOOT/kernel"
+  # test-install only: the normal loader beside the test one. The installer
+  # copies this instead of the test loader, so no target ever gets the latter.
+  if [[ -n "${STAGE_EFI_LOADER:-}" ]]; then
+    cp "$STAGE_EFI_LOADER" "$stage/EFI/BOOT/SAFEX64.EFI"
+  fi
 }
 
 # Write a FAT32 image from a staged directory tree.

@@ -29,12 +29,6 @@ extern ConsoleState console_state;
 extern unsigned int current_loc;
 extern void write_port(unsigned short port, unsigned char data);
 
-int get_tick_count(void);
-
-void printTerm(const char *str, unsigned char color) {
-    console_print_color(str, color);
-}
-
 /* Add command to history */
 void add_to_history(const char *command) {
     if (command == NULL || command[0] == '\0') {
@@ -213,7 +207,23 @@ static void help_catalog(void) {
     console_newline();
     console_println_color("catalog", CONSOLE_HEADER_COLOR);
     console_println("  catalog -help");
-    console_println("  catalog -list    drives, devices, pops, irqs, syscalls");
+    console_println("  catalog -list           drives, devices, pops, irqs, syscalls, disks");
+    console_println("  catalog -list <kind>    kind: drive dev pop irq sys disk");
+}
+
+/* "" -> all; else one CATALOG_KIND_*; -1 if unknown. */
+static int catalog_kind_from_arg(const char* arg) {
+    while (*arg == ' ') {
+        arg++;
+    }
+    if (arg[0] == '\0' || strcmp(arg, "all") == 0) return CATALOG_KIND_ALL;
+    if (strcmp(arg, "drive") == 0 || strcmp(arg, "drv") == 0) return CATALOG_KIND_DRIVE;
+    if (strcmp(arg, "dev") == 0 || strcmp(arg, "device") == 0) return CATALOG_KIND_DEVICE;
+    if (strcmp(arg, "pop") == 0) return CATALOG_KIND_POP;
+    if (strcmp(arg, "irq") == 0) return CATALOG_KIND_IRQ;
+    if (strcmp(arg, "sys") == 0 || strcmp(arg, "syscall") == 0) return CATALOG_KIND_SYSCALL;
+    if (strcmp(arg, "disk") == 0) return CATALOG_KIND_DISK;
+    return -1;
 }
 
 static void help_disk(void) {
@@ -267,7 +277,12 @@ int parse_number(const char* str, uint32_t* result) {
     const char* start = str;
 
     while (*str >= '0' && *str <= '9') {
-        num = num * 10 + (*str - '0');
+        uint32_t d = (uint32_t)(*str - '0');
+        /* Reject instead of wrapping mod 2^32 (4294967296 must not become LBA 0). */
+        if (num > (UINT32_MAX - d) / 10u) {
+            return 0;
+        }
+        num = num * 10u + d;
         str++;
     }
 
@@ -362,15 +377,16 @@ void execute_command(const char *command) {
     } else if (strcmp(command, "uptime") == 0) {
         console_newline();
         char buffer[64];
-        int_to_str(get_tick_count(), buffer);
+        uint64_t ticks = timer_get_ticks();
+        uint64_to_str(ticks, buffer);
         console_print_color("Uptime: ", CONSOLE_INFO_COLOR);
         console_print_color(buffer, CONSOLE_FG_COLOR);
         console_println(" ticks");
-        
-        int ticks = get_tick_count();
-        int ticks_per_second = ticks / 150; // Inaccurate estimation, please be aware needs to be tuned!
-        int_to_str(ticks_per_second, buffer);
-        console_print_color("Estimated seconds: ", CONSOLE_INFO_COLOR);
+
+        /* Same conversion as timer_get_uptime_ms(): ticks / configured PIT rate. */
+        uint64_t hz = global_timer.frequency ? global_timer.frequency : TIMER_FREQUENCY;
+        uint64_to_str(ticks / hz, buffer);
+        console_print_color("Seconds: ", CONSOLE_INFO_COLOR);
         console_println_color(buffer, CONSOLE_FG_COLOR);
     } else if (strcmp(command, "stop") == 0) {
         /* Power-off where the host supports it; otherwise halt cleanly.
@@ -770,10 +786,6 @@ void execute_command(const char *command) {
             help_mon();
         } else if (strcmp(args, "-debug") == 0) {
             // Start a debug task
-            extern TaskStruct* scheduler_create_task(void (*function)(void), void* data, TaskPriority priority);
-            extern void debug_task_function(void);
-            extern uint32_t scheduler_get_task_count(void);
-            
             uint32_t task_count = scheduler_get_task_count();
             if (task_count > 1) {
                 console_print_error("Debug task already running. Use 'mon -kill [pid]' to stop it first.");
@@ -798,10 +810,7 @@ void execute_command(const char *command) {
                 console_print_error("Invalid PID. Must be a positive number.");
                 return;
             }
-            
-            extern TaskStruct* scheduler_create_task_with_pid(void (*function)(void), void* data, TaskPriority priority, uint32_t custom_pid);
-            extern void debug_task_function(void);
-            
+
             TaskStruct* task = scheduler_create_task_with_pid(debug_task_function, NULL, PRIORITY_NORMAL, custom_pid);
             if (task) {
                 console_print_success("Debug task started with custom PID");
@@ -810,11 +819,10 @@ void execute_command(const char *command) {
                 int_to_str(task->pid, buffer);
                 console_println_color(buffer, CONSOLE_FG_COLOR);
             } else {
-                console_print_error("Failed to create debug task with custom PID");
+                console_print_error("Failed to create debug task (PID 0 is reserved, PID already in use, or no free task slot)");
             }
         } else if (strcmp(args, "-list") == 0) {
             // List all running tasks
-            extern void scheduler_print_tasks(void);
             console_newline();
             console_println_color("=== TASK LIST ===", CONSOLE_HEADER_COLOR);
             scheduler_print_tasks();
@@ -832,14 +840,14 @@ void execute_command(const char *command) {
                 return;
             }
             
-            extern void scheduler_destroy_task(uint32_t pid);
-            scheduler_destroy_task(pid);
-            console_print_success("Task killed");
+            /* scheduler_kill_task finds the task in any state (ready, blocked, sleeping). */
+            if (scheduler_kill_task(pid)) {
+                console_print_success("Task killed");
+            } else {
+                console_print_error("No task with that PID");
+            }
         } else if (strcmp(args, "-ultramon") == 0) {
             // Kill all tasks except idle
-            extern void scheduler_kill_all_except_idle(void);
-            extern void scheduler_print_tasks(void);
-            
             console_print_warning("Killing all tasks except idle...");
             scheduler_kill_all_except_idle();
             console_print_success("All tasks killed except idle");
@@ -960,10 +968,19 @@ void execute_command(const char *command) {
         const char* args = (command[7] == ' ') ? command + 8 : "";
         if (args[0] == '\0' || is_help_arg(args)) {
             help_catalog();
-        } else if (opt_is(args, "-list")) {
-            char buf[512];
-            rust_catalog_list(CATALOG_KIND_ALL, buf, sizeof(buf));
-            console_println_color(buf, CONSOLE_INFO_COLOR);
+        } else if (opt_is(args, "-list") || opt_starts(args, "-list ")) {
+            /* Sized for a full table: MAX_ENTRIES (96) x worst-case entry
+             * ("drive:" + 32 name + "(" + 16 class + "):ready ") = ~6 KB.
+             * Static: far too big for the kernel stack. */
+            static char buf[8192];
+            const char* kind_arg = opt_is(args, "-list") ? "" : opt_arg(args, "-list ");
+            int kind = catalog_kind_from_arg(kind_arg);
+            if (kind < 0) {
+                console_print_error("Unknown catalog kind. Try: catalog -help");
+                return;
+            }
+            rust_catalog_list((uint8_t)kind, buf, sizeof(buf));
+            console_println_color(buf[0] ? buf : "(none)", CONSOLE_INFO_COLOR);
         } else {
             console_print_error("Unknown catalog option. Try: catalog -help");
         }
@@ -1177,6 +1194,12 @@ void execute_command(const char *command) {
                     }
                 }
             }
+        } else if (opt_is(args, "-read")) {
+            console_print_error("Usage: disk -read <lba>");
+        } else if (opt_is(args, "-write")) {
+            console_print_error("Usage: disk -write <lba> <hex|text>");
+        } else if (opt_is(args, "-use")) {
+            console_print_error("Usage: disk -use <name>");
         } else {
             console_print_error("Unknown disk option. Try: disk -help");
         }

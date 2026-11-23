@@ -8,7 +8,6 @@
 void init_filesystem(void);
 bool write_file(const char* name, const char* content);
 const char* read_file(const char* name);
-void list_files(void);
 void list_files_console(void);
 bool delete_file(const char* name);
 bool create_directory(const char* name);

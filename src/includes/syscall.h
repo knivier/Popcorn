@@ -37,6 +37,12 @@
 #define SYSCALL_EBUSY      -6
 #define SYSCALL_EAGAIN     -7
 
+/*
+ * int 0x80 ABI: RAX = syscall number, args in RDI, RSI, RDX, RCX, R8, R9; the result
+ * comes back in RAX and every other register is preserved. syscall_handler_asm
+ * (idt.asm) builds this struct field by field; keep the order in sync with it and with
+ * the _Static_asserts in syscall.c. rsp/rip/rflags/cs/ss are the interrupted context.
+ */
 typedef struct {
     uint64_t rax;
     uint64_t rdi;

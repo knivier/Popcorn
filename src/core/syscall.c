@@ -11,6 +11,18 @@
 extern const char* get_current_directory(void);
 extern bool change_directory(const char* name);
 
+/* syscall_handler_asm (idt.asm) fills these slots by offset. */
+_Static_assert(offsetof(syscall_context_t, rax) == 0, "idt.asm syscall ctx: rax");
+_Static_assert(offsetof(syscall_context_t, rdi) == 8, "idt.asm syscall ctx: rdi");
+_Static_assert(offsetof(syscall_context_t, rcx) == 32, "idt.asm syscall ctx: rcx");
+_Static_assert(offsetof(syscall_context_t, r9) == 48, "idt.asm syscall ctx: r9");
+_Static_assert(offsetof(syscall_context_t, rsp) == 56, "idt.asm syscall ctx: rsp");
+_Static_assert(offsetof(syscall_context_t, rip) == 64, "idt.asm syscall ctx: rip");
+_Static_assert(offsetof(syscall_context_t, rflags) == 72, "idt.asm syscall ctx: rflags");
+_Static_assert(offsetof(syscall_context_t, cs) == 80, "idt.asm syscall ctx: cs");
+_Static_assert(offsetof(syscall_context_t, ss) == 88, "idt.asm syscall ctx: ss");
+_Static_assert(sizeof(syscall_context_t) == 96, "idt.asm syscall ctx: SC_CTX");
+
 static syscall_entry_t syscall_table[MAX_SYSCALLS];
 static uint32_t syscall_count = 0;
 static uint32_t current_pid = 1;
@@ -100,13 +112,31 @@ const char* syscall_get_name(uint32_t syscall_num) {
     return NULL;
 }
 
+/* Hex without leading zeros, at least two digits (matches the 0x.. defines). */
+static void syscall_num_to_hex(uint32_t n, char* out) {
+    static const char hx[] = "0123456789ABCDEF";
+    char tmp[8];
+    int len = 0;
+    do {
+        tmp[len++] = hx[n & 0xFu];
+        n >>= 4;
+    } while (n != 0 && len < 8);
+    if (len < 2) {
+        tmp[len++] = '0';
+    }
+    for (int k = 0; k < len; k++) {
+        out[k] = tmp[len - 1 - k];
+    }
+    out[len] = '\0';
+}
+
 void syscall_print_table(void) {
     char buffer[16];
     console_newline();
     console_println_color("=== SYSTEM CALL TABLE ===", CONSOLE_HEADER_COLOR);
     for (uint32_t i = 0; i < syscall_count; i++) {
         console_print_color("0x", CONSOLE_INFO_COLOR);
-        int_to_str((int)syscall_table[i].syscall_num, buffer);
+        syscall_num_to_hex(syscall_table[i].syscall_num, buffer);
         console_print_color(buffer, CONSOLE_INFO_COLOR);
         console_print_color(": ", CONSOLE_FG_COLOR);
         console_println_color(syscall_table[i].name ? syscall_table[i].name : "?", CONSOLE_SUCCESS_COLOR);

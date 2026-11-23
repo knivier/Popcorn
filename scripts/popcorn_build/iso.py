@@ -5,17 +5,17 @@ from pathlib import Path
 from .log import LogBuffer
 from .paths import TARGET_DIR
 from .runner import run_core
-from .toolchain import Toolchain
 
 
 class IsoBuilder:
-    def __init__(self, *, src_dir: Path | None = None, toolchain: Toolchain, logs: LogBuffer, via_wsl: bool = False):
-        self.tc = toolchain
+    """Thin wrapper around `scripts/core.sh iso` (legacy GRUB ISO in target/)."""
+
+    def __init__(self, *, logs: LogBuffer, via_wsl: bool = False):
         self.logs = logs
         self.via_wsl = via_wsl
         self.iso_out = TARGET_DIR / "popcorn.iso"
 
-    def create(self, kernel_path: Path | None = None) -> Path:
+    def create(self) -> Path:
         res = run_core("iso", self.logs, via_wsl=self.via_wsl)
         if not res.ok or not self.iso_out.exists():
             raise RuntimeError("ISO creation failed")

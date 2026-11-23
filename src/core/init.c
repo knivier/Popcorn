@@ -23,6 +23,7 @@ extern void timer_enable(void);
 extern void scheduler_init(void);
 extern void scheduler_tick(void);
 extern void memory_init(void);
+extern int rust_screen_enable_shadow(void);
 extern void syscall_init(void);
 extern void console_draw_header(const char* title);
 extern void console_draw_prompt_with_path(const char* path);
@@ -36,12 +37,14 @@ static void boot_stage(char c) {
     boot_serial_putc(c);
 }
 
-static const int total_init_steps = 9;
+/* Five init_show_* steps plus the final "Initialization Complete" step, so the
+ * bar only reaches 100% once module loading has finished. */
+static const int total_init_steps = 6;
 
 void init_boot_screen(void) {
     boot_stage('i');
-    /* UEFI: paint framebuffer and parse GOP handoff before IDT/PIC (still on loader text until FB draws). */
-    uefi_boot_mark_console();
+    /* UEFI: apply the GOP handoff (multiboot2_parse_framebuffer does it first)
+     * before IDT/PIC (still on loader text until FB draws). */
     multiboot2_parse_framebuffer();
     console_init();
     boot_stage('c');
@@ -174,6 +177,8 @@ void init_show_memory_info(void) {
     init_draw_progress_bar(1, total_init_steps, "Initializing Memory Management");
 
     memory_init();
+    /* Heap is up: give the GOP console its write-back text shadow (no-op on VGA). */
+    rust_screen_enable_shadow();
 
     console_set_cursor(0, 18);
     console_print_color("  ✓ Memory Management System", BOOT_SUCCESS_COLOR);

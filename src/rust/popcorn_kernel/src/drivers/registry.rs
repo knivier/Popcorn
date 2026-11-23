@@ -11,7 +11,8 @@ use super::bus::pci;
 
 extern "C" {
     fn device_register_rust(name: *const u8);
-    fn console_fb_active() -> i32;
+    /// C `bool console_fb_active(void)`; Rust `bool` matches C `_Bool` (only AL defined).
+    fn console_fb_active() -> bool;
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -110,7 +111,7 @@ fn table() -> &'static mut Vec<DriveEntry> {
     }
 }
 
-fn register_dev(name: &str) {
+fn register_dev(name: &str, kind: DriveKind, id: u32) {
     let mut buf = [0u8; 32];
     let b = name.as_bytes();
     let n = b.len().min(buf.len() - 1);
@@ -119,7 +120,7 @@ fn register_dev(name: &str) {
     unsafe {
         device_register_rust(buf.as_ptr());
     }
-    catalog::publish_device(name, "char", 0);
+    catalog::publish_device(name, class_for(kind), id);
 }
 
 fn class_for(kind: DriveKind) -> &'static str {
@@ -163,7 +164,7 @@ pub fn init_drives() {
     let _ = init_drive("cpu");
     let _ = init_drive("clock");
 
-    let use_fb = unsafe { console_fb_active() != 0 };
+    let use_fb = unsafe { console_fb_active() };
     if use_fb {
         let _ = init_drive("fb0");
         let _ = init_drive("tty0");
@@ -171,7 +172,7 @@ pub fn init_drives() {
         let _ = init_drive("tty0");
     }
 
-    pci::scan_bus0_print();
+    pci::scan_print();
     /* Block disks: ram0 always; vda if virtio-blk present. Write-gated. */
     super::block::init();
 }
@@ -191,7 +192,7 @@ pub fn init_drive(name: &str) -> Result<(), &'static str> {
     let name = t[idx].name;
     let kind = t[idx].kind;
     let dev_name = t[idx].dev_name;
-    register_dev(dev_name);
+    register_dev(dev_name, kind, idx as u32);
     catalog::publish_drive(name, class_for(kind), true, idx as u32);
     Ok(())
 }

@@ -11,7 +11,10 @@ use core::sync::atomic::{AtomicBool, Ordering};
 const MAX_LINES: usize = 100;
 const MAX_LINE_LENGTH: usize = 80;
 const EDITOR_DISPLAY_LINES: usize = 20;
-const MAX_SAVE_BYTES: usize = 1000;
+/// Whole editor buffer: every line holds at most MAX_LINE_LENGTH-1 chars plus a
+/// '\n' separator, then the NUL. Well under fat32::MAX_CONTENT, so saves never
+/// have to truncate.
+const SAVE_BUF_LEN: usize = MAX_LINES * MAX_LINE_LENGTH + 1;
 
 const KEY_ENTER: u8 = 0x1C;
 const KEY_BACKSPACE: u8 = 0x0E;
@@ -65,6 +68,9 @@ impl Editor {
 
 static mut EDITOR: Editor = Editor::empty();
 static EDITOR_LOCK: AtomicBool = AtomicBool::new(false);
+/// Serialization buffer for saves (~8 KiB: kept off the kernel stack). Only
+/// touched by `save_inner`, which always runs under EDITOR_LOCK.
+static mut SAVE_BUF: [u8; SAVE_BUF_LEN] = [0; SAVE_BUF_LEN];
 
 fn with_editor<R>(f: impl FnOnce(&mut Editor) -> R) -> R {
     while EDITOR_LOCK
@@ -114,16 +120,14 @@ fn copy_cstr(dest: &mut [u8], src: &str) {
     }
 }
 
-fn ends_with_txt(name: &[u8]) -> bool {
-    let n = cstr_len(name);
-    n >= 4 && name[n - 4..n] == *b".txt"
-}
-
+/// Default a bare name to `.txt`. A name that already has any extension
+/// (README.TXT, note.txt, notes.md) is left alone: FAT 8.3 allows only one dot,
+/// and to_sfn reports names that do not fit instead of us mangling them.
 fn ensure_txt(name: &mut [u8]) {
-    if ends_with_txt(name) {
+    let n = cstr_len(name);
+    if name[..n].contains(&b'.') {
         return;
     }
-    let n = cstr_len(name);
     if n + 4 < name.len() {
         name[n..n + 4].copy_from_slice(b".txt");
         name[n + 4] = 0;
@@ -267,14 +271,21 @@ pub extern "C" fn dolphin_open(filename: *const c_char) {
         unsafe {
             while *p != 0 && ed.num_lines < MAX_LINES {
                 let ch = *p as u8;
-                p = p.add(1);
-                if ch == b'\n' || line_pos >= MAX_LINE_LENGTH - 1 {
+                if ch == b'\n' {
+                    ed.lines[ed.num_lines][line_pos] = 0;
+                    ed.num_lines += 1;
+                    line_pos = 0;
+                    p = p.add(1);
+                } else if line_pos >= MAX_LINE_LENGTH - 1 {
+                    /* Line full: wrap without consuming `ch`, so it becomes the
+                     * first char of the next line instead of being dropped. */
                     ed.lines[ed.num_lines][line_pos] = 0;
                     ed.num_lines += 1;
                     line_pos = 0;
                 } else {
                     ed.lines[ed.num_lines][line_pos] = ch;
                     line_pos += 1;
+                    p = p.add(1);
                 }
             }
         }
@@ -300,76 +311,7 @@ pub extern "C" fn dolphin_save() {
             console_ffi::error("No file open in editor");
             return;
         }
-        if ed.num_lines == 0 || (ed.num_lines == 1 && ed.lines[0][0] == 0) {
-            console_ffi::set_cursor(0, 22);
-            print_color("Saving empty file...", COLOR_INFO);
-        }
-
-        let mut content = [0u8; MAX_SAVE_BYTES + 1];
-        let mut pos = 0usize;
-        let mut truncated = false;
-        for i in 0..ed.num_lines {
-            if pos >= MAX_SAVE_BYTES - 1 {
-                truncated = true;
-                break;
-            }
-            let llen = line_len(&ed.lines[i]);
-            for j in 0..llen {
-                if pos >= MAX_SAVE_BYTES - 2 {
-                    truncated = true;
-                    break;
-                }
-                content[pos] = ed.lines[i][j];
-                pos += 1;
-            }
-            if truncated {
-                break;
-            }
-            if i + 1 < ed.num_lines && pos < MAX_SAVE_BYTES - 1 {
-                content[pos] = b'\n';
-                pos += 1;
-            }
-        }
-        content[pos] = 0;
-
-        let ok = unsafe {
-            write_file(
-                ed.filename.as_ptr() as *const c_char,
-                content.as_ptr() as *const c_char,
-            )
-        };
-        console_ffi::set_cursor(0, 22);
-        if ok {
-            ed.modified = false;
-            print_color("Saved: ", COLOR_SUCCESS);
-            print_color(filename_str(ed), COLOR_WHITE);
-            print(" (");
-            print_u32(pos as u32, COLOR_WHITE);
-            print(" bytes)");
-            if truncated {
-                print_color(" [TRUNCATED]", COLOR_WARNING);
-            }
-        } else {
-            let err = unsafe { get_last_filesystem_error() };
-            match err {
-                9 => {
-                    console_ffi::error("Save failed: no Popcorn FAT volume on selected disk");
-                    println_color(
-                        "Tip: disk -list → disk -wipe usb0 YES  (then dol -save)",
-                        COLOR_INFO,
-                    );
-                }
-                8 | 2 => console_ffi::error("Save failed: bad name (use 8.3 like NOTE.TXT)"),
-                6 => console_ffi::error("Save failed: no space / content too large"),
-                _ => {
-                    console_ffi::error("Save failed (disk locked or I/O error)");
-                    println_color(
-                        "Tip: disk -wipe <usbN> YES, then disk -use <usbN>",
-                        COLOR_INFO,
-                    );
-                }
-            }
-        }
+        save_inner(ed, false);
     });
 }
 
@@ -503,12 +445,20 @@ fn render(ed: &mut Editor) {
     if !ed.active {
         return;
     }
+    /* Keep the cursor inside the 20-line window. Every edit/movement path ends
+     * in render(), so this one clamp covers them all. */
+    if ed.cursor_line < ed.scroll_offset {
+        ed.scroll_offset = ed.cursor_line;
+    } else if ed.cursor_line >= ed.scroll_offset + EDITOR_DISPLAY_LINES {
+        ed.scroll_offset = ed.cursor_line + 1 - EDITOR_DISPLAY_LINES;
+    }
     let mut cols = console_ffi::cols();
     let rows = console_ffi::rows();
-    let mut y_end = if rows > 2 { rows - 2 } else { rows };
-    if y_end > 24 {
-        y_end = 24;
-    }
+    /* Clear every row a display line can land on (4..4+20), stopping above the
+     * status row (24). rows-2 alone left row 23 stale on a 25-row VGA console. */
+    let y_end = (4 + EDITOR_DISPLAY_LINES as u32)
+        .min(rows.saturating_sub(1))
+        .min(24);
     if cols > 80 {
         cols = 80;
     }
@@ -520,7 +470,7 @@ fn render(ed: &mut Editor) {
     }
 
     let mut i = 0usize;
-    while i < EDITOR_DISPLAY_LINES && i < ed.num_lines {
+    while i < EDITOR_DISPLAY_LINES && ed.scroll_offset + i < ed.num_lines {
         let line_num = ed.scroll_offset + i;
         let display_y = 4 + i as u32;
         if line_num < ed.num_lines {
@@ -562,7 +512,7 @@ fn clamp_col(ed: &mut Editor) {
 
 fn handle_command_mode(ed: &mut Editor) {
     if unsafe { timer_is_poll_mode() } {
-        drop_save_inner(ed);
+        save_inner(ed, true);
         if !ed.modified {
             close_clean(ed);
         }
@@ -636,11 +586,11 @@ fn handle_command_mode(ed: &mut Editor) {
                 return;
             }
             if cstr_eq(&cmd_buffer, b"w") {
-                drop_save_inner(ed);
+                save_inner(ed, true);
                 return;
             }
             if cstr_eq(&cmd_buffer, b"wq") || cstr_eq(&cmd_buffer, b"x") {
-                drop_save_inner(ed);
+                save_inner(ed, true);
                 if !ed.modified {
                     close_clean(ed);
                 }
@@ -673,33 +623,32 @@ fn handle_command_mode(ed: &mut Editor) {
     }
 }
 
-/// Save body used while already holding the editor lock.
-fn drop_save_inner(ed: &mut Editor) {
+/// The one save body (`dol -save` from the shell and ESC w / wq / x inside the
+/// editor). Caller must already hold the editor lock. `in_editor` drops the
+/// shell-command tips, which would draw over the editor's status rows.
+fn save_inner(ed: &mut Editor, in_editor: bool) {
     if ed.num_lines == 0 || (ed.num_lines == 1 && ed.lines[0][0] == 0) {
         console_ffi::set_cursor(0, 22);
         print_color("Saving empty file...", COLOR_INFO);
     }
-    let mut content = [0u8; MAX_SAVE_BYTES + 1];
+    let content = unsafe { &mut *core::ptr::addr_of_mut!(SAVE_BUF) };
     let mut pos = 0usize;
     let mut truncated = false;
-    for i in 0..ed.num_lines {
-        if pos >= MAX_SAVE_BYTES - 1 {
-            truncated = true;
-            break;
-        }
+    'lines: for i in 0..ed.num_lines {
         let llen = line_len(&ed.lines[i]);
         for j in 0..llen {
-            if pos >= MAX_SAVE_BYTES - 2 {
+            if pos >= SAVE_BUF_LEN - 1 {
                 truncated = true;
-                break;
+                break 'lines;
             }
             content[pos] = ed.lines[i][j];
             pos += 1;
         }
-        if truncated {
-            break;
-        }
-        if i + 1 < ed.num_lines && pos < MAX_SAVE_BYTES - 1 {
+        if i + 1 < ed.num_lines {
+            if pos >= SAVE_BUF_LEN - 1 {
+                truncated = true;
+                break;
+            }
             content[pos] = b'\n';
             pos += 1;
         }
@@ -713,17 +662,41 @@ fn drop_save_inner(ed: &mut Editor) {
     };
     console_ffi::set_cursor(0, 22);
     if ok {
-        ed.modified = false;
+        /* A cut-short save is not a save: keep the buffer marked modified so
+         * q / wq / dol -close refuse to throw the rest away. */
+        ed.modified = truncated;
         print_color("Saved: ", COLOR_SUCCESS);
         print_color(filename_str(ed), COLOR_WHITE);
         print(" (");
         print_u32(pos as u32, COLOR_WHITE);
         print(" bytes)");
         if truncated {
-            print_color(" [TRUNCATED]", COLOR_WARNING);
+            print_color(" [TRUNCATED - not all text saved]", COLOR_WARNING);
         }
-    } else {
-        console_ffi::error("Save failed (disk locked or I/O error)");
+        return;
+    }
+    let err = unsafe { get_last_filesystem_error() };
+    match err {
+        9 => {
+            console_ffi::error("Save failed: no Popcorn FAT volume on selected disk");
+            if !in_editor {
+                println_color(
+                    "Tip: disk -list → disk -wipe usb0 YES  (then dol -save)",
+                    COLOR_INFO,
+                );
+            }
+        }
+        8 | 2 => console_ffi::error("Save failed: bad name (use 8.3 like NOTE.TXT)"),
+        6 => console_ffi::error("Save failed: no space / content too large"),
+        _ => {
+            console_ffi::error("Save failed (disk locked or I/O error)");
+            if !in_editor {
+                println_color(
+                    "Tip: disk -wipe <usbN> YES, then disk -use <usbN>",
+                    COLOR_INFO,
+                );
+            }
+        }
     }
 }
 

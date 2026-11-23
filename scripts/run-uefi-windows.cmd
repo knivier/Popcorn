@@ -7,24 +7,31 @@ echo  Hardware-safe image only. QEMU uses target\ files — never the Windows di
 echo  VNC: 127.0.0.1:5900
 echo.
 
-REM Kill any leftover guest so the port is free.
-wsl -e bash -lc "killall qemu-system-x86_64 2>/dev/null || true"
+REM Stop a leftover Popcorn guest so the port is free (other QEMU VMs are left alone).
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0win.ps1" stop >nul 2>&1
 
 REM Start QEMU in a new window (keeps serial output visible).
 start "Popcorn QEMU" powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0win.ps1" run-uefi
 
-echo  Waiting for VNC on 127.0.0.1:5900 ...
+REM win.ps1 run-uefi rebuilds everything (core.sh all, Rust build-std) before QEMU
+REM opens the port, so wait up to 10 minutes rather than a few seconds.
+echo  Waiting for VNC on 127.0.0.1:5900 (the build runs first; this can take minutes) ...
 powershell -NoProfile -Command ^
-  "$ok=$false; for ($i=0; $i -lt 90; $i++) { try { $c=New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1',5900); $c.Close(); $ok=$true; break } catch { Start-Sleep -Milliseconds 250 } }; if (-not $ok) { Write-Host 'VNC not ready — connect manually to 127.0.0.1:5900'; exit 1 }"
+  "$deadline=(Get-Date).AddMinutes(10); while ((Get-Date) -lt $deadline) { try { $c=New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1',5900); $c.Close(); exit 0 } catch { Start-Sleep -Milliseconds 500 } }; exit 1"
+set "VNC_READY=%errorlevel%"
 
 set "VNC="
-if exist "%ProgramFiles%\TigerVNC\vncviewer.exe" set "VNC=%ProgramFiles%\TigerVNC\vncviewer.exe"
+if defined POPCORN_VNC_VIEWER if exist "%POPCORN_VNC_VIEWER%" set "VNC=%POPCORN_VNC_VIEWER%"
+if not defined VNC if exist "%ProgramFiles%\TigerVNC\vncviewer.exe" set "VNC=%ProgramFiles%\TigerVNC\vncviewer.exe"
 if not defined VNC if exist "%ProgramFiles(x86)%\TigerVNC\vncviewer.exe" set "VNC=%ProgramFiles(x86)%\TigerVNC\vncviewer.exe"
 if not defined VNC if exist "%LOCALAPPDATA%\Programs\TigerVNC\vncviewer.exe" set "VNC=%LOCALAPPDATA%\Programs\TigerVNC\vncviewer.exe"
 if not defined VNC if exist "%ProgramFiles%\TightVNC\tvnviewer.exe" set "VNC=%ProgramFiles%\TightVNC\tvnviewer.exe"
 
-if defined VNC (
-  echo  Opening %VNC% -^> 127.0.0.1:5900
+if not "%VNC_READY%"=="0" (
+  echo  VNC did not come up. Check the "Popcorn QEMU" window for build or QEMU errors.
+  echo  Once QEMU is running, connect manually to 127.0.0.1:5900
+) else if defined VNC (
+  echo  Opening "%VNC%" -^> 127.0.0.1:5900
   start "" "%VNC%" 127.0.0.1:5900
 ) else (
   echo  No TigerVNC/TightVNC found. Connect manually to 127.0.0.1:5900

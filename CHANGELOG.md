@@ -1,4 +1,185 @@
-# Changelog - 0.5 Release Notes
+# Changelog
+
+---
+
+## [0.7.0] — 2026-06-02 to 2026-10-07
+
+**Release name:** 0.7  
+**Baseline (tag `0.6`):** `caa4e17c4b078836cefd7137fb0970e485a929bc` — *Merge pull request #8 from knivier/1.6*, 2026-06-02  
+**Release tip:** `998ce846832a1f9c0199bd390e292a612e064547` — *Allowed proper build systems on windows*, 2026-10-07
+
+Release 0.7 is the jump from a C-centric GRUB kernel with a Python builder under `src/` to a **layered x86-64 kernel** with a **native UEFI loader**, a **Rust driver network**, **real block/FAT32 storage**, and a **unified `scripts/core.sh` toolchain**. Tag 0.6 was VMM identity mapping, async IRQ1 keyboard, and timer bring-up (PR #8). Everything below is new since that tag.
+
+---
+
+### Highlights
+
+- **Native UEFI boot** (`BOOTX64.EFI` + GOP framebuffer) so no-CSM machines boot without GRUB/CSM; GRUB Multiboot2 ISO path remains.
+- **Unified build** under `scripts/core.sh`; all artifacts in `target/`; Fedora / Linux / macOS / Windows(WSL) wrappers and GUIs.
+- **Rust crate `popcorn_kernel`**: driver registry, catalog, screen/kbd/serial backends, PCI, xHCI, virtio-blk, NVMe, USB MSC, FAT32, and all pops.
+- **Layered C core**: shell, IDT, IRQ table, syscalls, and init split out of a thinned `kernel.c`.
+- **Disk install on USB** with **master-locked NVMe writes**; QEMU auto-install is feature-gated and never flashed as `popcorn-uefi.img`.
+- **PIC 2.1 cleanup** (correct ICW3 cascade, `io_wait`, slave-before-master EOI, spurious IRQ7/15).
+- **Shell dash commands**: `cl -gettime`, `disk -install|-wipe|-master`, `mem`, `cpu`, `drive`, `catalog`, …
+- **Windows WSL** builds a hardware-safe image and runs QEMU on `target/` files only (never `PhysicalDrive`).
+
+---
+
+### Boot, UEFI, and framebuffer
+
+- Native UEFI loader `src/uefi/bootx64.c` → `target/BOOTX64.EFI`; flash image `target/popcorn-uefi.img` (FAT32 `EFI/BOOT/BOOTX64.EFI` + `BOOT/KERNEL`).
+- GOP framebuffer console on machines without CSM (`boot_fb.h`, 8×16 font); staged boot splash / init.
+- UEFI ConIn keyboard fallback after `ExitBootServices` (`uefi_input.c`).
+- Loader loads the kernel **only from the volume that held `BOOTX64.EFI`** (does not scan every FAT disk for `\boot\kernel`).
+- Loader refuses a kernel that still contains the QEMU auto-install selftest.
+- Post-shell reboot path fixed; Multiboot2 memory-upper handling for 64-bit values.
+- QEMU video uses virtio-vga/ramfb for GOP; WSL defaults to VNC (`127.0.0.1:5900`) with optional TigerVNC auto-launch.
+
+---
+
+### Build system, QEMU, and CI
+
+- Replaced `src/buildmon.py` / `src/fed-build.sh` / `src/mac-build.sh` with `scripts/core.sh` + `scripts/lib/*` + `scripts/popcorn_build/`.
+- Commands: `all`, `uefi`, `img`, `iso`, `iso-uefi`, `run-uefi`, `test-uefi`, `test-pf`, `test-install`, `clean`.
+- `run-uefi` rebuilds when sources are newer than `target/kernel` so QEMU does not boot a stale image.
+- QEMU guest disks are **regular files under `target/`** (virtio + USB MSC scratch + emulated NVMe). Host `PhysicalDrive`, `/dev/sd*`, `/dev/nvme*` are refused.
+- `target/UNSAFE/` holds QEMU-only images; **do not flash**. The only flashable file is `target/popcorn-uefi.img` from `./scripts/core.sh all` (no `POPCORN_TEST_INSTALL`).
+- `test-install` is QEMU-only (`-DPOPCORN_TEST_INSTALL` + Rust feature `qemu-install-selftest`), writes `target/UNSAFE/UNSAFE-*.img`, then rebuilds a safe `popcorn-uefi.img`. Blocked from the Windows GUI / `win.ps1`.
+- Extra OVMF code/vars search paths; `core.sh` executable bit; GitHub Actions `test-uefi` smoke (UEFI + GRUB + `#PF` dump).
+- Windows: `scripts/win.ps1`, `gui-win.py`, `run-uefi-windows.cmd`. WSL bash gets LF scripts (fixes `set: pipefail` on CRLF), unsets `POPCORN_CFLAGS`, never attaches the Windows disk.
+
+---
+
+### Kernel architecture (C / asm)
+
+- Split `kernel.c` into `shell.c`, `idt.c`, `irq.c`, `kbd.c`, `device.c`, `exception.c`, `phase2_selftest.c`, thinned `kmain`.
+- Central IRQ table: `irq_register` / `irq_enable` / `irq_disable`; unexpected/spurious accounting.
+- Scheduler: wait queues, `SYS_SLEEP` / `SYS_YIELD`, IRQ wake, bootstrap guard, shared task pool.
+- Device fd bridge: `SYS_OPEN` / `READ` / `WRITE` / `IOCTL` go through `dev_*` (Phase 2).
+- Diagnosable exceptions: `#PF` / `#GP` / `#DF` dump CR2 / error / RIP on COM1, then halt; `test-pf` QEMU check.
+- PMM bitmap tracks up to 16 GiB; QEMU RAM 4 GiB; process PML4 clones kernel upper half; 2 MiB PDE splitter for 4K overlays (`vmm_map_4k`).
+- `sys_fork` memory copy fixes; syscall registration cleaned (real fd/dev/time/heap/cwd vs stubs).
+- Timer: UEFI poll mode vs GRUB IRQ PIT; `irq_quiet` so USB BOT does not run the scheduler mid-transfer.
+
+---
+
+### PIC (roadmap-UTD §2.1)
+
+- Master ICW3 `0x04`, slave ICW3 `0x02` (cascade IRQ2).
+- `io_wait()` between PIC init commands.
+- Unmask master IRQ2 when enabling IRQ8–15.
+- Slave-before-master EOI; spurious IRQ7 / IRQ15 handling.
+
+---
+
+### Rust driver network, catalog, and pops
+
+- `no_std` crate with `build-std`, large code model, panic → halt.
+- Registry: `device` / `driver` / `class` / `dma` / `irq` / `io`; in-kernel **catalog** (`catalog` shell command).
+- Backends: VGA `/dev/tty0`, GOP `/dev/fb0`, serial, null, zero, PIT clock, **CMOS RTC**, meminfo, cpuinfo, kbd.
+- Bus: PCI multi-bus walk (devices behind PCIe bridges).
+- USB: xHCI + USB MSC BOT.
+- Block: ramdisk, virtio-blk (multi-device), NVMe, USB MSC.
+- All pops moved to Rust (`pops/`): Shimjapii, Spinner, Uptime, Memory, CPU, Sysinfo, Dolphin. C `filesystem_pop` **removed** (replaced by FAT32 on a selected disk).
+- `console_ffi` for pops (color print, `CursorGuard`); C console remains the UX client of Rust screen backends.
+- Keyboard: Rust `/dev/kbd`; C PS/2 poll/queue removed; shift / caps lock; `drive -load kbd`.
+
+---
+
+### Storage, FAT32, and install safety
+
+- FAT32 on the selected block device (OEM `POPCORN `, UEFI layout). `ls` / `write` / `read` / `mkdir` / `go` talk to that volume — not the old in-memory FS pop.
+- Shell: `disk -list|-use|-info|-read|-write|-wipe|-install|-master`.
+- **`disk install <name> YES`**: stage `BOOTX64.EFI` + `KERNEL` from a USB/virtio boot volume into RAM, format the **target**, write the UEFI layout. Staging **never reads Internal/NVMe** (leftover Popcorn on NVMe must not poison a USB).
+- **`disk wipe`**: FAT32 format without copying boot files.
+- **NVMe/internal writes stay off** until `disk master <name> YES` (this boot only). Install/wipe/selftest do not flip that gate. NVMe `WRITE_ENABLED` starts false.
+- Boot does **not** auto-install on hardware. Selftest requires compile-time flag **and** CPUID hypervisor **and** QEMU fw_cfg signature `"QEMU"`.
+- Flash kernel/img are grepped so `rust_test_disk_install` / `install-selftest` cannot land in `popcorn-uefi.img`.
+- Hardware soak: storage retention and USB install on real machines; PIC + xHCI quiet sections for BOT transfers.
+
+---
+
+### Shell and clock
+
+- Dash-style subsets: `cl -help|-gettime`, `mem -map|-use|-stats`, `cpu -info|-hz`, `disk -…`, `drive -…`, `dev -list`, `catalog -list`, `mon -…`, `wrap -on|-off`.
+- `cl -gettime` reads CMOS RTC (local date/time) via the Rust clock backend.
+- `uptime` / `timer` still report PIT ticks.
+
+---
+
+### Documentation and process
+
+- `readme.md` retargeted to v0.7 and `scripts/core.sh`.
+- `roadmap.md` Phase 1–3 coding gates; language-split policy (new drivers in Rust).
+- `roadmap-UTD.md` added (hardware/ABI checklist; PIC 2.1 and RTC marked done).
+- `pop.md` updated for Rust pops.
+
+---
+
+### Merges included in this period
+
+| Merge | Subject |
+|------|---------|
+| `a687b08` | Merge branch `1.6` — build script cleanup and repo structure tidy-up |
+| `bc425a3` | Merge pull request **#10** from `knivier/rust-testing` |
+| `2abe458` | Merge `rust-testing`: include new roadmap-aigen |
+| `e944ef4` | Merge pull request **#11** from `knivier/phaser-01-9` |
+
+---
+
+### Full commit appendix (chronological)
+
+*Range:* `caa4e17c4b078836cefd7137fb0970e485a929bc..HEAD` (exclusive of tag `0.6`; oldest → newest)
+
+| Commit | Date | Author | Subject |
+|--------|------|--------|---------|
+| `d25160c` | 2026-06-02 | Knivier | massive cleanup |
+| `a687b08` | 2026-06-02 | Knivier | Merge branch '1.6' — build script cleanup and repo structure tidy-up |
+| `cb97efe` | 2026-06-03 | Knivier | Add UEFI native boot path and fix framebuffer console on no-CSM hardware. |
+| `03f5462` | 2026-06-03 | Knivier | Fix UEFI post-shell reboot and unify build under core.sh |
+| `daf7f32` | 2026-09-22 | Knivier | Add UEFI input handling to build process and improve memory copy in sys_fork |
+| `49fabef` | 2026-10-02 | Knivier | rmp updates |
+| `41ffe39` | 2026-10-02 | Knivier | Cleanup |
+| `d528b6d` | 2026-10-02 | Knivier | IRQ table, #PF tests, scheduler sleep/wake, device syscalls, boot stability |
+| `37397c3` | 2026-10-03 | Knivier | Test rust script, autolaunch tigervnc on windows |
+| `70eb444` | 2026-10-03 | Knivier | Cleanups en masse, phase 2 goes thru sys_ioctl, cl runs single step, dead code removal |
+| `6acad5f` | 2026-10-03 | Knivier | massive reformation of popcorn into a significantly more layered monolithic kernel. Split Shell, ekbyard, and IDT apart and thnned the kernel.c file. |
+| `117ea14` | 2026-10-03 | Knivier | scrollback with better bootscreen and proper resolution systems |
+| `0dcf8bb` | 2026-10-03 | Knivier | Pop modules converted into Rust for many exmaplers with callbacks for pop modules calling drivers. |
+| `47e6ab1` | 2026-10-03 | Knivier | Refactor keyboard handling to utilize Rust-based `/dev/kbd` device operations. |
+| `50e1d8f` | 2026-10-03 | Knivier | Update roadmap and system call implementation; refine console interactions and Rust integration. |
+| `3c69087` | 2026-10-03 | Knivier | Enhance memory management and virtual memory system; QEMU 4 GiB; PMM ≤16 GiB; process PML4; PDE splitter. |
+| `e3278d6` | 2026-10-03 | Knivier | Disk management, multi-virtio, keyboard shift/caps, QEMU data disks. |
+| `86f18d3` | 2026-10-03 | Knivier | Replace in-memory filesystem pop with Rust FAT32 on selected block devices. |
+| `08218af` | 2026-10-05 | Knivier | Multiboot2 64-bit memory upper; PCI multi-bus; FAT32/USB MSC error output. |
+| `216661c` | 2026-10-05 | Knivier | Change script permissions for core.sh to make it executable |
+| `124bd4b` | 2026-10-05 | Knivier | Add additional OVMF code and vars paths to find_edk_code and ensure_ovmf_vars functions |
+| `7dad8b4` | 2026-10-05 | Knivier | Safety bound check for test case |
+| `bc425a3` | 2026-10-05 | Knivier | Merge pull request #10 from knivier/rust-testing |
+| `b8f783d` | 2026-10-05 | Knivier | new roadmap-aigen |
+| `2abe458` | 2026-10-06 | Knivier | Merge rust-testing: include new roadmap-aigen |
+| `88cf1ce` | 2026-10-06 | Knivier | Working-storage retention on real hardware |
+| `7354507` | 2026-10-06 | Knivier | Working safeguarded storage retention with installation available for popcorn to be written onto drives and booted from there from an installation copy with master locks |
+| `9a61fb0` | 2026-10-06 | Knivier | PIC Cleanup complete, posted on readme |
+| `e944ef4` | 2026-10-07 | Knivier | Merge pull request #11 from knivier/phaser-01-9 |
+| `afb7e89` | 2026-10-07 | Knivier | RTC rdmp upd |
+| `9ef5a25` | 2026-10-07 | Knivier | RTC/CMOS data pulling on driver with cl -subset commands, organised subset shell commands with dash type command architecture |
+| `c75c1cc` | 2026-10-07 | Knivier | Update readme.md |
+| `5ccd04d` | 2026-10-07 | Knivier | rename 0.7 |
+| `6946c6c` | 2026-10-07 | Knivier | Update roadmap-UTD.md: define constant version number for popcorn and mark RTC data fetching as complete |
+| `b390c6a` | 2026-10-07 | Knivier | Update roadmap-UTD.md: revise suggested names for ABI pipelines and enhance clarity on access levels |
+| `5dd94a2` | 2026-10-07 | Knivier | optimisations and cleanups |
+| `998ce84` | 2026-10-07 | Knivier | Allowed proper build systems on windows |
+
+---
+
+### Notes for readers upgrading from 0.6
+
+- **Flash only** `target/popcorn-uefi.img` from `./scripts/core.sh all` (or `scripts/win.ps1 all`). Never flash `target/UNSAFE/*`. Never run `test-install` and then Etcher that image.
+- Boot must show the UEFI loader and a **shell with no automatic install**. USB install is `disk install usb0 YES`. NVMe writes require `disk master nvme0 YES` first.
+- In the shell, clock is `cl -gettime` (not a `clock` command). Also `uptime` and `timer`.
+- This changelog is from **git history** `0.6..HEAD` (37 commits, ~173 files, +21k/−7k lines). Commit subjects are copied as recorded.
+
 ---
 
 ## [0.5.0] — 2025-10-17 to 2026-03-10

@@ -1,4 +1,4 @@
-The core idea is that each "pop" is a module that can register itself with the kernel. Here's how it works in Popcorn v0.5 / v0.7:
+The core idea is that each "pop" is a module that records itself in the kernel's pop catalog. Here's how it works in Popcorn v0.7:
 
 **Rust pops (v0.7):** All pops (Shimjapii, Spinner, Uptime, Memory, CPU, Sysinfo, Dolphin) live in `src/rust/popcorn_kernel/src/pops/`. They export the same `PopModule` C ABI and register via `rust_pops_register()`. Prefer `console_ffi` helpers (`print`, `println_color`, `error`, `CursorGuard`) over raw VGA writes.
 
@@ -25,14 +25,13 @@ static int module_count = 0;            // Keep track of how many we have
    - Each pop must save and restore the console state (cursor position, color)
 
 4. To add a new pop, you:
-   - Create a new .c file (like beep_pop.c)
-   - Include console.h and utils.h
-   - Write your pop function with proper cursor save/restore
-   - Define a PopModule structure
-   - Register it in kmain() using register_pop_module()
-   - Add the .c file to `scripts/lib/kernel.sh` and the Python builders in `scripts/popcorn_build/`
+   - Preferred: create a new Rust module in src/rust/popcorn_kernel/src/pops/ (like uptime.rs) that defines a `#[no_mangle]` PopModule static (C ABI from crate::abi), and add `mod <name>;` to pops/mod.rs
+   - Use console_ffi helpers (print, println_color, CursorGuard) for output and cursor save/restore
+   - Register it by adding a register_pop_module(...) line to pop_register_all() in src/rust/popcorn_kernel/src/pops/registry.rs (called at boot via init_show_modules() -> rust_pops_register() in src/core/init.c), not in kmain()
+   - Rust pops need no build-script change; they build with the Rust crate
+   - Legacy C pop (none remain, but the same PopModule ABI still works): include console.h and utils.h, write the function with cursor save/restore, define a PopModule, and add a `compile_c` line for the .c file to `scripts/lib/kernel.sh` (the Python builders in `scripts/popcorn_build/` only wrap `scripts/core.sh` and need no change)
 
-For example, if you wanted to add a new "beep" pop, you could create beep_pop.c:
+For example, if you wanted to add a new "beep" pop as a C pop, you could create beep_pop.c:
 ```c
 #include "includes/pop_module.h"
 #include "includes/console.h"
@@ -68,22 +67,22 @@ const PopModule beep_module = {
 };
 ```
 
-Then in kernel.c, just add:
+Then record it in the catalog from init_show_modules() in src/core/init.c, which already declares register_pop_module as extern. For a Rust pop, add a line to pop_register_all() in src/rust/popcorn_kernel/src/pops/registry.rs instead. Registration alone never runs the pop, so also call beep_pop_func from the shell command or drive that should show it:
 ```c
 extern const PopModule beep_module;
-register_pop_module(&beep_module);
+register_pop_module(&beep_module);   /* inside init_show_modules() */
 ```
 
 When the kernel runs:
 1. It boots up and initializes the console system
-2. During initialization, modules register themselves
-3. Pops can be called at any time to display information
+2. During initialization, init_show_modules() calls rust_pops_register(), which registers every pop centrally via register_pop_module() (see src/rust/popcorn_kernel/src/pops/registry.rs)
+3. Pops are not run through the catalog: registration only records them, and each pop's behavior comes from its own exported helpers, called from shell commands, drives and the Dolphin editor (the registered pop_function entry point is never called)
 4. Each pop saves the cursor state, displays its content, then restores the cursor
 
 The system is designed so:
-- New pops can be added without changing existing code
+- Adding a pop means declaring it in pops/mod.rs, registering it in pops/registry.rs, and calling it from a shell command or drive (the registry does not run pops); other pops never need to change
 - Each pop can have its own styling (colors, messages, positions)
-- Pops are executed in registration order
+- Registration only records a pop in the catalog (capped at 10 entries); the catalog is never iterated, so pops run from their own call sites, not in registration order
 - The console system handles all screen management automatically
 - Cursor save/restore prevents pops from interfering with user input
 - Shared utilities (like util_delay) reduce code duplication

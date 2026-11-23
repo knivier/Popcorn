@@ -2,8 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    # prod is the default branch; commits land there directly.
+    branches: [prod]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   build-and-test:

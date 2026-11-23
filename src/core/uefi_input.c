@@ -67,8 +67,11 @@ bool uefi_input_available(void) {
         return false;
     }
     volatile PopcornUefiBootInfo* h = handoff();
+    /* ConIn is a Boot Services protocol: calling it after ExitBootServices is UB.
+     * The loader zeroes boot_services (and these flags) once it exits, so this path
+     * is only live if a loader ever hands off with Boot Services still up. */
     return h && (h->flags & POPCORN_UEFI_FLAG_FIRMWARE_KBD) && h->conin != 0 &&
-           h->firmware_cr3 != 0;
+           h->firmware_cr3 != 0 && h->boot_services != 0;
 }
 
 static uint64_t firmware_call_read_key(volatile PopcornUefiBootInfo* h, EFI_INPUT_KEY* key) {
@@ -114,7 +117,7 @@ static uint8_t scan_to_ps2(uint16_t scan) {
         case 0x0009: return 0x49;
         case 0x000A: return 0x51;
         case 0x0008: return 0x53;
-        case 0x0017: return 0x1C;
+        case 0x0017: return 0x01; /* SCAN_ESC -> set-1 Esc (0x1C is Enter) */
         default: return 0;
     }
 }

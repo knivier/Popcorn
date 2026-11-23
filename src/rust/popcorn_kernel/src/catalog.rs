@@ -70,7 +70,7 @@ pub fn publish(kind: u8, name: &str, class_name: &str, state: u8, id: u32) {
     fill_name(&mut e.name, name);
     fill_name(&mut e.class_name, class_name);
     t.push(e);
-    INIT.store(true, Ordering::Release);
+    /* INIT is owned by init() (seed guard); publishing must not set it. */
 }
 
 pub fn publish_drive(name: &str, class_name: &str, ready: bool, id: u32) {
@@ -196,7 +196,6 @@ pub fn seed_pops() {
         "Memory",
         "CPU",
         "Sysinfo",
-        "Filesystem",
         "Dolphin",
     ];
     for (i, name) in POPS.iter().enumerate() {
