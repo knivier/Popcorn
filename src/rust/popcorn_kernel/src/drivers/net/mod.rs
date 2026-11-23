@@ -128,4 +128,26 @@ pub trait NetDevice {
     /// Return completed TX buffers to the free pool.
     fn reap_tx(&mut self, budget: usize) -> usize;
     fn stats(&self) -> NetStats;
+
+    // ---- Hybrid interrupt + poll (M2). Defaults describe a polled device. ----
+
+    /// "poll", or e.g. "msix" when completions can raise an interrupt.
+    fn irq_mode(&self) -> &'static str {
+        "poll"
+    }
+    /// Before the CPU idles: request an RX interrupt, then re-check. Returns true
+    /// if work raced in (do not sleep; pump again). Polled devices return false
+    /// and are simply polled on the next pass.
+    fn idle_arm(&mut self) -> bool {
+        false
+    }
+    /// After waking: consume the interrupt (if any) and stop further interrupts
+    /// while the pump drains the queue. Returns true if an interrupt had arrived.
+    fn wake_disarm(&mut self) -> bool {
+        false
+    }
+    /// Interrupts delivered so far (0 for polled devices).
+    fn irq_count(&self) -> u64 {
+        0
+    }
 }

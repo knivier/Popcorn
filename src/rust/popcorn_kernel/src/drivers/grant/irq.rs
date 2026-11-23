@@ -51,11 +51,29 @@ pub enum IrqSource {
 pub struct IrqHandle {
     vector: u8,
     source: IrqSource,
+    /// VA of the MSI-X entry's vector-control dword (kernel-owned table), 0 if none.
+    ctrl: usize,
 }
 
 impl IrqHandle {
     pub const fn polled() -> IrqHandle {
-        IrqHandle { vector: 0, source: IrqSource::Polled }
+        IrqHandle { vector: 0, source: IrqSource::Polled, ctrl: 0 }
+    }
+    /// Stop this source from interrupting (MSI-X vector control bit 0 = 1).
+    pub fn mask(&self) {
+        if self.ctrl != 0 {
+            unsafe { core::ptr::write_volatile(self.ctrl as *mut u32, 1) };
+        }
+    }
+    /// Allow this source to interrupt again.
+    pub fn unmask(&self) {
+        if self.ctrl != 0 {
+            unsafe { core::ptr::write_volatile(self.ctrl as *mut u32, 0) };
+        }
+    }
+    /// Pending without consuming it.
+    pub fn is_pending(&self) -> bool {
+        !self.is_polled() && SLOTS[self.vector as usize].pending.load(Ordering::Acquire) != 0
     }
     pub fn is_polled(&self) -> bool {
         self.source == IrqSource::Polled
@@ -86,6 +104,7 @@ impl IrqHandle {
 impl Drop for IrqHandle {
     fn drop(&mut self) {
         if !self.is_polled() {
+            self.mask();
             free_vector(self.vector);
         }
     }
@@ -108,9 +127,10 @@ pub fn alloc_vector(owner: &'static str) -> Option<u8> {
     None
 }
 
-/// Bind an allocated vector to a source (the grant layer programs the MSI-X entry).
-pub(in crate::drivers) fn handle_for(vector: u8, source: IrqSource) -> IrqHandle {
-    IrqHandle { vector, source }
+/// Bind an allocated vector to a source (the grant layer programs the MSI-X entry
+/// and passes the entry's vector-control address).
+pub(in crate::drivers) fn handle_for(vector: u8, source: IrqSource, ctrl: usize) -> IrqHandle {
+    IrqHandle { vector, source, ctrl }
 }
 
 fn free_vector(v: u8) {

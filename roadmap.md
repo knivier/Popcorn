@@ -316,7 +316,10 @@ QEMU (`qemu_uefi_data_disk_args`, all under `target/UNSAFE/`): xHCI usb-storage 
 - [ ] MMIO BAR map hardening: UC (PWT|PCD) + `VMM_PTE_NX` for all BARs (today `map_mmio` in `drivers/dma.rs` returns the write-back direct map below 64 GiB and maps UC without NX above it; PDE splitter `vmm_split_2m_pde` already done in `vmm.c`)
 - [x] Driver framework M0 (`docs/drivers/virtio-net-review.md`): grants (`drivers/grant`), universal `Queue`, PCI caps + `PciFunction`, shared virtio layer (modern + legacy transports, `SplitQueue`), vector table + LAPIC self-IPI, `irq` / `pci -caps` / `virtio -probe`, grant lint, host unit tests; all Rust `static mut` converted to `sync.rs` locks; slab allocator
 - [x] M1: PCI driver registry, virtio-net (polled), Ethernet/ARP/IPv4/ICMP stack, `net` / `ping` (gateway 4/4 and 8.8.8.8 in QEMU)
-- [ ] M2 MSI-X hybrid, M3 UDP/DHCP/DNS (`ping google.com`), M4 virtio-blk on the framework
+- [x] M2: MSI-X hybrid interrupts (virtio-net; poll fallback, EVENT_IDX)
+- [x] M3: UDP, DHCP client, DNS resolver; `net -dhcp`, `nslookup`, `ping google.com`, `udp`
+- [x] M4: virtio-blk on the framework (modern + legacy, queue depth 16, FLUSH, MSI-X)
+- [ ] TCP (hand-written vs smoltcp decision), then HTTP; TLS for HTTPS
 - [ ] Wi-Fi W0–W5 for the target laptop's Qualcomm WCN6855 (firmware loader, MHI, QMI/WMI, scan, open-network association, WPA2, WPA3); needs plain MSI
 
 **Exit criteria:** Phase 0 inline I/O is gone from `src/core/`; `open`/`read`/`write`/`ioctl` work on `ttyS0`, `kbd`, `fb0`; QEMU reads virtio-blk sectors; PCI lists devices at boot.

@@ -52,6 +52,38 @@ pub fn irqs_enabled() -> bool {
     flags & 0x200 != 0
 }
 
+extern "C" {
+    fn timer_poll();
+    fn timer_is_poll_mode() -> bool;
+}
+
+/// Kernel service for drivers waiting on a device: sleep until the next interrupt.
+///
+/// `arm` runs with interrupts disabled; it should request a completion interrupt
+/// and return true if work already raced in (then we do not sleep). Otherwise the
+/// CPU executes `sti; hlt` as one step (sti's shadow), so an interrupt arriving
+/// right after arming still wakes it. Falls back to a short poll when interrupts
+/// are disabled or the PIT is in poll mode. Drivers never issue cli/hlt themselves.
+pub fn wait_for_interrupt(arm: impl FnOnce() -> bool) {
+    unsafe {
+        if timer_is_poll_mode() {
+            timer_poll();
+            core::hint::spin_loop();
+            return;
+        }
+        if !irqs_enabled() {
+            core::hint::spin_loop();
+            return;
+        }
+        core::arch::asm!("cli", options(nostack));
+        if arm() {
+            core::arch::asm!("sti", options(nostack));
+        } else {
+            core::arch::asm!("sti; hlt", options(nostack));
+        }
+    }
+}
+
 // ---------------------------------------------------------------- IrqSpinLock
 
 pub struct IrqSpinLock<T> {

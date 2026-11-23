@@ -19,7 +19,7 @@ pub mod csum_impl;
 #[path = "../../rust/popcorn_kernel/src/drivers/net/mod.rs"]
 pub mod netdev_impl;
 
-/// Protocol stack (`net/mod.rs` pulls in eth/arp/ipv4/icmp/iface).
+/// Protocol stack (`net/mod.rs` pulls in eth/arp/ipv4/icmp/udp/dhcp/dns/iface).
 #[allow(dead_code)]
 #[path = "../../rust/popcorn_kernel/src/net/mod.rs"]
 pub mod net_impl;
@@ -41,9 +41,17 @@ pub use crate::net_impl as net;
 #[cfg(test)]
 mod csum_tests;
 #[cfg(test)]
+mod net_dhcp_tests;
+#[cfg(test)]
+mod net_dns_tests;
+#[cfg(test)]
 mod net_fuzz_tests;
 #[cfg(test)]
+mod net_proto_fuzz_tests;
+#[cfg(test)]
 mod net_tests;
+#[cfg(test)]
+mod net_udp_tests;
 #[cfg(test)]
 mod net_wire;
 #[cfg(test)]

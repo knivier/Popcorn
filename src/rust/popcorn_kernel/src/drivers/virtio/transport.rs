@@ -47,6 +47,9 @@ pub trait Transport: Send {
     /// Modern: queue_enable = 1. Legacy: no-op (writing the PFN enabled it).
     fn enable_queue(&mut self, q: u16);
     fn notifier(&self, q: u16) -> Result<Notifier, VirtioError>;
+    /// MSI-X *table entry* for configuration-change interrupts (None = no vector).
+    /// Fails if the device reads back NO_VECTOR (0xFFFF) for a requested entry.
+    fn set_config_vector(&mut self, entry: Option<u16>) -> Result<(), VirtioError>;
     /// Read device-specific config (modern: generation-counter retry loop).
     fn read_config(&self, off: usize, out: &mut [u8]);
 }

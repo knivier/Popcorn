@@ -1,6 +1,6 @@
 # Design review: universal driver framework + virtio-net
 
-Status: **M0 and M1 done (23 Nov 2026); M2 next.** See "Progress" below for what landed and what changed against this plan. Originally: This review merges three competing drafts (performance-first, grants-first, ship-first). The grants-first structure won, and the best ideas from the other two were grafted in. Every error the reviewers flagged has been re-checked against the repo and the OASIS VIRTIO 1.2/1.3 text and fixed.
+Status: **M-series complete (M0–M4, 23 Nov 2026).** Next: the Wi-Fi track (W0–W5) for the target laptop's Qualcomm WCN6855, and TCP. See "Progress" below for what landed and what changed against this plan. Originally: This review merges three competing drafts (performance-first, grants-first, ship-first). The grants-first structure won, and the best ideas from the other two were grafted in. Every error the reviewers flagged has been re-checked against the repo and the OASIS VIRTIO 1.2/1.3 text and fixed.
 
 ## Summary
 
@@ -57,6 +57,24 @@ The review also found two problems with the starting assumptions:
 - **Exit, verified on UEFI and GRUB** (`net_m1_virtio_ping_gateway`): `net: probe ok mac 525400123456`, `net: arp 10.0.2.2 52550a000202`, `net: ping 4/4`, 3/3 with 1000-byte payloads, all 256 RX buffers reposted, an unanswered address times out. Also observed: `ping 8.8.8.8` → 3/3 (30–40 ms) through slirp from this host, so only DNS (M3) stands between this and `ping google.com`.
 - Host tests: 23 (12 new: ARP byte-exact, 20 pings across a simulated two-machine wire, off-link via gateway, ARP timeout timing, malformed IPv4 table, 200k random/mutated frames with no panic and no buffer leak, loopback).
 - Not done yet from §8 M1: the separate `test-net` verb, pcap checker and `net-selftest` build (the `test-shell` case covers the exit instead); `net -down` unconfigures the stack but keeps the device bound.
+
+**M2 (23 Nov 2026):** LAPIC + MSI-X hybrid completions.
+- `bus/msix.rs`: kernel-owned MSI-X table programming (enable with the function masked, every entry masked, physical destination = LAPIC ID, data = vector); `IrqHandle::mask/unmask/take`; `alloc_irqs` returns a reason when it falls back to polling.
+- Fix found on the way: drivers were probed before `lapic_setup_virtual_wire`, so MSI-X always fell back to polling ("no LAPIC"); the LAPIC is now set up before `rust_init`.
+- virtio-net: entry 0 = config, 1 = RX, 2 = TX (TX interrupts stay masked; TX is reaped by polling). The pump polls the used rings every pass (RAM load only); `idle_arm` unmasks + arms RX right before `hlt` (`sync::wait_for_interrupt`: arm with IF=0, then `sti; hlt` as one step), `wake_disarm` masks after waking. EVENT_IDX negotiated; NO_NOTIFY / NO_INTERRUPT path when it is not.
+- Exit, verified on UEFI and GRUB: `net: irq msix v=0x41`, interrupts > 0, ping 4/4 (gateway RTT 10 ms → 0 ms); `vectors=0` (`POPCORN_NET_VECTORS=0`) runs pure poll with 0 interrupts; `event_idx=off` (`POPCORN_NET_EVENT_IDX=off`) also passes. Harness: per-case `qemu_env`.
+
+**M3 (23 Nov 2026):** UDP / DHCP / DNS.
+- `net/{udp,dhcp,dns}.rs` + `iface.rs`: UDP with pseudo-header checksums, 8 sockets, echo service; DHCP client (DORA, NAK restart, backoff, renew at T1 / rebind at T2 / expiry, static fallback after 3 s per Q12, gratuitous ARP after binding); DNS A resolver (2 s × 2, compression and CNAME chains, loop/bounds protection, 8-entry TTL cache, dotted-quad shortcut). `Iface` is ~29 KiB.
+- Commands: `net -dhcp`, `nslookup <name>`, `ping <name>`, `udp -send <host> <port> <text>`, `udp -echo <port>`; `net -stats` prints grouped stack counters.
+- Exit, verified on UEFI and GRUB: `net: dhcp 10.0.2.15 gw 10.0.2.2 dns 10.0.2.3`; `nslookup google.com` resolves (to what the host's own resolver returns); `ping google.com` 3/3; host → guest UDP echo through QEMU `hostfwd` (per-lane host port 45550+lane; harness step `host_udp`). NXDOMAIN through QEMU surfaces as a timeout on this host because WSL's DNS proxy drops unresolvable names; the NXDOMAIN parser path is covered by host tests. Cases that need real DNS are marked `needs_internet` (`test-shell --offline` skips them).
+- Host tests: 50 in total (27 for M3 incl. DHCP against a fake server, DNS against a fake resolver, 350k fuzzed frames/buffers, gratuitous ARP once per lease).
+
+**M4 (23 Nov 2026):** virtio-blk on the framework.
+- `drivers/virtio/blk.rs` replaces the old legacy driver; `block/virtio_blk.rs` is a re-export shim (same API + `read_many`, `write_many`, `flush`). Slot N = Nth transitional virtio-blk (names unchanged; the modern-only test disk stays free for `virtio -probe`).
+- Modern or legacy transport per device (legacy config offset 20/24 handled by MSI-X state); 256-entry `SplitQueue`; up to 16 requests in flight through 4 KiB bounce slots; tick-based 5 s timeout → device reset + pool poisoned + disk marked dead; MSI-X request vector (task sleeps on `hlt` while waiting); RO honoured; FLUSH after `disk -install` / `disk -wipe`. FAT32 cluster reads/writes use the multi-sector path (`read_selected_many` / `write_selected_many`, head/tail guard preserved).
+- Exit, verified on UEFI and GRUB with both transports (`POPCORN_BLK_DISABLE_MODERN=off` for modern): all disk/FAT32/install/persistence cases pass on the new driver; `virtio -blk -verify` reaches queue depth 16 and matches single-sector reads byte for byte; FLUSH issued; lint finds no raw I/O under `drivers/virtio/`.
+- Also from §10: the NIC is attached on every launcher (`run-uefi`, `run` (GRUB), the GRUB smoke, the shell tests, the GUI runner) with `POPCORN_QEMU_NET=off` to remove it; `bootindex=0` on the USB stick.
 
 ### Locked decisions (not reopened here)
 

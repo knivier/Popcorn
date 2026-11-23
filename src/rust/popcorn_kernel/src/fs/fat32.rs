@@ -578,9 +578,13 @@ impl Fat32 {
         if out.len() < need || !self.valid_cluster(cluster) {
             return Err(FsError::Io);
         }
+        // One multi-sector request: virtio disks keep several requests in flight.
         let base = self.cluster_lba(cluster);
-        for i in 0..self.spc as u64 {
-            rd(base + i, &mut out[(i as usize) * 512..(i as usize + 1) * 512])?;
+        if self.disk != block::selected_id() {
+            return Err(FsError::NotMounted);
+        }
+        if block::read_selected_many(base, &mut out[..need]) < 0 {
+            return Err(FsError::Io);
         }
         Ok(())
     }
@@ -592,8 +596,17 @@ impl Fat32 {
         /* No heap: large-cluster Vec allocs during install exhausted the block
          * table / fragmented under IRQ and contributed to hard resets. */
         let base = self.cluster_lba(cluster);
+        if self.disk != block::selected_id() {
+            return Err(FsError::NotMounted);
+        }
+        // Whole sectors straight from `data` in one multi-sector request; the
+        // partial tail and the unused rest of the cluster are zero-padded.
+        let full = (data.len() / 512).min(self.spc as usize);
+        if full > 0 && block::write_selected_many(base, &data[..full * 512]) < 0 {
+            return Err(FsError::Io);
+        }
         let mut sec = [0u8; 512];
-        for i in 0..self.spc as u64 {
+        for i in full as u64..self.spc as u64 {
             sec.fill(0);
             let off = (i as usize) * 512;
             if off < data.len() {

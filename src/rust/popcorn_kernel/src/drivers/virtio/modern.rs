@@ -13,7 +13,6 @@ const DEVICE_FEATURE_SELECT: usize = 0x00;
 const DEVICE_FEATURE: usize = 0x04;
 const DRIVER_FEATURE_SELECT: usize = 0x08;
 const DRIVER_FEATURE: usize = 0x0C;
-#[allow(dead_code)]
 const CONFIG_MSIX_VECTOR: usize = 0x10;
 const NUM_QUEUES: usize = 0x12;
 const DEVICE_STATUS: usize = 0x14;
@@ -163,6 +162,14 @@ impl Transport for ModernTransport {
         self.common.w16(QUEUE_SELECT, q);
         let off = self.common.r16(QUEUE_NOTIFY_OFF) as usize * self.notify_mult as usize;
         Ok(Notifier::Mmio { region: self.notify.sub(off, 2).map_err(|_| VirtioError::BadCaps)? })
+    }
+    fn set_config_vector(&mut self, entry: Option<u16>) -> Result<(), VirtioError> {
+        let v = entry.unwrap_or(0xFFFF);
+        self.common.w16(CONFIG_MSIX_VECTOR, v);
+        if entry.is_some() && self.common.r16(CONFIG_MSIX_VECTOR) != v {
+            return Err(VirtioError::VectorRejected);
+        }
+        Ok(())
     }
     fn read_config(&self, off: usize, out: &mut [u8]) {
         let Some(dev) = &self.device else {

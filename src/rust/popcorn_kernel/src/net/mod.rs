@@ -1,4 +1,5 @@
-//! Network protocol stack (Ethernet II, ARP, IPv4, ICMP echo).
+//! Network protocol stack (Ethernet II, ARP, IPv4, ICMP echo, UDP, DHCP client,
+//! DNS stub resolver).
 //!
 //! Pure `core`: no heap, no `static mut`, no FFI, no asm. The only hardware view is
 //! the `crate::drivers::net::NetDevice` trait, passed per call; `Iface` owns only
@@ -8,24 +9,41 @@
 //! malformed frames are counted in `StackStats` and dropped.
 
 pub mod arp;
+pub mod dhcp;
+pub mod dns;
 pub mod eth;
 pub mod icmp;
 pub mod iface;
 pub mod ipv4;
+pub mod udp;
 
-pub use iface::{Iface, IpConfig, NetError, StackStats};
+pub use dns::DnsError;
+pub use iface::{DhcpState, Iface, IpConfig, NetError, QueryId, SockId, StackStats};
+
+/// Line buffer size: fits `net: dns <253-char name> fail <reason>`.
+const LINE_MAX: usize = 320;
+
+/// 32-bit integer mixer (murmur3 finaliser) for xids, DNS ids and ephemeral ports.
+/// Not cryptographic: callers supply the entropy as a seed.
+#[inline]
+pub fn mix32(x: u32) -> u32 {
+    let mut z = x.wrapping_add(0x9E37_79B9);
+    z = (z ^ (z >> 16)).wrapping_mul(0x85EB_CA6B);
+    z = (z ^ (z >> 13)).wrapping_mul(0xC2B2_AE35);
+    z ^ (z >> 16)
+}
 
 use core::fmt;
 
 /// Fixed-size line buffer for log messages (never allocates; truncates silently).
 pub struct LineBuf {
-    buf: [u8; 96],
+    buf: [u8; LINE_MAX],
     len: usize,
 }
 
 impl LineBuf {
     pub const fn new() -> LineBuf {
-        LineBuf { buf: [0; 96], len: 0 }
+        LineBuf { buf: [0; LINE_MAX], len: 0 }
     }
     pub fn as_str(&self) -> &str {
         let end = self.len.min(self.buf.len());

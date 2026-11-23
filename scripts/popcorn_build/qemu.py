@@ -187,6 +187,13 @@ class QemuRunner:
                 cmd += ["-display", cfg.display]
             if cfg.boot_from_cd:
                 cmd += ["-boot", "d"]
+            # Same NIC as scripts/lib/qemu-uefi.sh qemu_net_args: virtio-net (modern,
+            # MSI-X) on QEMU user networking; POPCORN_QEMU_NET=off for none.
+            if os.environ.get("POPCORN_QEMU_NET", "user") != "off":
+                cmd += [
+                    "-netdev", "user,id=pnet0,ipv6=off",
+                    "-device", "virtio-net-pci,netdev=pnet0,id=pnic0,mac=52:54:00:12:34:56,disable-legacy=on,romfile=",
+                ]
             return cmd
 
         def start_or_raise(cmd: list[str]) -> tuple[int, str]:

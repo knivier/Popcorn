@@ -78,6 +78,36 @@ pub extern "C" fn rust_pci_caps() {
     crate::drivers::bus::pci::scan_caps_print();
 }
 
+/// `virtio -blk`
+#[no_mangle]
+pub extern "C" fn rust_virtio_blk_info() {
+    let mut any = false;
+    crate::drivers::virtio::blk::info_lines(|l| {
+        any = true;
+        println_color(l, COLOR_WHITE);
+    });
+    if !any {
+        println_color("virtio-blk: no disks bound", COLOR_WHITE);
+    }
+}
+
+/// `virtio -blk -verify`
+#[no_mangle]
+pub extern "C" fn rust_virtio_blk_verify() {
+    let mut l = LineBuf::new();
+    match crate::drivers::virtio::blk::verify(0, 128) {
+        Ok(depth) => {
+            let _ = write!(l, "virtio-blk: verify slot 0 128 sectors ok depth {}", depth);
+        }
+        Err(e) => {
+            let _ = write!(l, "virtio-blk: verify slot 0 fail ({})", e);
+        }
+    }
+    println_color(l.as_str(), COLOR_WHITE);
+    let mut out = crate::Com1;
+    let _ = writeln!(out, "{}", l.as_str());
+}
+
 /// `virtio -probe`
 #[no_mangle]
 pub extern "C" fn rust_virtio_probe() {

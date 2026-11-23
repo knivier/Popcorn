@@ -15,11 +15,18 @@ Case file (JSON): a list of
    "shard_start": bool (optional; the case sets up its own disks, so it and
                   the cases after it can run on a separate guest),
    "quick": bool (optional; part of the --quick smoke tier),
+   "needs_internet": bool (optional; skipped with --offline, e.g. real DNS),
+   "qemu_env": {VAR: value} (optional; extra environment for the QEMU boot this
+                case starts, e.g. {"POPCORN_NET_VECTORS": "0"} — only meaningful on
+                a case that boots: the first of a shard, or fresh_boot),
    "steps": [{"send": str, "expect": regex, "reject": regex,
               optional: "timeout": s, "delay_before": s, "enter": bool,
               "allow_exit": bool, "record": {name: regex-with-one-group},
               "input": "ps2" (type this step through HMP sendkey even in
-              serial input mode, to exercise the PS/2 scancode path)}]}
+              serial input mode, to exercise the PS/2 scancode path),
+              "host_udp": "text" (instead of typing: send this datagram from the
+              host to the guest's UDP port 5555 through QEMU's hostfwd and record
+              "[host-udp] reply: <text>" or "[host-udp] no reply" as the output)}]}
 
 `send` syntax:
   * plain text is typed, then Enter is pressed ("" = Enter alone)
@@ -210,9 +217,14 @@ class Lane:
                       u / f"UNSAFE-lane{lane_id}-qemu-modern.img"]
         self.ovmf_vars = u / f"UNSAFE-lane{lane_id}-shell-ovmf-vars.fd"
 
+    def udp_port(self) -> int:
+        """Host port forwarded to guest UDP 5555 for this lane (unique per lane)."""
+        return 45550 + self.id
+
     def env(self) -> dict:
         env = dict(os.environ)
         env.update({
+            "POPCORN_NET_HOSTFWD_UDP": str(self.udp_port()),
             "RUNTIME_DIR": str(self.dir),
             "QEMU_PIDFILE": str(self.pidfile),
             "DATA_IMG": str(self.disks[0]),
@@ -292,7 +304,9 @@ class Monitor:
 class Guest:
     """One QEMU boot: COM1 capture file + HMP monitor."""
 
-    def __init__(self, mode: str, args, allow_reboot: bool, log_name: str, lane: Lane):
+    def __init__(self, mode: str, args, allow_reboot: bool, log_name: str, lane: Lane,
+                 qemu_env: dict | None = None):
+        self.qemu_env = dict(qemu_env or {})
         self.mode = mode
         self.args = args
         self.allow_reboot = allow_reboot
@@ -340,6 +354,7 @@ class Guest:
             "SHELL_SERIAL_SOCK": str(self.serial_sock_path) if self.args.input != "ps2" else "",
             "SHELL_ALLOW_REBOOT": "1" if self.allow_reboot else "0",
         })
+        env.update({k: str(v) for k, v in self.qemu_env.items()})
         sub = "_shell-boot-uefi" if self.mode == "uefi" else "_shell-boot-grub"
         r = subprocess.run([str(CORE), sub], cwd=ROOT, env=env,
                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -687,11 +702,29 @@ def check_step(step: dict, out_norm: str, out_raw: str, how: str) -> tuple[str, 
     return "pass", ""
 
 
+def host_udp_roundtrip(g: Guest, payload: str, timeout: float) -> str:
+    """Send `payload` to the guest's UDP 5555 via QEMU hostfwd; wait for the echo."""
+    data = payload.encode()
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.settimeout(0.5)
+        end = time.time() + timeout
+        while time.time() < end:
+            s.sendto(data, ("127.0.0.1", g.lane.udp_port()))
+            try:
+                reply, _ = s.recvfrom(2048)
+                return "[host-udp] reply: " + reply.decode(errors="replace")
+            except socket.timeout:
+                continue
+    return "[host-udp] no reply"
+
+
 def run_case(g: Guest, case: dict, args) -> dict:
     res = {"name": case["name"], "why": case.get("why", ""), "steps": [], "status": "pass"}
     t_case = time.time()
     for i, step in enumerate(case["steps"]):
         send = step.get("send", "")
+        if "host_udp" in step and not send:
+            send = f"<host-udp {step['host_udp']}>"
         rec = {"index": i, "send": send, "expect": step.get("expect", ""),
                "reject": step.get("reject", "")}
         if step.get("delay_before"):
@@ -702,6 +735,9 @@ def run_case(g: Guest, case: dict, args) -> dict:
             if send == "<REBOOT>":
                 out_raw = g.reboot()
                 how = "prompt"
+            elif "host_udp" in step:
+                out_raw = host_udp_roundtrip(g, step["host_udp"], float(step.get("timeout", 10)))
+                how = "host"
             else:
                 keys = parse_send(send, step.get("enter"))
                 settle_quiet = "ret" not in keys
@@ -783,7 +819,8 @@ def run_shard(shard: dict, lane: Lane, args) -> list[dict]:
                 if g is None:
                     allow = needs_reboot or (args.shared and any(
                         s.get("send") == "<REBOOT>" for _, c in cases[n:] for s in c["steps"]))
-                    g = Guest(mode, args, allow, f"{mode}-{idx:02d}-{case['name']}", lane)
+                    g = Guest(mode, args, allow, f"{mode}-{idx:02d}-{case['name']}", lane,
+                              case.get("qemu_env"))
                     g.start()
                 before = len(g.boot_anomalies)
                 res.update(run_case(g, case, args))
@@ -861,9 +898,11 @@ def load_cases(path: Path) -> list[dict]:
             for k in ("expect", "reject"):
                 if s.get(k):
                     re.compile(s[k])
+            if not isinstance(c.get("qemu_env", {}), dict):
+                raise HarnessError(f"{c['name']}: qemu_env must be an object")
             if s.get("input") not in (None, "ps2", "serial"):
                 raise HarnessError(f"{c['name']}: bad step input {s.get('input')!r}")
-            if s.get("send", "") != "<REBOOT>":
+            if s.get("send", "") != "<REBOOT>" and "host_udp" not in s:
                 parse_send(s.get("send", ""), s.get("enter"))
     return cases
 
@@ -939,6 +978,8 @@ def main() -> int:
                     help="QEMU guests to run at once (shards of the case list)")
     ap.add_argument("--fsck", action=argparse.BooleanOptionalAction, default=True,
                     help="after each shard, check FAT32 scratch disks with fsck.fat -n (default on)")
+    ap.add_argument("--offline", action="store_true",
+                    help="skip cases marked \"needs_internet\" (real DNS / external hosts)")
     ap.add_argument("--quick", action="store_true",
                     help="run only cases marked \"quick\": true (fast smoke tier)")
     ap.add_argument("--quiet", type=float, default=1.0,
@@ -963,6 +1004,11 @@ def main() -> int:
         return 2
     if args.quick:
         cases = [c for c in cases if c.get("quick")]
+    if args.offline:
+        skipped = [c["name"] for c in cases if c.get("needs_internet")]
+        cases = [c for c in cases if not c.get("needs_internet")]
+        if skipped:
+            print(f"--offline: skipping {len(skipped)} case(s) that need internet: {', '.join(skipped)}")
     if args.only:
         cases = [c for c in cases if re.search(args.only, c["name"])]
     if args.exclude:

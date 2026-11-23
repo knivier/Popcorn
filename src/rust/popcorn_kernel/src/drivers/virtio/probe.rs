@@ -146,13 +146,13 @@ pub fn probe_command() {
 
 /// Fixed stack buffer for formatted lines (no heap).
 pub struct LineBuf {
-    buf: [u8; 200],
+    buf: [u8; 256],
     len: usize,
 }
 
 impl LineBuf {
     pub const fn new() -> LineBuf {
-        LineBuf { buf: [0; 200], len: 0 }
+        LineBuf { buf: [0; 256], len: 0 }
     }
     pub fn as_str(&self) -> &str {
         core::str::from_utf8(&self.buf[..self.len]).unwrap_or("?")

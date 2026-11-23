@@ -664,6 +664,7 @@ pub fn install(name: &str, confirm_yes: bool) -> Result<bool, &'static str> {
         d.is_boot = true;
     }
     PENDING_INSTALL.store(usize::MAX, Ordering::Release);
+    flush_disk(idx);
     crate::console_ffi::println_color(
         "install: complete — safe to reboot from this disk",
         crate::console_ffi::COLOR_LIGHT_GREEN,
@@ -921,7 +922,18 @@ pub fn wipe(name: &str, confirm_yes: bool) -> Result<bool, &'static str> {
         d.is_boot = true; /* Popcorn volume — prefer for auto-select next time */
     }
     PENDING_WIPE.store(usize::MAX, Ordering::Release);
+    flush_disk(idx);
     Ok(true)
+}
+
+/// Ask the device to commit its write cache (virtio FLUSH); a no-op for backends
+/// without a cache command. Called after install / wipe.
+fn flush_disk(idx: usize) {
+    if let Some(d) = entry(idx) {
+        if let Backend::Virtio(i) = d.backend {
+            let _ = virtio_blk::flush(i);
+        }
+    }
 }
 
 pub fn info(buf: &mut [u8]) -> usize {
@@ -1061,6 +1073,62 @@ fn holds_foreign_data(d: &DiskView) -> bool {
         }
     }
     cache(false)
+}
+
+/// Read `buf.len() / sector_size` sectors from the selected disk. virtio disks keep
+/// several requests in flight; other backends fall back to one sector at a time.
+pub fn read_selected_many(lba: u64, buf: &mut [u8]) -> i64 {
+    let Some(d) = selected_entry() else {
+        return -4;
+    };
+    let ss = d.sector_size as usize;
+    let count = buf.len() / ss;
+    if count == 0 || (d.sectors != 0 && lba.checked_add(count as u64).map_or(true, |e| e > d.sectors)) {
+        return -2;
+    }
+    if let Backend::Virtio(i) = d.backend {
+        return virtio_blk::read_many(i, lba, &mut buf[..count * ss]);
+    }
+    for k in 0..count {
+        let rc = raw_read(&d, lba + k as u64, &mut buf[k * ss..(k + 1) * ss]);
+        if rc < 0 {
+            return rc;
+        }
+    }
+    (count * ss) as i64
+}
+
+/// Write `buf.len() / sector_size` sectors to the selected disk with the same
+/// guards as `write_selected`. Ranges touching the protected head/tail go through
+/// `write_selected` sector by sector so the foreign-data check still applies.
+pub fn write_selected_many(lba: u64, buf: &[u8]) -> i64 {
+    let Some(d) = selected_entry() else {
+        return -4;
+    };
+    if !is_writable(&d) {
+        return -5;
+    }
+    let ss = d.sector_size as usize;
+    let count = buf.len() / ss;
+    if count == 0 || (d.sectors != 0 && lba.checked_add(count as u64).map_or(true, |e| e > d.sectors)) {
+        return -2;
+    }
+    let end = lba + count as u64;
+    let touches_zone = lba < PROTECT_ZONE || (d.sectors > PROTECT_ZONE && end > d.sectors - PROTECT_ZONE);
+    if let (Backend::Virtio(i), false) = (d.backend, touches_zone && d.class != DiskClass::Ram) {
+        let rc = virtio_blk::write_many(i, lba, &buf[..count * ss]);
+        if lba < 2 {
+            foreign_set(d.idx, FOREIGN_UNKNOWN);
+        }
+        return rc;
+    }
+    for k in 0..count {
+        let rc = write_selected(lba + k as u64, &buf[k * ss..(k + 1) * ss]);
+        if rc < 0 {
+            return rc;
+        }
+    }
+    (count * ss) as i64
 }
 
 pub fn read_selected(lba: u64, buf: &mut [u8]) -> i64 {

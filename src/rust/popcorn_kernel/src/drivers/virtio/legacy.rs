@@ -106,6 +106,17 @@ impl Transport for LegacyTransport {
     fn notifier(&self, _q: u16) -> Result<Notifier, VirtioError> {
         Ok(Notifier::Port { range: self.io.sub(REG_QUEUE_NOTIFY, 2).map_err(|_| VirtioError::Grant)? })
     }
+    fn set_config_vector(&mut self, entry: Option<u16>) -> Result<(), VirtioError> {
+        if !self.msix_enabled {
+            return Ok(());
+        }
+        let val = entry.unwrap_or(0xFFFF);
+        self.io.w16(REG_CONFIG_VECTOR, val);
+        if entry.is_some() && self.io.r16(REG_CONFIG_VECTOR) != val {
+            return Err(VirtioError::VectorRejected);
+        }
+        Ok(())
+    }
     fn read_config(&self, off: usize, out: &mut [u8]) {
         let base = self.cfg_base();
         for (i, b) in out.iter_mut().enumerate() {
@@ -114,17 +125,3 @@ impl Transport for LegacyTransport {
     }
 }
 
-impl LegacyTransport {
-    /// Config MSI-X vector (only meaningful with MSI-X enabled).
-    pub fn set_config_vector(&mut self, v: Option<u16>) -> Result<(), VirtioError> {
-        if !self.msix_enabled {
-            return Ok(());
-        }
-        let val = v.unwrap_or(0xFFFF);
-        self.io.w16(REG_CONFIG_VECTOR, val);
-        if v.is_some() && self.io.r16(REG_CONFIG_VECTOR) != val {
-            return Err(VirtioError::VectorRejected);
-        }
-        Ok(())
-    }
-}

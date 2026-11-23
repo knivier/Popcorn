@@ -5,6 +5,7 @@
 //! Lint: no raw port I/O, `phys_to_virt` or `map_mmio` in this directory; all
 //! hardware access goes through grants (`scripts/lib/lint.sh`).
 
+pub mod blk;
 pub mod legacy;
 pub mod modern;
 pub mod net;

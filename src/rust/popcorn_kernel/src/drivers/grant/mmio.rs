@@ -94,6 +94,10 @@ impl MmioRegion {
     pub fn phys(&self) -> u64 {
         self.phys
     }
+    /// Kernel VA of the window (grant layer only: MSI-X entry masks).
+    pub(in crate::drivers) fn va(&self) -> usize {
+        self.base.as_ptr() as usize
+    }
     pub fn grant(&self) -> GrantId {
         self.grant
     }

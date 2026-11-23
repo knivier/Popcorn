@@ -7,16 +7,22 @@
 //!   cache-line aligned. Frames are lent zero-copy to the stack (`RxBatch`).
 //! * TX slot layout: frame written at +64 by the stack, header prepended at +52;
 //!   one descriptor of 12 + len bytes. One doorbell per `tx_flush`.
-//! * Interrupts: none yet (M2 adds MSI-X); the kernel pump polls every pass.
+//! * Interrupts (M2, hybrid): MSI-X entry 0 = config, 1 = RX, 2 = TX. The pump
+//!   polls the used rings every pass (one RAM load, no MMIO); RX interrupts only
+//!   wake the CPU from `hlt`: `idle_arm` unmasks + arms before sleeping,
+//!   `wake_disarm` masks again while the pump drains. TX interrupts stay off (TX
+//!   is reaped by polling). With EVENT_IDX, kicks and interrupts are suppressed
+//!   by index. Without MSI-X (QEMU `vectors=0`) everything is polled.
 
 use core::fmt::Write;
 
 use super::pci::{open, AnyTransport, Prefer};
 use super::transport::{Notifier, QueueAddrs, Transport};
 use super::virtqueue::{ring_bytes, Desc, RingMem, SplitQueue};
-use super::{negotiate, STATUS_DRIVER_OK, STATUS_FAILED, F_VERSION_1};
+use super::{negotiate, F_RING_EVENT_IDX, STATUS_DRIVER_OK, STATUS_FAILED, F_VERSION_1};
+use crate::drivers::bus::msix::{self, IrqSet};
 use crate::drivers::bus::pci::{self, PciFunction};
-use crate::drivers::grant::{BufSlab, DmaPool};
+use crate::drivers::grant::{BufSlab, DmaPool, IrqHandle};
 use crate::drivers::net::{NetDevice, NetStats, RxBatch, TxBuf, TxError, MAX_FRAME};
 use crate::drivers::queue::{Budget, Queue, Seg};
 use crate::sync::TaskLock;
@@ -24,7 +30,7 @@ use crate::sync::TaskLock;
 pub const F_NET_MAC: u64 = 1 << 5;
 pub const F_NET_MTU: u64 = 1 << 3;
 pub const F_NET_STATUS: u64 = 1 << 16;
-const NET_WANTED: u64 = F_VERSION_1 | F_NET_MAC | F_NET_MTU | F_NET_STATUS;
+const NET_WANTED: u64 = F_VERSION_1 | F_NET_MAC | F_NET_MTU | F_NET_STATUS | F_RING_EVENT_IDX;
 const NET_REQUIRED: u64 = F_VERSION_1;
 
 const QN: usize = 256;
@@ -53,6 +59,12 @@ pub struct VirtioNet {
     features_offered: u64,
     features_acked: u64,
     stats: NetStats,
+    rx_irq: IrqHandle,
+    tx_irq: IrqHandle,
+    cfg_irq: IrqHandle,
+    irq_wakes: u64,
+    irq_redundant: u64,
+    _irqs: IrqSet,
     // Last in the struct: dropped after the device is reset in `shutdown`.
     pool: DmaPool,
 }
@@ -78,12 +90,17 @@ pub fn probe(f: PciFunction) -> Result<(), &'static str> {
     match bring_up(f) {
         Ok(dev) => {
             com1(format_args!(
-                "net: probe ok mac {} mtu {} feat dev={:#x} acked={:#x} irq poll\n",
+                "net: probe ok mac {} mtu {} feat dev={:#x} acked={:#x} irq {}\n",
                 MacHex(dev.mac),
                 dev.mtu,
                 dev.features_offered,
-                dev.features_acked
+                dev.features_acked,
+                dev.irq_mode()
             ));
+            match dev.rx_irq.vector() {
+                Some(v) => com1(format_args!("net: irq msix v={:#04x}\n", v)),
+                None => com1(format_args!("net: irq poll\n")),
+            }
             crate::catalog::publish_device("net0", "net", 0);
             *slot = Some(dev);
             Ok(())
@@ -130,15 +147,37 @@ fn bring_up(f: PciFunction) -> Result<VirtioNet, (PciFunction, &'static str)> {
         return Err((f, "mtu above 1500 (no jumbo support yet)"));
     }
 
+    // MSI-X before any device-config-dependent work (legacy would move config 20 -> 24).
+    let mut irqs = match msix::alloc_irqs(&f, 3, "net0") {
+        Ok(s) => s,
+        Err(why) => {
+            com1(format_args!("net: msix unavailable ({}), polling\n", why));
+            IrqSet::polled()
+        }
+    };
+    let mut entries: [Option<u16>; 3] = [None; 3];
+    if !irqs.is_polled() {
+        if t.set_config_vector(Some(0)).is_ok() {
+            entries = [Some(0), Some(1), Some(2)];
+        } else {
+            // Device refused the vector: run polled, give the vectors back.
+            com1(format_args!("net: device refused MSI-X config vector, polling\n"));
+            let _ = t.set_config_vector(None);
+            msix::disable(&f);
+            irqs = IrqSet::polled();
+        }
+    }
+    let event_idx = acked & F_RING_EVENT_IDX != 0;
+
     let mut pool = DmaPool::new(f.grant(), 320);
-    let (rxq, rx_slab) = match setup_queue(t, &mut pool, 0) {
+    let (rxq, rx_slab) = match setup_queue(t, &mut pool, 0, entries[1], event_idx) {
         Ok(q) => q,
         Err(e) => {
             t.add_status(STATUS_FAILED);
             return Err((f, e));
         }
     };
-    let (txq, tx_slab) = match setup_queue(t, &mut pool, 1) {
+    let (txq, tx_slab) = match setup_queue(t, &mut pool, 1, entries[2], event_idx) {
         Ok(q) => q,
         Err(e) => {
             t.add_status(STATUS_FAILED);
@@ -147,7 +186,16 @@ fn bring_up(f: PciFunction) -> Result<VirtioNet, (PciFunction, &'static str)> {
         }
     };
 
+    let cfg_irq = irqs.take(0);
+    let rx_irq = irqs.take(1);
+    let tx_irq = irqs.take(2);
     let mut dev = VirtioNet {
+        rx_irq,
+        tx_irq,
+        cfg_irq,
+        irq_wakes: 0,
+        irq_redundant: 0,
+        _irqs: irqs,
         pci: f,
         transport,
         rxq,
@@ -177,7 +225,13 @@ fn bring_up(f: PciFunction) -> Result<VirtioNet, (PciFunction, &'static str)> {
     Ok(dev)
 }
 
-fn setup_queue(t: &mut dyn Transport, pool: &mut DmaPool, q: u16) -> Result<(NetQueue, BufSlab), &'static str> {
+fn setup_queue(
+    t: &mut dyn Transport,
+    pool: &mut DmaPool,
+    q: u16,
+    entry: Option<u16>,
+    event_idx: bool,
+) -> Result<(NetQueue, BufSlab), &'static str> {
     if (t.queue_max(q) as usize) < QN {
         return Err("queue smaller than 256");
     }
@@ -187,7 +241,7 @@ fn setup_queue(t: &mut dyn Transport, pool: &mut DmaPool, q: u16) -> Result<(Net
     let used = pool.alloc_array::<u8>(ub, 4096).map_err(|e| e.as_str())?;
     let slab = pool.slab(SLOT, QN as u16).map_err(|e| e.as_str())?;
     let addrs = QueueAddrs { desc: desc.dev(), driver: avail.dev(), device: used.dev() };
-    t.setup_queue(q, QN as u16, &addrs, None).map_err(|e| e.as_str())?;
+    t.setup_queue(q, QN as u16, &addrs, entry).map_err(|e| e.as_str())?;
     let bell = t.notifier(q).map_err(|e| e.as_str())?;
     t.enable_queue(q);
     let mem = RingMem {
@@ -198,7 +252,7 @@ fn setup_queue(t: &mut dyn Transport, pool: &mut DmaPool, q: u16) -> Result<(Net
         avail_dev: avail.dev(),
         used_dev: used.dev(),
     };
-    Ok((SplitQueue::new(mem, bell, q, false), slab))
+    Ok((SplitQueue::new(mem, bell, q, event_idx), slab))
 }
 
 impl VirtioNet {
@@ -218,13 +272,19 @@ impl VirtioNet {
     pub fn dma_pages(&self) -> u32 {
         self.pool.outstanding_pages()
     }
+    /// (rx vector or 0, interrupts that woke the pump, wakes that found nothing).
+    pub fn irq_info(&self) -> (u8, u64, u64) {
+        (self.rx_irq.vector().unwrap_or(0), self.irq_wakes, self.irq_redundant)
+    }
 
     /// Reset the device (stops all DMA), then release the PCI function. The pool
     /// is freed when the struct drops, which is only safe after the reset.
     pub fn shutdown(mut self) {
+        self.rx_irq.mask();
         if self.transport.as_dyn().reset().is_err() {
             self.pool.poison();
         }
+        msix::disable(&self.pci);
         self.pci.disable_bus_master();
         let VirtioNet { pci: f, .. } = self;
         pci::release(f);
@@ -351,6 +411,43 @@ impl NetDevice for VirtioNet {
                 *n += 1;
             }
         }) as usize
+    }
+
+    fn irq_mode(&self) -> &'static str {
+        if self.rx_irq.is_polled() {
+            "poll"
+        } else {
+            "msix"
+        }
+    }
+
+    fn idle_arm(&mut self) -> bool {
+        if self.rx_irq.is_polled() {
+            return false;
+        }
+        self.rx_irq.unmask();
+        // arm(): request an interrupt (used_event / flags), full fence, re-check.
+        self.rxq.arm()
+    }
+
+    fn wake_disarm(&mut self) -> bool {
+        if self.rx_irq.is_polled() {
+            return false;
+        }
+        let fired = self.rx_irq.take();
+        self.rx_irq.mask();
+        self.rxq.disarm();
+        if fired {
+            self.irq_wakes += 1;
+            if self.rxq.pending() == 0 {
+                self.irq_redundant += 1;
+            }
+        }
+        fired
+    }
+
+    fn irq_count(&self) -> u64 {
+        self.rx_irq.count() + self.tx_irq.count() + self.cfg_irq.count()
     }
 
     fn stats(&self) -> NetStats {

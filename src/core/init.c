@@ -352,6 +352,9 @@ void init_transition_to_console(void) {
     console_println_color("Welcome to Popcorn Kernel!", CONSOLE_SUCCESS_COLOR);
     console_newline();
     /* After clear so "Rust active" stays on the interactive console. */
+    /* LAPIC virtual wire before the Rust drivers probe: MSI-X needs the LAPIC (and
+     * its ID) to program vectors. Interrupts are still off; nothing fires yet. */
+    lapic_setup_virtual_wire();
     rust_init();
 #if defined(POPCORN_TEST_INSTALL)
     {
@@ -404,7 +407,6 @@ void init_transition_to_console(void) {
      * put the LAPIC in virtual-wire mode first so PIC interrupts reach the CPU. If IRQ0
      * still never fires, fall back to polling the PIT (cooperative scheduling only).
      */
-    lapic_setup_virtual_wire();
     pic_acknowledge_pending();
     timer_enable();
     {

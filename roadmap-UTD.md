@@ -1247,7 +1247,7 @@ Later:
 
 - [x] allocate interrupt vectors (device pool 0x40-0xEF in `drivers/grant/irq.rs`; MSI-X programming is M2)
 - [ ] program MSI
-- [ ] program MSI-X
+- [x] program MSI-X (`drivers/bus/msix.rs`, kernel-owned table)
 - [ ] track vector ownership with `*PopIRQ`
 
 ---
@@ -1376,7 +1376,7 @@ Don't copy Linux socket internals unless useful.
 - [x] first QEMU virtio-net (`drivers/virtio/net.rs`, M1; in-kernel for now, see the driver note in Phase 24)
 - [x] TX descriptors
 - [x] RX descriptors
-- [ ] interrupts (M2: MSI-X hybrid; polled today)
+- [x] interrupts (M2: MSI-X hybrid — interrupt wakes, poll drains, re-arm; pure polling fallback)
 - [x] MAC address
 - [x] packet send/receive (ARP + ICMP echo: `ping 10.0.2.2` and `ping 8.8.8.8` work in QEMU)
 

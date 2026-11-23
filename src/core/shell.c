@@ -90,8 +90,9 @@ static const char* available_commands[] = {
     "mem", "mem -help", "mem -map", "mem -use", "mem -stats", "mem -info", "mem -debug",
     "cpu", "cpu -help", "cpu -hz", "cpu -info",
     "cl", "cl -help", "cl -gettime", "cl -getime",
-    "tasks", "timer", "syscalls", "irq", "pci", "pci -caps", "virtio", "virtio -probe",
-    "net", "net -help", "net -info", "net -stats", "net -up", "net -down", "net -arp", "ping",
+    "tasks", "timer", "syscalls", "irq", "pci", "pci -caps", "virtio", "virtio -probe", "virtio -blk",
+    "net", "net -help", "net -info", "net -stats", "net -up", "net -down", "net -arp", "net -dhcp", "ping",
+    "nslookup", "udp", "udp -send", "udp -echo",
     "mon", "mon -help", "mon -debug", "mon -list", "mon -kill", "mon -ultramon", "mon -stress",
     "dol", "dol -help", "dol -new", "dol -open", "dol -save", "dol -close",
     "drive", "drive -help", "drive -list", "drive -load", "drive -info", "drive -cmd",
@@ -783,6 +784,12 @@ void execute_command(const char *command) {
     } else if (strcmp(command, "net") == 0 || strncmp(command, "net ", 4) == 0) {
         extern void rust_net_cmd(const char* args);
         rust_net_cmd(command[3] == ' ' ? command + 4 : "");
+    } else if (strcmp(command, "nslookup") == 0 || strncmp(command, "nslookup ", 9) == 0) {
+        extern void rust_nslookup(const char* args);
+        rust_nslookup(command[8] == ' ' ? command + 9 : "");
+    } else if (strcmp(command, "udp") == 0 || strncmp(command, "udp ", 4) == 0) {
+        extern void rust_udp_cmd(const char* args);
+        rust_udp_cmd(command[3] == ' ' ? command + 4 : "");
     } else if (strcmp(command, "ping") == 0 || strncmp(command, "ping ", 5) == 0) {
         extern void rust_ping(const char* args);
         rust_ping(command[4] == ' ' ? command + 5 : "");
@@ -802,8 +809,16 @@ void execute_command(const char *command) {
         if (strcmp(args, "-probe") == 0) {
             extern void rust_virtio_probe(void);
             rust_virtio_probe();
+        } else if (strcmp(args, "-blk") == 0) {
+            extern void rust_virtio_blk_info(void);
+            rust_virtio_blk_info();
+        } else if (strcmp(args, "-blk -verify") == 0) {
+            extern void rust_virtio_blk_verify(void);
+            rust_virtio_blk_verify();
         } else {
             console_println("Usage: virtio -probe   (drive a modern-only virtio-blk through the new framework)");
+            console_println("       virtio -blk     (virtio disks: transport, IRQ mode, queue depth, counters)");
+            console_println("       virtio -blk -verify  (batched vs single-sector read check on slot 0)");
         }
     } else if (strcmp(command, "syscalls") == 0) {
         extern void syscall_print_table(void);

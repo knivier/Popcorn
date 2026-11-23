@@ -213,11 +213,19 @@ void kmain(void) {
                 console_test_idle_marker(test_keys_done);
             }
 #endif
-            /* UEFI/QEMU: sti+hlt hangs on latent IRQ; polled PIT keeps time alive. */
+            /* PIT poll-mode fallback: no interrupts to sleep on. */
             if (timer_is_poll_mode()) {
                 __asm__ volatile("pause");
             } else {
-                __asm__ volatile("sti; hlt" ::: "memory");
+                /* Arm the NIC's RX interrupt with interrupts off, then sti;hlt as one
+                 * step (sti's shadow): a packet landing in between still wakes us. */
+                extern int rust_net_idle_prepare(void);
+                __asm__ volatile("cli" ::: "memory");
+                if (rust_net_idle_prepare()) {
+                    __asm__ volatile("sti" ::: "memory");
+                } else {
+                    __asm__ volatile("sti; hlt" ::: "memory");
+                }
             }
             continue;
         }

@@ -110,16 +110,23 @@ qemu_prepare_scratch_disks() {
 # paths intact when the checkout path contains spaces.
 # virtio-net on QEMU user-mode networking (10.0.2.x, gateway 10.0.2.2, DNS 10.0.2.3).
 # POPCORN_QEMU_NET=off leaves the machine without a NIC (net: none). An explicit
-# -netdev also removes QEMU's default e1000/e1000e. vectors=0 hides MSI-X: the
-# driver polls (M1); M2 turns vectors on.
+# -netdev also removes QEMU's default e1000/e1000e. MSI-X is on by default (M2
+# hybrid interrupts); POPCORN_NET_VECTORS=0 hides MSI-X so the driver polls, and
+# POPCORN_NET_EVENT_IDX=off exercises the no-EVENT_IDX notification path.
 qemu_net_args() {
   QEMU_NET_ARGS=()
   case "${POPCORN_QEMU_NET:-user}" in
     off) QEMU_NET_ARGS=(-nic none) ;;
     *)
+      local fwd=""
+      # Host 127.0.0.1:$POPCORN_NET_HOSTFWD_UDP -> guest UDP 5555 (the shell tests'
+      # `udp -echo 5555` round trip); loopback only, never exposed beyond the host.
+      if [[ -n "${POPCORN_NET_HOSTFWD_UDP:-}" ]]; then
+        fwd=",hostfwd=udp:127.0.0.1:${POPCORN_NET_HOSTFWD_UDP}-:5555"
+      fi
       QEMU_NET_ARGS=(
-        -netdev "user,id=pnet0,ipv6=off"
-        -device "virtio-net-pci,netdev=pnet0,id=pnic0,mac=52:54:00:12:34:56,disable-legacy=on,romfile=,vectors=${POPCORN_NET_VECTORS:-0}"
+        -netdev "user,id=pnet0,ipv6=off${fwd}"
+        -device "virtio-net-pci,netdev=pnet0,id=pnic0,mac=52:54:00:12:34:56,disable-legacy=on,romfile=${POPCORN_NET_VECTORS:+,vectors=$POPCORN_NET_VECTORS}${POPCORN_NET_EVENT_IDX:+,event_idx=$POPCORN_NET_EVENT_IDX}"
       )
       if [[ -n "${POPCORN_NET_PCAP:-}" ]]; then
         QEMU_NET_ARGS+=(-object "filter-dump,id=pdump0,netdev=pnet0,file=$POPCORN_NET_PCAP")
@@ -133,7 +140,7 @@ qemu_uefi_data_disk_args() {
     -drive "if=none,id=popmsc,format=raw,file=$USB_DATA_IMG"
     -device "usb-storage,bus=xhci.0,drive=popmsc"
     -drive "if=none,id=popusb,format=raw,file=$DATA_IMG"
-    -device "virtio-blk-pci,drive=popusb,disable-modern=on"
+    -device "virtio-blk-pci,drive=popusb,disable-modern=${POPCORN_BLK_DISABLE_MODERN:-on}"
     -drive "if=none,id=popnvme,format=raw,file=$INTERNAL_IMG"
     -device "nvme,drive=popnvme,serial=POPCORN1"
   )

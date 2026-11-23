@@ -293,8 +293,10 @@ run_legacy_qemu() {
     create_legacy_iso
   fi
   qemu_kill_guest
+  qemu_net_args # virtio-net on QEMU user networking (POPCORN_QEMU_NET=off for none)
   log INFO "Starting QEMU (legacy ISO): RAM=${QEMU_MEMORY}MB cores=${QEMU_CORES}"
   qemu-system-x86_64 -accel kvm -accel tcg -cdrom "$ISO_OUT" -cpu qemu64 -m "$QEMU_MEMORY" -smp "$QEMU_CORES" -serial stdio \
+    "${QEMU_NET_ARGS[@]}" \
     -pidfile "$QEMU_PIDFILE"
 }
 
@@ -320,8 +322,10 @@ qemu_legacy_smoke() {
   rm -f "$dbg" "$serial"
   echo "== GRUB ISO (Multiboot2) =="
   qemu_kill_guest
+  qemu_net_args
   qemu-system-x86_64 \
     -accel kvm -accel tcg -cdrom "$ISO_OUT" -cpu qemu64 -m "${QEMU_MEMORY:-512}" \
+    "${QEMU_NET_ARGS[@]}" \
     -debugcon "file:$dbg" -global isa-debugcon.iobase=0xe9 \
     -serial "file:$serial" \
     -display none -no-reboot -no-shutdown \
