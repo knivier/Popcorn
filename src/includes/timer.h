@@ -14,13 +14,16 @@ typedef struct {
     uint64_t frequency;
     bool is_active;
     void (*tick_handler)(void);
-
+    /* Ticks that came from IRQ0 (not timer_poll): proves the interrupt path works. */
+    volatile uint64_t irq_ticks;
 } TimerState;
 extern TimerState global_timer;
 
 // Function declarations
 void timer_init(uint32_t frequency_hz);
 void timer_interrupt_handler(void);
+/* IRQ0 enabled and IF=1: true if IRQ0 really fires (checked against the PIT counter). */
+bool timer_irq_check(uint32_t periods);
 void timer_enable(void);
 void timer_disable(void);
 void pic_acknowledge_pending(void);

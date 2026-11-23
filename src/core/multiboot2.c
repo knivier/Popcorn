@@ -355,6 +355,29 @@ extern uint64_t page_table_l3[];
 #define IDENTITY_2M_PAGES (64u * 512u)
 #define IDENTITY_1G_PAGES 512u
 
+/* COM1 only (no debugcon): multi-character diagnostics (Rust panics, driver tags
+ * such as "net: ...") must not land in the debugcon log, whose single-letter boot
+ * tags the smoke tests grep for. */
+void com1_putc(char c) {
+    for (int i = 0; i < 100000; i++) {
+        unsigned char s;
+        __asm__ volatile("inb %1, %0" : "=a"(s) : "Nd"((unsigned short)0x3FD));
+        if (s & 0x20) {
+            break;
+        }
+    }
+    __asm__ volatile("outb %0, %1" : : "a"(c), "Nd"((unsigned short)0x3F8));
+}
+
+void com1_puts(const char* s) {
+    while (s && *s) {
+        if (*s == '\n') {
+            com1_putc('\r');
+        }
+        com1_putc(*s++);
+    }
+}
+
 void boot_serial_putc(char c) {
     /* QEMU -debugcon (isa-debugcon iobase 0xe9); harmless on bare metal. */
     __asm__ volatile("outb %0, $0xE9" : : "a"(c) : "memory");

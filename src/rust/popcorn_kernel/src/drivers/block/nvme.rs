@@ -9,8 +9,10 @@
 //! Probe failures never panic: they return `Err(&'static str)` and release
 //! every DMA allocation, leaving the controller disabled.
 
-use core::ptr::{addr_of_mut, read_volatile, write_volatile};
+use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{fence, AtomicBool, Ordering};
+
+use crate::sync::TaskLock;
 
 use crate::drivers::bus::pci;
 use crate::drivers::dma::{self, DmaBuffer};
@@ -94,7 +96,10 @@ struct Nvme {
     dead: bool,
 }
 
-static mut DEV: Option<Nvme> = None;
+/// The probed controller. TaskLock: held across the polled command wait (and the
+/// whole probe), so interrupts must stay on. Lock order: the block table lock in
+/// `block/mod.rs` is never held while taking this one.
+static DEV: TaskLock<Option<Nvme>> = TaskLock::new(None);
 
 /* —— MMIO —— */
 
@@ -235,7 +240,9 @@ impl Bufs {
 
 /// Probe the first NVMe controller. Returns `(sectors, block_size)` for NSID 1.
 pub fn probe() -> Result<(u64, u32), &'static str> {
-    if unsafe { (*addr_of_mut!(DEV)).is_some() } {
+    /* Held for the whole probe so check-then-install cannot race a second probe. */
+    let mut slot = DEV.lock();
+    if slot.is_some() {
         return Err("nvme already probed");
     }
     let addr = pci::find_class(0x01, 0x08, 0xFF).ok_or("no nvme controller")?;
@@ -256,7 +263,7 @@ pub fn probe() -> Result<(u64, u32), &'static str> {
     match probe_inner(bar, size, &mut bufs) {
         Ok(dev) => {
             let r = (dev.sectors, dev.block_size);
-            unsafe { *addr_of_mut!(DEV) = Some(dev) };
+            *slot = Some(dev);
             Ok(r)
         }
         Err(e) => {
@@ -393,7 +400,8 @@ fn do_io(idx: usize, write: bool, lba: u64, buf: *mut u8, len: usize) -> i64 {
     if idx != 0 {
         return -1;
     }
-    let dev = match unsafe { (*addr_of_mut!(DEV)).as_mut() } {
+    let mut guard = DEV.lock();
+    let dev = match guard.as_mut() {
         Some(d) => d,
         None => return -1,
     };

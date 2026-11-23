@@ -9,6 +9,12 @@ mod console_ffi;
 mod drivers;
 mod fs;
 mod pops;
+mod framework_ffi;
+#[allow(dead_code)]
+pub mod net;
+mod net_cmd;
+pub mod sync;
+pub mod util;
 
 use alloc::boxed::Box;
 use core::ffi::c_char;
@@ -16,12 +22,38 @@ use core::slice;
 
 extern "C" {
     fn boot_serial_putc(c: u8);
+    fn com1_putc(c: u8);
 }
 
+/// COM1-only text sink (never debugcon: its single-letter boot tags are grepped).
+pub struct Com1;
+
+impl core::fmt::Write for Com1 {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        for b in s.bytes() {
+            if b == b'\n' {
+                unsafe { com1_putc(b'\r') };
+            }
+            unsafe { com1_putc(b) };
+        }
+        Ok(())
+    }
+}
+
+/// A Rust panic used to spin silently (looked like a hang). Report it on COM1 and
+/// halt with interrupts off so nothing else runs on top of broken state.
 #[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    use core::fmt::Write;
+    unsafe { core::arch::asm!("cli", options(nostack)) };
+    let mut out = Com1;
+    let _ = write!(out, "\n*** RUST PANIC: {}", info.message());
+    if let Some(loc) = info.location() {
+        let _ = write!(out, " at {}:{}", loc.file(), loc.line());
+    }
+    let _ = out.write_str(" ***\n*** halt ***\n");
     loop {
-        core::hint::spin_loop();
+        unsafe { core::arch::asm!("cli; hlt", options(nostack)) };
     }
 }
 

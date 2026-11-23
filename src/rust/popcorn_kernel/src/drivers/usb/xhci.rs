@@ -12,12 +12,13 @@
 //! the controller is halted and every DMA allocation is released.
 
 use alloc::vec::Vec;
-use core::ptr::{addr_of_mut, read_volatile, write_volatile};
+use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{fence, Ordering};
 
 use crate::drivers::bus::pci;
 use crate::drivers::dma::{self, DmaBuffer};
 use crate::drivers::io::outb;
+use crate::sync::TaskLock;
 
 const RING_TRBS: usize = 256;
 const MAX_SLOTS: u32 = 8;
@@ -198,11 +199,11 @@ struct Xhci {
     bufs: Vec<DmaBuffer>,
 }
 
-static mut HC: Option<Xhci> = None;
-
-fn hc() -> Option<&'static mut Xhci> {
-    unsafe { (*addr_of_mut!(HC)).as_mut() }
-}
+/// The running controller. TaskLock: held across polled command/transfer waits
+/// (and the whole init), so interrupts must stay on. Lock order: usb_msc's DISKS
+/// lock may be held while taking this one, never the reverse; the block table
+/// lock in `block/mod.rs` is never held while taking either.
+static HC: TaskLock<Option<Xhci>> = TaskLock::new(None);
 
 fn halt(op: u64) {
     let c = r32(op + OP_USBCMD);
@@ -722,7 +723,9 @@ fn build(
 /// Bring up the first xHCI controller and enumerate root-port devices.
 /// Returns the number of Bulk-Only mass-storage devices found.
 pub fn init() -> Result<usize, &'static str> {
-    if hc().is_some() {
+    /* Held for the whole bring-up so check-then-install cannot race. */
+    let mut hc = HC.lock();
+    if hc.is_some() {
         return Err("xhci already initialised");
     }
     let addr = pci::find_class(0x0C, 0x03, 0x30).ok_or("no xhci controller")?;
@@ -753,9 +756,9 @@ pub fn init() -> Result<usize, &'static str> {
     };
     x.scan_ports();
     let n = x.msc_devs.len();
-    unsafe { *addr_of_mut!(HC) = Some(x) };
+    *hc = Some(x);
     if n == 0 {
-        shutdown();
+        shutdown_locked(&mut hc);
         return Err("no usb mass-storage device");
     }
     Ok(n)
@@ -763,7 +766,11 @@ pub fn init() -> Result<usize, &'static str> {
 
 /// Halt the controller and release all DMA memory.
 pub fn shutdown() {
-    let Some(x) = (unsafe { (*addr_of_mut!(HC)).take() }) else {
+    shutdown_locked(&mut HC.lock());
+}
+
+fn shutdown_locked(hc: &mut Option<Xhci>) {
+    let Some(x) = hc.take() else {
         return;
     };
     halt(x.op);
@@ -774,7 +781,8 @@ pub fn shutdown() {
 
 /// Per-device DMA page used for CBW/CSW/data: `(virt, phys)`.
 pub fn msc_io_buf(i: usize) -> Option<(u64, u64)> {
-    let x = hc()?;
+    let g = HC.lock();
+    let x = g.as_ref()?;
     let di = *x.msc_devs.get(i)?;
     let m = x.devs[di].msc.as_ref()?;
     Some((m.io.virt, m.io.phys))
@@ -782,13 +790,15 @@ pub fn msc_io_buf(i: usize) -> Option<(u64, u64)> {
 
 /// Synchronous bulk transfer of `len` bytes at `phys` (must not cross 64 KiB).
 pub fn msc_bulk(i: usize, out: bool, phys: u64, len: u32) -> Result<(), &'static str> {
-    let x = hc().ok_or("xhci not running")?;
+    let mut g = HC.lock();
+    let x = g.as_mut().ok_or("xhci not running")?;
     let di = *x.msc_devs.get(i).ok_or("usb: bad msc index")?;
     x.bulk(di, out, phys, len)
 }
 
 pub fn msc_alive(i: usize) -> bool {
-    let Some(x) = hc() else { return false };
+    let g = HC.lock();
+    let Some(x) = g.as_ref() else { return false };
     let Some(&di) = x.msc_devs.get(i) else {
         return false;
     };

@@ -1794,7 +1794,7 @@
  {
   "name": "fs_large_multicluster_file_uefi",
   "boot": "uefi",
-  "why": "64 MiB usb0 formats with 1 sector per cluster (pick_spc), so 512-byte clusters. Shell write caps content at 100 bytes, so Dolphin builds the file: 27 lines of 79 chars plus newlines = 2160 bytes, more than 4 clusters. Under UEFI the PIT is in poll mode, so ESC runs save_inner then close_clean. Covers multi-cluster write, read, cp into a subdirectory, reopen (27 lines), re-save without the trailing newline (2159 bytes), overwrite with a tiny file (frees the old chain), and delete. Typing 2160 chars through sendkey is slow (one editor redraw per key).",
+  "why": "64 MiB usb0 formats with 1 sector per cluster (pick_spc), so 512-byte clusters. Shell write caps content at 100 bytes, so Dolphin builds the file: 27 lines of 79 chars plus newlines = 2160 bytes, more than 4 clusters. Under UEFI the PIT is in poll mode, so ESC runs save_inner then close_clean. Covers multi-cluster write, read, cp into a subdirectory, reopen (27 lines), re-save without the trailing newline (2159 bytes), overwrite with a tiny file (frees the old chain), and delete. Typing 2160 chars through sendkey is slow (one editor redraw per key). (ESC opens the ':' prompt on UEFI too now that both paths have timer interrupts; 'x' saves and closes.)",
   "steps": [
    {
     "send": "disk -wipe usb0 YES",
@@ -1944,7 +1944,12 @@
    },
    {
     "send": "<ESC>",
-    "expect": "Saved: big\\.txt \\(2160 bytes\\)[\\s\\S]*SUCCESS: Dolphin editor closed[\\s\\S]*File: big\\.txt",
+    "expect": ":",
+    "reject": ""
+   },
+   {
+    "send": "x",
+    "expect": "Executing: \\[x\\][\\s\\S]*Saved: big\\.txt \\(2160 bytes\\)[\\s\\S]*SUCCESS: Dolphin editor closed[\\s\\S]*File: big\\.txt",
     "reject": "Save failed|TRUNCATED|CPU EXCEPTION|#GP|#PF"
    },
    {
@@ -1989,7 +1994,12 @@
    },
    {
     "send": "<ESC>",
-    "expect": "Saved: big\\.txt \\(2159 bytes\\)[\\s\\S]*Dolphin editor closed",
+    "expect": ":",
+    "reject": ""
+   },
+   {
+    "send": "x",
+    "expect": "Executing: \\[x\\][\\s\\S]*Saved: big\\.txt \\(2159 bytes\\)[\\s\\S]*Dolphin editor closed",
     "reject": "Save failed"
    },
    {
@@ -2343,7 +2353,7 @@
  {
   "name": "dolphin_create_save_reopen_uefi",
   "boot": "uefi",
-  "why": "Dolphin under UEFI, where poll mode makes ESC save and close. Covers create (ensure_txt adds .txt), type a line, save (14 bytes including the newline), and reopen by bare name and by 8.3 upper-case name. Reopen renders '1: _Hello Popcorn' with the '_' cursor and 'Line 1/1'. An unmodified re-save is 13 bytes. Then a RIGHT arrow and an insert that splits the line.",
+  "why": "Dolphin under UEFI, where poll mode makes ESC save and close. Covers create (ensure_txt adds .txt), type a line, save (14 bytes including the newline), and reopen by bare name and by 8.3 upper-case name. Reopen renders '1: _Hello Popcorn' with the '_' cursor and 'Line 1/1'. An unmodified re-save is 13 bytes. Then a RIGHT arrow and an insert that splits the line. (ESC opens the ':' prompt on UEFI too now that both paths have timer interrupts; 'x' saves and closes.)",
   "steps": [
    {
     "send": "disk -wipe usb0 YES",
@@ -2363,7 +2373,12 @@
    },
    {
     "send": "<ESC>",
-    "expect": "Saved: note\\.txt \\(14 bytes\\)[\\s\\S]*SUCCESS: Dolphin editor closed[\\s\\S]*File: note\\.txt",
+    "expect": ":",
+    "reject": ""
+   },
+   {
+    "send": "x",
+    "expect": "Executing: \\[x\\][\\s\\S]*Saved: note\\.txt \\(14 bytes\\)[\\s\\S]*SUCCESS: Dolphin editor closed[\\s\\S]*File: note\\.txt",
     "reject": "Save failed|CPU EXCEPTION|#GP|#PF"
    },
    {
@@ -2383,7 +2398,12 @@
    },
    {
     "send": "<ESC>",
-    "expect": "Saved: note\\.txt \\(13 bytes\\)[\\s\\S]*Dolphin editor closed",
+    "expect": ":",
+    "reject": ""
+   },
+   {
+    "send": "x",
+    "expect": "Executing: \\[x\\][\\s\\S]*Saved: note\\.txt \\(13 bytes\\)[\\s\\S]*Dolphin editor closed",
     "reject": "Save failed"
    },
    {
@@ -2403,7 +2423,12 @@
    },
    {
     "send": "<ESC>",
-    "expect": "Saved: NOTE\\.TXT \\(15 bytes\\)[\\s\\S]*Dolphin editor closed",
+    "expect": ":",
+    "reject": ""
+   },
+   {
+    "send": "x",
+    "expect": "Executing: \\[x\\][\\s\\S]*Saved: NOTE\\.TXT \\(15 bytes\\)[\\s\\S]*Dolphin editor closed",
     "reject": "Save failed"
    },
    {
@@ -2416,7 +2441,7 @@
  {
   "name": "dolphin_editing_keys_uefi",
   "boot": "uefi",
-  "why": "Editor cursor keys under UEFI: UP and DOWN clamp the column, LEFT at column 0 wraps to the end of the previous line, RIGHT moves through a line. Also covers an insert in the middle of a line, Enter splitting a line, and Backspace at column 0 joining lines. Render puts '_' at the cursor, so the buffer state is visible. Expected text comes from dolphin.rs insert_char/new_line/delete_char/render.",
+  "why": "Editor cursor keys under UEFI: UP and DOWN clamp the column, LEFT at column 0 wraps to the end of the previous line, RIGHT moves through a line. Also covers an insert in the middle of a line, Enter splitting a line, and Backspace at column 0 joining lines. Render puts '_' at the cursor, so the buffer state is visible. Expected text comes from dolphin.rs insert_char/new_line/delete_char/render. (ESC opens the ':' prompt on UEFI too now that both paths have timer interrupts; 'x' saves and closes.)",
   "steps": [
    {
     "send": "disk -wipe usb0 YES",
@@ -2471,7 +2496,12 @@
    },
    {
     "send": "<ESC>",
-    "expect": "Saved: keys\\.txt \\(5 bytes\\)[\\s\\S]*Dolphin editor closed",
+    "expect": ":",
+    "reject": ""
+   },
+   {
+    "send": "x",
+    "expect": "Executing: \\[x\\][\\s\\S]*Saved: keys\\.txt \\(5 bytes\\)[\\s\\S]*Dolphin editor closed",
     "reject": "Save failed"
    },
    {
@@ -2484,7 +2514,7 @@
  {
   "name": "dolphin_save_errors_uefi",
   "boot": "uefi",
-  "why": "Covers the save_inner error mapping. An unmodified buffer still closes after a failed save under UEFI ESC, so these cases always come back to the shell. 'verylongname.txt' fails to_sfn with NameTooLong (8), giving the bad-name error, and an empty buffer prints 'Saving empty file...'. With blank ram0 selected the write sees NotMounted (9), giving the no-FAT-volume error.",
+  "why": "Covers the save_inner error mapping. An unmodified buffer still closes after a failed save under UEFI ESC, so these cases always come back to the shell. 'verylongname.txt' fails to_sfn with NameTooLong (8), giving the bad-name error, and an empty buffer prints 'Saving empty file...'. With blank ram0 selected the write sees NotMounted (9), giving the no-FAT-volume error. (ESC opens the ':' prompt on UEFI too now that both paths have timer interrupts; 'x' saves and closes.)",
   "steps": [
    {
     "send": "disk -wipe usb0 YES",
@@ -2499,7 +2529,12 @@
    },
    {
     "send": "<ESC>",
-    "expect": "Saving empty file\\.\\.\\.[\\s\\S]*ERROR: Save failed: bad name \\(use 8\\.3 like NOTE\\.TXT\\)[\\s\\S]*Dolphin editor closed",
+    "expect": ":",
+    "reject": ""
+   },
+   {
+    "send": "x",
+    "expect": "Executing: \\[x\\][\\s\\S]*Saving empty file\\.\\.\\.[\\s\\S]*ERROR: Save failed: bad name \\(use 8\\.3 like NOTE\\.TXT\\)[\\s\\S]*Dolphin editor closed",
     "reject": "Saved: "
    },
    {
@@ -2509,7 +2544,12 @@
    },
    {
     "send": "<ESC>",
-    "expect": "Saving empty file\\.\\.\\.[\\s\\S]*Saved: empty\\.txt \\(0 bytes\\)[\\s\\S]*Dolphin editor closed",
+    "expect": ":",
+    "reject": ""
+   },
+   {
+    "send": "x",
+    "expect": "Executing: \\[x\\][\\s\\S]*Saving empty file\\.\\.\\.[\\s\\S]*Saved: empty\\.txt \\(0 bytes\\)[\\s\\S]*Dolphin editor closed",
     "reject": "Save failed"
    },
    {
@@ -2529,7 +2569,12 @@
    },
    {
     "send": "<ESC>",
-    "expect": "ERROR: Save failed: no Popcorn FAT volume on selected disk[\\s\\S]*Dolphin editor closed",
+    "expect": ":",
+    "reject": ""
+   },
+   {
+    "send": "x",
+    "expect": "Executing: \\[x\\][\\s\\S]*ERROR: Save failed: no Popcorn FAT volume on selected disk[\\s\\S]*Dolphin editor closed",
     "reject": "Saved: |Tip: disk -list"
    },
    {
@@ -8519,7 +8564,7 @@
  {
   "name": "ported_dolphin_long_file_uefi",
   "boot": "uefi",
-  "why": "Ported from shell_tests.py (dolphin-long-file, bugs #48/#51). A Dolphin file with more lines than the 20-line view and more than 1000 bytes must save completely: 30 lines of 57 chars plus the empty 31st line = 1740 bytes; read must show the first, middle and last lines intact; reopening gives 30 lines and an unmodified re-save is 1739 bytes (no trailing empty line). Self-contained (formats usb0 first). UEFI only: ESC saves and closes there.",
+  "why": "Ported from shell_tests.py (dolphin-long-file, bugs #48/#51). A Dolphin file with more lines than the 20-line view and more than 1000 bytes must save completely: 30 lines of 57 chars plus the empty 31st line = 1740 bytes; read must show the first, middle and last lines intact; reopening gives 30 lines and an unmodified re-save is 1739 bytes (no trailing empty line). Self-contained (formats usb0 first). UEFI only: ESC saves and closes there. (ESC opens the ':' prompt on UEFI too now that both paths have timer interrupts; 'x' saves and closes.)",
   "steps": [
    {
     "send": "disk -use usb0",
@@ -8559,7 +8604,12 @@
    },
    {
     "send": "<ESC>",
-    "expect": "Saved: long\\.txt \\(1740 bytes\\)[\\s\\S]*Dolphin editor closed",
+    "expect": ":",
+    "reject": ""
+   },
+   {
+    "send": "x",
+    "expect": "Executing: \\[x\\][\\s\\S]*Saved: long\\.txt \\(1740 bytes\\)[\\s\\S]*Dolphin editor closed",
     "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked|Save failed"
    },
    {
@@ -8574,7 +8624,12 @@
    },
    {
     "send": "<ESC>",
-    "expect": "Saved: long\\.txt \\(1739 bytes\\)[\\s\\S]*Dolphin editor closed",
+    "expect": ":",
+    "reject": ""
+   },
+   {
+    "send": "x",
+    "expect": "Executing: \\[x\\][\\s\\S]*Saved: long\\.txt \\(1739 bytes\\)[\\s\\S]*Dolphin editor closed",
     "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked|Save failed"
    },
    {
@@ -8830,6 +8885,206 @@
     "send": "disk -list",
     "expect": "usb0\\(usb\\)",
     "reject": ",boot"
+   }
+  ]
+ },
+ {
+  "name": "preemption_stress_with_fs_activity",
+  "boot": "both",
+  "shard_start": true,
+  "why": "Roadmap 4.5: three tasks that never yield + a sleeper. Only timer preemption (frame switching on IRQ0; UEFI uses the LAPIC virtual wire) can hand the CPU back to the shell, so every step here passing means the shell stays responsive under load. mon -stress checks that each task advanced and that rbx, r8-r15 and xmm0/1 survived every switch; the filesystem is exercised while the spinners run.",
+  "steps": [
+   {
+    "send": "mon -stress",
+    "expect": "stress: started 3 spinners \\(never yield\\) \\+ 1 sleeper",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked|FAIL"
+   },
+   {
+    "send": "mon -list",
+    "expect": "Normal[\\s\\S]*Normal[\\s\\S]*Normal[\\s\\S]*Normal",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked|FAIL"
+   },
+   {
+    "send": "disk -wipe usb0 YES",
+    "expect": "wiped \\+ FAT32 ready",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked|FAIL",
+    "timeout": 120
+   },
+   {
+    "send": "write STRESS.TXT written-under-preemption",
+    "expect": "File written successfully",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked|FAIL"
+   },
+   {
+    "send": "read STRESS.TXT",
+    "expect": "File content: written-under-preemption",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked|FAIL"
+   },
+   {
+    "send": "mon -stress",
+    "expect": "stress: OK all 4 progressed A=\\d+ B=\\d+ C=\\d+ sleeper=\\d+ errors=0 switches=[1-9]\\d*",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked|FAIL",
+    "delay_before": 1.5
+   },
+   {
+    "send": "uptime",
+    "expect": "Seconds",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked|FAIL"
+   },
+   {
+    "send": "mon -stress",
+    "expect": "stress: OK all 4 progressed A=\\d+ B=\\d+ C=\\d+ sleeper=\\d+ errors=0 switches=[1-9]\\d*",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked|FAIL",
+    "delay_before": 2
+   },
+   {
+    "send": "mon -stress stop",
+    "expect": "stress: stopped[\\s\\S]*errors=0",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked|FAIL"
+   },
+   {
+    "send": "mon -list",
+    "expect": "0   \\| Running",
+    "reject": "Normal|#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked|FAIL"
+   },
+   {
+    "send": "mon -stress stop",
+    "expect": "stress: not running",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked|FAIL"
+   }
+  ]
+ },
+ {
+  "name": "preemption_stress_soak_60s",
+  "boot": "both",
+  "fresh_boot": true,
+  "why": "Roadmap 4.5 soak: the stress tasks run for a minute (thousands of frame switches at 100 Hz) and must all keep progressing with zero register errors; the shell must still answer afterwards.",
+  "steps": [
+   {
+    "send": "mon -stress",
+    "expect": "stress: started",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked|FAIL"
+   },
+   {
+    "send": "mon -stress",
+    "expect": "stress: OK all 4 progressed A=\\d+ B=\\d+ C=\\d+ sleeper=\\d+ errors=0 switches=[1-9]\\d*",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked|FAIL",
+    "delay_before": 30
+   },
+   {
+    "send": "mon -stress",
+    "expect": "stress: OK all 4 progressed A=\\d+ B=\\d+ C=\\d+ sleeper=\\d+ errors=0 switches=[1-9]\\d*",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked|FAIL",
+    "delay_before": 30
+   },
+   {
+    "send": "mon -stress stop",
+    "expect": "stress: stopped[\\s\\S]*errors=0 switches=\\d{3,}",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked|FAIL"
+   },
+   {
+    "send": "mem -info",
+    "expect": "Total",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked|FAIL"
+   }
+  ]
+ },
+ {
+  "name": "driver_framework_m0_irq_pci_virtio",
+  "boot": "both",
+  "shard_start": true,
+  "why": "virtio-net review M0 exit: the LAPIC self-IPI (vector 0x30) was delivered exactly once at boot; pci -caps lists MSI-X and the virtio vendor caps; virtio -probe drives a modern-only virtio-blk (0x1042, ignored by the legacy driver) end to end through the new framework (claim, ModernTransport, negotiate, SplitQueue on a DmaPool) and reads its capacity (8 MiB = 16384 sectors) and sector 0 (the harness writes a known signature). Run twice to prove reset + release + re-claim.",
+  "steps": [
+   {
+    "send": "irq",
+    "expect": "0x30\\s+kernel\\s+lapic-selftest\\s+1\\b[\\s\\S]*unexpected=0",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   },
+   {
+    "send": "pci -caps",
+    "expect": "(?=[\\s\\S]*1AF4:1001[^\\n]*msix\\(\\d+\\))[\\s\\S]*1AF4:1042(?=[^\\n]*vendor\\(common\\))(?=[^\\n]*vendor\\(notify\\))(?=[^\\n]*vendor\\(device\\))(?=[^\\n]*msix\\(\\d+\\))",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   },
+   {
+    "send": "virtio -probe",
+    "expect": "virtio: blk modern \\d+:\\d+\\.\\d+ capacity=16384 sectors read0=504f50434f524e2d56495254494f2d4d kicks=1 ok",
+    "reject": "probe fail|#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   },
+   {
+    "send": "virtio -probe",
+    "expect": "capacity=16384 sectors read0=504f50434f524e2d56495254494f2d4d kicks=1 ok",
+    "reject": "probe fail|#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   },
+   {
+    "send": "irq",
+    "expect": "grant-violations=0",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   },
+   {
+    "send": "disk -list",
+    "expect": "vda\\(virtio\\)",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   }
+  ]
+ },
+ {
+  "name": "net_m1_virtio_ping_gateway",
+  "boot": "both",
+  "shard_start": true,
+  "why": "virtio-net review M1 exit: the PCI driver registry binds virtio-net (modern, polled) at boot; net -up configures 10.0.2.15/24 gw 10.0.2.2 on QEMU user networking; ping resolves the gateway by ARP (slirp answers with 52:55:0a:00:02:02) and gets 4/4 ICMP echo replies through the zero-copy RX / one-kick TX path; all 256 RX buffers are reposted afterwards (no leak); an address nobody answers times out cleanly; net -down unconfigures.",
+  "steps": [
+   {
+    "send": "net -info",
+    "expect": "net0: virtio-net \\(modern\\) at \\d+:\\d+\\.\\d+  mac 525400123456  mtu 1500  link up[\\s\\S]*irq poll[\\s\\S]*ip: not configured",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   },
+   {
+    "send": "ping 10.0.2.2",
+    "expect": "net: not configured \\(run net -up\\)",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   },
+   {
+    "send": "net -up",
+    "expect": "net0 up: 10\\.0\\.2\\.15/24 gw 10\\.0\\.2\\.2 dns 10\\.0\\.2\\.3",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   },
+   {
+    "send": "ping 10.0.2.2",
+    "expect": "PING 10\\.0\\.2\\.2: 56 data bytes[\\s\\S]*Reply from 10\\.0\\.2\\.2: seq=1 [\\s\\S]*seq=4 [\\s\\S]*4 packets transmitted, 4 received, 0% loss",
+    "reject": "timed out|send failed|#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked",
+    "timeout": 30
+   },
+   {
+    "send": "net -arp",
+    "expect": "10\\.0\\.2\\.2 -> 52550a000202",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   },
+   {
+    "send": "ping 10.0.2.2 3 1000",
+    "expect": "PING 10\\.0\\.2\\.2: 1000 data bytes[\\s\\S]*3 packets transmitted, 3 received, 0% loss",
+    "reject": "timed out|#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked",
+    "timeout": 30
+   },
+   {
+    "send": "net -stats",
+    "expect": "rx_posted 256",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   },
+   {
+    "send": "ping 10.0.2.99 1",
+    "expect": "Request timed out \\(seq=1\\)[\\s\\S]*1 packets transmitted, 0 received, 100% loss",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked",
+    "timeout": 30
+   },
+   {
+    "send": "net -down",
+    "expect": "net0 down",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   },
+   {
+    "send": "ping 10.0.2.2",
+    "expect": "not configured",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
    }
   ]
  },

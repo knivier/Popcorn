@@ -100,10 +100,34 @@ qemu_prepare_scratch_disks() {
   qemu_assert_guest_file "$DATA_IMG" "virtio scratch"
   qemu_assert_guest_file "$USB_DATA_IMG" "usb-storage scratch"
   qemu_assert_guest_file "$INTERNAL_IMG" "emulated NVMe scratch"
+  if [[ -n "${MODERN_IMG:-}" ]]; then
+    ensure_raw_img "$MODERN_IMG" 8 "modern-only virtio-blk (framework probe)"
+    qemu_assert_guest_file "$MODERN_IMG" "modern virtio scratch"
+  fi
 }
 
 # Fills QEMU_DATA_DISK_ARGS. An array (not printf + unquoted $(...)) keeps disk
 # paths intact when the checkout path contains spaces.
+# virtio-net on QEMU user-mode networking (10.0.2.x, gateway 10.0.2.2, DNS 10.0.2.3).
+# POPCORN_QEMU_NET=off leaves the machine without a NIC (net: none). An explicit
+# -netdev also removes QEMU's default e1000/e1000e. vectors=0 hides MSI-X: the
+# driver polls (M1); M2 turns vectors on.
+qemu_net_args() {
+  QEMU_NET_ARGS=()
+  case "${POPCORN_QEMU_NET:-user}" in
+    off) QEMU_NET_ARGS=(-nic none) ;;
+    *)
+      QEMU_NET_ARGS=(
+        -netdev "user,id=pnet0,ipv6=off"
+        -device "virtio-net-pci,netdev=pnet0,id=pnic0,mac=52:54:00:12:34:56,disable-legacy=on,romfile=,vectors=${POPCORN_NET_VECTORS:-0}"
+      )
+      if [[ -n "${POPCORN_NET_PCAP:-}" ]]; then
+        QEMU_NET_ARGS+=(-object "filter-dump,id=pdump0,netdev=pnet0,file=$POPCORN_NET_PCAP")
+      fi
+      ;;
+  esac
+}
+
 qemu_uefi_data_disk_args() {
   QEMU_DATA_DISK_ARGS=(
     -drive "if=none,id=popmsc,format=raw,file=$USB_DATA_IMG"
@@ -113,6 +137,16 @@ qemu_uefi_data_disk_args() {
     -drive "if=none,id=popnvme,format=raw,file=$INTERNAL_IMG"
     -device "nvme,drive=popnvme,serial=POPCORN1"
   )
+  qemu_net_args
+  QEMU_DATA_DISK_ARGS+=("${QEMU_NET_ARGS[@]}")
+  # Shell tests only: a modern-only (0x1042) virtio-blk that the legacy block
+  # driver ignores; `virtio -probe` drives it through the new driver framework.
+  if [[ -n "${MODERN_IMG:-}" ]]; then
+    QEMU_DATA_DISK_ARGS+=(
+      -drive "if=none,id=popmodern,format=raw,file=$MODERN_IMG"
+      -device "virtio-blk-pci,drive=popmodern,disable-legacy=on,disable-modern=off"
+    )
+  fi
 }
 
 # Video for UEFI/GOP: std VGA often leaves a blank GTK window while the kernel
@@ -178,7 +212,7 @@ qemu_uefi_usb_args() {
     -drive "if=pflash,format=raw,file=$OVMF_VARS" \
     -drive "if=none,id=usbstick,format=raw,file=$UEFI_IMG${QEMU_BOOT_DRIVE_OPTS:-}" \
     -device qemu-xhci,id=xhci \
-    -device usb-storage,bus=xhci.0,drive=usbstick \
+    -device usb-storage,bus=xhci.0,drive=usbstick,bootindex=0 \
     "${QEMU_DATA_DISK_ARGS[@]}" \
     $(qemu_uefi_video_args) \
     -pidfile "$QEMU_PIDFILE" \
@@ -675,7 +709,7 @@ qemu_uefi_run_interactive() {
     -drive "if=pflash,format=raw,file=$OVMF_VARS" \
     -drive "if=none,id=usbstick,format=raw,file=$UEFI_IMG" \
     -device qemu-xhci,id=xhci \
-    -device usb-storage,bus=xhci.0,drive=usbstick \
+    -device usb-storage,bus=xhci.0,drive=usbstick,bootindex=0 \
     "${QEMU_DATA_DISK_ARGS[@]}" \
     $(qemu_uefi_video_args) \
     $(qemu_uefi_display_args) \

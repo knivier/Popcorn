@@ -11,17 +11,24 @@
 #include <stdint.h>
 
 /*
- * Kernel threads with one kernel stack each. A switch is a plain function call into
- * switch_to() (context_switch.asm), which keeps the callee-saved registers on the
- * outgoing stack and returns on the incoming one, so every switched-out task is parked
- * inside task_switch() and resumes there. Timer preemption calls the scheduler from the
- * IRQ handler after the EOI; the interrupted state stays on the task's own stack and is
- * unwound by the IRQ stub when the task is resumed.
+ * Kernel threads with one kernel stack each, switched by interrupt frames. Every
+ * switched-out task is one saved *PopFrame (popframe.h) on its own kernel stack,
+ * pointed to by task->frame. A switch happens only on the way out of an interrupt:
+ * isr_dispatch hands the current frame to switch_frames(), which stores it in the
+ * outgoing task and returns the incoming task's frame; isr_common then restores
+ * that frame's FPU state and registers and iretq's into it.
+ *
+ *   - Timer preemption: scheduler_tick() (timer IRQ, or timer_poll in PIT poll mode)
+ *     only sets g_need_resched; the switch happens at IRQ exit
+ *     (scheduler_on_irq_exit), or at the next scheduler_preempt_point() in poll mode.
+ *   - Voluntary switches (yield/block/sleep/exit) execute `int 0x81`
+ *     (scheduler_on_yield), so they take exactly the same path.
+ *   - A new task starts from a frame built by setup_task_context(): its first
+ *     "resume" iretq's into task_entry_trampoline.
  *
  * Locking: single CPU. The ready queues, wait queues and task pool are changed only
- * with interrupts disabled (irq_save_disable/irq_restore_flags). switch_to() is always
- * entered with IF=0; each task restores its own saved flags when its scheduler call
- * returns, and a brand-new task enables interrupts in scheduler_task_entry().
+ * with interrupts disabled (irq_save_disable/irq_restore_flags). Each frame carries
+ * its own RFLAGS, so a task resumes with the interrupt flag it was switched out with.
  *
  * Invariant: a task is linked on ready_queue[priority] iff its state is READY or
  * RUNNING (the running task stays queued so round-robin can step past it). BLOCKED
@@ -46,6 +53,14 @@ static bool bootstrap_on_kmain_stack(void) {
            scheduler.current_task->pid == 0 &&
            !idle_cpu_has_run;
 }
+
+/* Set by scheduler_tick (and wakeups that outrank the current task); consumed at
+ * IRQ exit or at a poll-mode preempt point. */
+static volatile bool g_need_resched;
+static uint64_t g_context_switches;
+
+/* Preempt after this many ticks of the same task when others are runnable. */
+#define SCHED_QUANTUM_TICKS 5u
 
 #define TASK_POOL_CAP 32u
 #define TASK_STACK_SIZE (16 * 1024)  // 16KB per task stack
@@ -317,13 +332,26 @@ static TaskStruct* find_live_task(uint32_t pid) {
 #define STARVE_PICKS 4u
 static uint32_t g_lower_passed_over;
 
+/* Round-robin cursor per level: who runs next when the CPU comes back to a level
+ * from below. Without it the queue head got an extra slice every time a lower level
+ * (e.g. the shell's anti-starvation turn) ran, so one task did twice the work. */
+static TaskStruct* g_rr_next[PRIORITY_REALTIME + 1];
+
+static TaskStruct* rr_pick(int p) {
+    TaskStruct* t = g_rr_next[p];
+    if (t && (int)t->priority == p && task_is_runnable(t) && ready_is_queued(t)) {
+        return t;
+    }
+    return scheduler.ready_queue[p];
+}
+
 static TaskStruct* pick_next(TaskStruct* cur) {
     const bool cur_runnable = task_is_runnable(cur) && prio_valid((int)cur->priority);
     const int cur_prio = cur_runnable ? (int)cur->priority : PRIORITY_IDLE - 1;
 
     for (int p = PRIORITY_REALTIME; p > cur_prio; p--) {
         if (scheduler.ready_queue[p]) {
-            return scheduler.ready_queue[p];
+            return rr_pick(p);
         }
     }
     if (!cur_runnable) {
@@ -353,12 +381,13 @@ static TaskStruct* pick_next(TaskStruct* cur) {
     return cur;
 }
 
-/* Pick and switch with IRQs already off. Returns when the current task runs again
- * (immediately if nothing else was picked). */
-static void schedule_locked(void) {
+/* Interrupt context, IRQs off. Store f as the current task's saved frame, pick the
+ * next task and return the frame to resume (f itself when nobody else should run). */
+static PopFrame* switch_frames(PopFrame* f) {
     TaskStruct* cur = scheduler.current_task;
+    g_need_resched = false;
     if (!scheduler.scheduler_active || !cur || bootstrap_on_kmain_stack()) {
-        return;
+        return f;
     }
 
     TaskStruct* next = pick_next(cur);
@@ -366,11 +395,17 @@ static void schedule_locked(void) {
         if (cur->state == TASK_STATE_READY) {
             cur->state = TASK_STATE_RUNNING;
         }
-        return;
+        return f;
     }
-    if (next->context.rsp < 0x1000u) {
-        serial_print("ERROR: Invalid task context for switching\n");
-        return;
+    if (!next->frame || ((uintptr_t)next->frame & 15u) != 0) {
+        serial_print("ERROR: Invalid saved frame for switching\n");
+        return f;
+    }
+
+    cur->frame = f;
+    if (task_is_runnable(cur) && prio_valid((int)cur->priority)) {
+        int p = (int)cur->priority;
+        g_rr_next[p] = cur->next ? cur->next : scheduler.ready_queue[p];
     }
 
     /* Charge the outgoing task up to now; the incoming one starts a fresh run. */
@@ -385,7 +420,52 @@ static void schedule_locked(void) {
     next->state = TASK_STATE_RUNNING;
     next->time_remaining = next->time_slice;
 
-    task_switch(cur, next);
+    /* Switch address space while still on the outgoing stack (kernel half is shared). */
+    if (next->address_space.pml4_phys != 0) {
+        uint64_t want = next->address_space.pml4_phys & VMM_PTE_ADDR_MASK;
+        uint64_t have = vmm_get_cr3() & VMM_PTE_ADDR_MASK;
+        if (want != have) {
+            vmm_load_cr3(want);
+        }
+    }
+
+    scheduler.current_task = next;
+    g_context_switches++;
+    return next->frame;
+}
+
+/* isr_dispatch, vector 0x81. */
+PopFrame* scheduler_on_yield(PopFrame* f) {
+    return switch_frames(f);
+}
+
+/* isr_dispatch, after an IRQ handler ran. Never inside a USB/xHCI quiet section. */
+PopFrame* scheduler_on_irq_exit(PopFrame* f) {
+    if (g_need_resched && !irq_quiet_active()) {
+        return switch_frames(f);
+    }
+    return f;
+}
+
+/* Voluntary switch: the same frame path as preemption. Returns when the current task
+ * runs again (immediately if nothing else was picked), with its own RFLAGS back. */
+static void schedule_locked(void) {
+    if (!scheduler.scheduler_active || !scheduler.current_task || bootstrap_on_kmain_stack()) {
+        return;
+    }
+    __asm__ volatile("int $0x81" ::: "memory");
+}
+
+/* PIT poll mode has no timer IRQ to switch on: code that polls the timer calls this
+ * where a switch is safe (task context, no locks held). */
+void scheduler_preempt_point(void) {
+    if (g_need_resched && !irq_quiet_active() && !bootstrap_on_kmain_stack()) {
+        schedule_locked();
+    }
+}
+
+uint64_t scheduler_context_switches(void) {
+    return g_context_switches;
 }
 
 /* Wait in place for an interrupt / poll tick (IRQs off on entry and exit). */
@@ -413,38 +493,15 @@ static void wait_until_runnable(TaskStruct* t) {
     t->state = TASK_STATE_RUNNING;
 }
 
-void task_switch(TaskStruct* from, TaskStruct* to) {
-    static uint64_t discard_rsp;
-    if (!to || to == from) {
-        return;
-    }
-    uint64_t flags = irq_save_disable();
-
-    /* Switch address space while still on the outgoing stack (kernel half is shared). */
-    if (to->address_space.pml4_phys != 0) {
-        uint64_t want = to->address_space.pml4_phys & VMM_PTE_ADDR_MASK;
-        uint64_t cur = vmm_get_cr3() & VMM_PTE_ADDR_MASK;
-        if (want != cur) {
-            vmm_load_cr3(want);
-        }
-    }
-
-    scheduler.current_task = to;
-    switch_to(from ? &from->context.rsp : &discard_rsp, to->context.rsp);
-
-    /* `from` resumed: back on its own stack, with its own saved flags. */
-    irq_restore_flags(flags);
-}
-
 void scheduler_task_entry(void (*fn)(void), void* data) {
-    (void)data;
-    /* Arrived from switch_to() with IF=0. New tasks run with interrupts on (as the old
-     * RFLAGS=0x202 frame intended) except on the UEFI poll-mode PIT path. */
+    /* Arrived by iretq from the initial frame with IF=0. New tasks run with interrupts
+     * on, except on the PIT poll-mode fallback path. */
     if (!timer_is_poll_mode()) {
         __asm__ volatile("sti" ::: "memory");
     }
     if (fn) {
-        fn();
+        /* Task functions may take their data argument (RDI) or ignore it. */
+        ((void (*)(void*))fn)(data);
     }
     scheduler_exit_current();
 }
@@ -539,13 +596,14 @@ void scheduler_tick(void) {
             cur->time_remaining--;
         }
 
-        // Preempt every 10 ticks regardless of time slice, or when the slice runs out
+        /* Ask for a switch every quantum, or when the slice runs out. The switch itself
+         * happens at IRQ exit (scheduler_on_irq_exit) / the next poll-mode preempt point. */
         tick_counter++;
-        if (tick_counter >= 10) {
+        if (tick_counter >= (int)SCHED_QUANTUM_TICKS) {
             tick_counter = 0;
-            schedule_locked();
+            g_need_resched = true;
         } else if (cur->time_remaining == 0 && scheduler.total_tasks > 1) {
-            schedule_locked();
+            g_need_resched = true;
         }
     }
     irq_restore_flags(flags);
@@ -726,7 +784,7 @@ static TaskStruct* task_create_internal(void (*function)(void), void* data, Task
     setup_task_context(task);
 
     /* Idle keeps the boot master CR3; everyone else gets a private PML4. */
-    if (task->context.rsp == 0 ||
+    if (task->frame == NULL ||
         (priority != PRIORITY_IDLE && task_attach_private_as(task) != 0)) {
         task_free_stack(task->stack_base);
         task->stack_base = NULL;
@@ -789,6 +847,20 @@ void scheduler_schedule(void) {
     uint64_t flags = irq_save_disable();
     schedule_locked();
     irq_restore_flags(flags);
+}
+
+/* For Rust's TaskLock (sync.rs): who holds a lock, and whether that task still
+ * exists (a killed holder must not wedge the lock forever). */
+uint32_t scheduler_current_pid(void) {
+    TaskStruct* t = scheduler.current_task;
+    return t ? t->pid : 0u;
+}
+
+int scheduler_pid_alive(uint32_t pid) {
+    uint64_t flags = irq_save_disable();
+    int alive = find_live_task(pid) != NULL;
+    irq_restore_flags(flags);
+    return alive;
 }
 
 // Get current running task
@@ -906,6 +978,7 @@ void task_init(TaskStruct* task, void (*function)(void), void* data, TaskPriorit
 
     // Initialize context
     memset(&task->context, 0, sizeof(task->context));
+    task->frame = NULL;
 
     task->vruntime = 0;
     task->time_slice = 100;  // Default time slice
@@ -943,31 +1016,43 @@ void setup_task_context(TaskStruct* task) {
     }
 
     /*
-     * Initial switch frame, consumed by the first switch_to() into this task (layout in
-     * context_switch.asm): it pops r15..rbp and `ret`s into task_entry_trampoline with
-     * RSP = top - 8, i.e. as if the trampoline had been called (RSP % 16 == 8). The
-     * trampoline calls scheduler_task_entry(r12 = function, r13 = data), which runs the
-     * function and exits the task if it ever returns.
+     * Initial *PopFrame, resumed like any preempted task: isr_common restores the
+     * FXSAVE area below it and the GPRs, then iretq's into task_entry_trampoline with
+     * IF=0, r12 = function, r13 = data and RSP = top - 8 (as if called). The trampoline
+     * calls scheduler_task_entry(), which runs the function and exits the task if it
+     * ever returns. Layout below top: 16 spare bytes, the PopFrame, the FXSAVE area.
      */
-    uint64_t* sp = (uint64_t*)top;
-    *--sp = 0;                                        // fake return address
-    *--sp = (uint64_t)(uintptr_t)task_entry_trampoline;  // switch_to ret target
-    *--sp = 0;                                        // rbp
-    *--sp = 0;                                        // rbx
-    *--sp = (uint64_t)(uintptr_t)task->task_function; // r12
-    *--sp = (uint64_t)(uintptr_t)task->task_data;     // r13
-    *--sp = 0;                                        // r14
-    *--sp = 0;                                        // r15
+    if (top - (uintptr_t)task->stack_base < 16u + sizeof(PopFrame) + POPFRAME_FPU_BYTES + 512u) {
+        serial_print("ERROR: Stack too small for the initial frame\n");
+        return;
+    }
+    PopFrame* f = (PopFrame*)(top - 16u - sizeof(PopFrame));
+    uint8_t* fpu = POPFRAME_FPU(f);
+    memset(fpu, 0, POPFRAME_FPU_BYTES + sizeof(PopFrame));
+    *(uint16_t*)(void*)(fpu + 0) = 0x037F;   /* FCW: x87 power-on default */
+    *(uint32_t*)(void*)(fpu + 24) = 0x1F80;  /* MXCSR: all SSE exceptions masked */
+
+    uint16_t cs, ss;
+    __asm__ volatile("mov %%cs, %0" : "=r"(cs));
+    __asm__ volatile("mov %%ss, %0" : "=r"(ss));
+    f->rip = (uint64_t)(uintptr_t)task_entry_trampoline;
+    f->cs = cs;
+    f->rflags = 0x2;  /* IF=0: scheduler_task_entry turns interrupts on */
+    f->rsp = (uint64_t)(top - 8u);
+    f->ss = ss;
+    f->r12 = (uint64_t)(uintptr_t)task->task_function;
+    f->r13 = (uint64_t)(uintptr_t)task->task_data;
+    task->frame = f;
 
     memset(&task->context, 0, sizeof(task->context));
-    task->context.rsp = (uint64_t)(uintptr_t)sp;
+    task->context.rsp = f->rsp;
 
     /* Informational only (not loaded by the switch). */
     task->context.rip = (uint64_t)(uintptr_t)task->task_function;
     task->context.rdi = (uint64_t)(uintptr_t)task->task_data;
     task->context.rflags = 0x202;  // entry runs with IF=1 except in PIT poll mode
-    task->context.cs = 0x08;
-    task->context.ss = 0x10;
+    task->context.cs = cs;
+    task->context.ss = ss;
     task->context.fpu_control = 0x37F;
 }
 
@@ -979,6 +1064,7 @@ void idle_task(void) {
          * sleepers/wait-queue wakes never advance when only idle is runnable. */
         if (timer_is_poll_mode()) {
             timer_poll();
+            scheduler_preempt_point();
             __asm__ volatile("pause");
         } else {
             __asm__ volatile("sti; hlt" ::: "memory");

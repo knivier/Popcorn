@@ -1,7 +1,8 @@
 //! Physical memory map / stats drive (`mem` → `/dev/meminfo`).
 
 use alloc::string::String;
-use core::sync::atomic::{AtomicBool, Ordering};
+
+use crate::sync::{irq_restore, irq_save_disable, Once};
 
 use crate::console_ffi::{
     print, print_color, println_color, separator, u64_to_dec, COLOR_LIGHT_CYAN, COLOR_LIGHT_GREEN,
@@ -22,15 +23,8 @@ pub struct MemoryStats {
     pub num_available_regions: u32,
 }
 
-static mut STATS: MemoryStats = MemoryStats {
-    total_physical: 0,
-    total_available: 0,
-    total_reserved: 0,
-    total_used: 0,
-    num_regions: 0,
-    num_available_regions: 0,
-};
-static READY: AtomicBool = AtomicBool::new(false);
+/// Computed once from the boot memory map; stable address for `memory_pop_get_stats`.
+static STATS: Once<MemoryStats> = Once::new();
 
 extern "C" {
     static multiboot2_info_ptr: u64;
@@ -54,16 +48,15 @@ pub fn ioctl(request: u64, argp: *mut u8) -> i64 {
     if request != IOC_MEM_STATS || argp.is_null() {
         return -2;
     }
-    calculate_stats();
+    let st = *calculate_stats();
     unsafe {
-        *(argp as *mut MemoryStats) = STATS;
+        *(argp as *mut MemoryStats) = st;
     }
     0
 }
 
 pub fn cmd(cmd: &str) -> String {
-    calculate_stats();
-    let st = unsafe { STATS };
+    let st = *calculate_stats();
     match cmd {
         "status" | "info" | "stats" => {
             let mut s = String::from("mem ready phys=");
@@ -86,9 +79,10 @@ pub fn cmd(cmd: &str) -> String {
     }
 }
 
-pub fn calculate_stats() {
-    if READY.load(Ordering::Acquire) {
-        return;
+/// Compute (first call) and return the memory stats.
+pub fn calculate_stats() -> &'static MemoryStats {
+    if let Some(st) = STATS.get() {
+        return st;
     }
     let mut st = MemoryStats {
         total_physical: 0,
@@ -128,10 +122,12 @@ pub fn calculate_stats() {
         st.total_used = 2 * 1024 * 1024; // kernel footprint estimate
     }
 
-    unsafe {
-        STATS = st;
-    }
-    READY.store(true, Ordering::Release);
+    /* Racing callers compute the same value; the first to publish wins. Interrupts
+     * are off across call_once so preemption cannot land inside its busy window. */
+    let flags = irq_save_disable();
+    let r = STATS.call_once(|| st);
+    irq_restore(flags);
+    r
 }
 
 #[no_mangle]
@@ -141,14 +137,12 @@ pub extern "C" fn memory_calculate_stats() {
 
 #[no_mangle]
 pub extern "C" fn memory_pop_get_stats() -> *const MemoryStats {
-    calculate_stats();
-    core::ptr::addr_of!(STATS)
+    calculate_stats() as *const MemoryStats
 }
 
 #[no_mangle]
 pub extern "C" fn memory_print_stats() {
-    calculate_stats();
-    let st = unsafe { STATS };
+    let st = *calculate_stats();
     unsafe { crate::console_ffi::console_newline() };
     println_color("=== MEMORY STATISTICS ===", COLOR_LIGHT_MAGENTA);
     separator();
@@ -162,8 +156,7 @@ pub extern "C" fn memory_print_stats() {
 
 #[no_mangle]
 pub extern "C" fn memory_print_usage() {
-    calculate_stats();
-    let st = unsafe { STATS };
+    let st = *calculate_stats();
     unsafe { crate::console_ffi::console_newline() };
     println_color("=== MEMORY USAGE ===", COLOR_LIGHT_MAGENTA);
     separator();

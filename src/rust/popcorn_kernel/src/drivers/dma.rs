@@ -80,6 +80,34 @@ pub fn map_mmio(phys: u64, size: u64) -> Result<u64, &'static str> {
     Ok(MMIO_WIN_BASE + start + off_in_page)
 }
 
+/// Map `[phys, phys+size)` uncached (PWT|PCD) in the high MMIO window, even below
+/// 64 GiB. `map_mmio` hands out the write-back direct map there and relies on
+/// firmware MTRRs to make device ranges UC; grants never depend on that. (The WB
+/// direct-map alias still exists; removing it means splitting identity pages.)
+pub fn map_mmio_uc(phys: u64, size: u64) -> Result<u64, &'static str> {
+    if size == 0 || size > MMIO_WIN_BYTES {
+        return Err("mmio size out of range");
+    }
+    phys.checked_add(size).ok_or("mmio range overflow")?;
+    let off_in_page = phys & 0xFFF;
+    let pages = (off_in_page + size + 0xFFF) >> 12;
+    let bytes = pages << 12;
+    let start = MMIO_NEXT.fetch_add(bytes, Ordering::Relaxed);
+    if start + bytes > MMIO_WIN_BYTES {
+        return Err("mmio window exhausted");
+    }
+    let cr3 = unsafe { vmm_get_cr3() } & 0x000f_ffff_ffff_f000;
+    let pbase = phys & !0xFFF;
+    for i in 0..pages {
+        let va = MMIO_WIN_BASE + start + (i << 12);
+        let rc = unsafe { vmm_map_4k(cr3, va, pbase + (i << 12), PTE_P_RW_UC) };
+        if rc != 0 {
+            return Err("mmio map failed");
+        }
+    }
+    Ok(MMIO_WIN_BASE + start + off_in_page)
+}
+
 /// Allocate zeroed contiguous pages suitable for DMA (identity / low phys).
 pub fn dma_alloc(len: usize) -> Option<DmaBuffer> {
     /* Reject 0 and anything absurd (also keeps `len + 4095` from overflowing). */

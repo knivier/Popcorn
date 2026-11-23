@@ -1,0 +1,14 @@
+[package]
+name = "popcorn_host_tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Host-side unit tests for pure kernel logic. The kernel sources are included with
+# #[path] (see src/lib.rs), so these tests exercise the exact code the kernel runs.
+# Kept outside src/rust/ so the kernel's no_std build-std config does not apply.
+
+[workspace]
+
+[lib]
+path = "src/lib.rs"

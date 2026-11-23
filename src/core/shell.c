@@ -1,3 +1,4 @@
+#include "../includes/stress.h"
 #include "../includes/shell.h"
 #include "../includes/console.h"
 #include "../includes/pop_module.h"
@@ -89,8 +90,9 @@ static const char* available_commands[] = {
     "mem", "mem -help", "mem -map", "mem -use", "mem -stats", "mem -info", "mem -debug",
     "cpu", "cpu -help", "cpu -hz", "cpu -info",
     "cl", "cl -help", "cl -gettime", "cl -getime",
-    "tasks", "timer", "syscalls",
-    "mon", "mon -help", "mon -debug", "mon -list", "mon -kill", "mon -ultramon",
+    "tasks", "timer", "syscalls", "irq", "pci", "pci -caps", "virtio", "virtio -probe",
+    "net", "net -help", "net -info", "net -stats", "net -up", "net -down", "net -arp", "ping",
+    "mon", "mon -help", "mon -debug", "mon -list", "mon -kill", "mon -ultramon", "mon -stress",
     "dol", "dol -help", "dol -new", "dol -open", "dol -save", "dol -close",
     "drive", "drive -help", "drive -list", "drive -load", "drive -info", "drive -cmd",
     "drv", "drv -help", "drv -list", "drv -load", "drv -info", "drv -cmd",
@@ -184,6 +186,7 @@ static void help_mon(void) {
     console_println("  mon -debug [pid]       start/debug task");
     console_println("  mon -kill [pid]        kill task");
     console_println("  mon -ultramon          kill all but idle");
+    console_println("  mon -stress [stop]     preemption stress test (start/check/stop)");
 }
 
 static void help_drive(void) {
@@ -777,6 +780,31 @@ void execute_command(const char *command) {
         console_println_color(buffer, CONSOLE_FG_COLOR);
         
         console_draw_separator(console_state.cursor_y, CONSOLE_FG_COLOR);
+    } else if (strcmp(command, "net") == 0 || strncmp(command, "net ", 4) == 0) {
+        extern void rust_net_cmd(const char* args);
+        rust_net_cmd(command[3] == ' ' ? command + 4 : "");
+    } else if (strcmp(command, "ping") == 0 || strncmp(command, "ping ", 5) == 0) {
+        extern void rust_ping(const char* args);
+        rust_ping(command[4] == ' ' ? command + 5 : "");
+    } else if (strcmp(command, "irq") == 0) {
+        extern void rust_irq_list(void);
+        rust_irq_list();
+    } else if (strcmp(command, "pci") == 0 || strncmp(command, "pci ", 4) == 0) {
+        const char* args = command[3] == ' ' ? command + 4 : "";
+        if (strcmp(args, "-caps") == 0) {
+            extern void rust_pci_caps(void);
+            rust_pci_caps();
+        } else {
+            console_println("Usage: pci -caps   (capability list of every PCI function)");
+        }
+    } else if (strcmp(command, "virtio") == 0 || strncmp(command, "virtio ", 7) == 0) {
+        const char* args = command[6] == ' ' ? command + 7 : "";
+        if (strcmp(args, "-probe") == 0) {
+            extern void rust_virtio_probe(void);
+            rust_virtio_probe();
+        } else {
+            console_println("Usage: virtio -probe   (drive a modern-only virtio-blk through the new framework)");
+        }
     } else if (strcmp(command, "syscalls") == 0) {
         extern void syscall_print_table(void);
         syscall_print_table();
@@ -821,6 +849,8 @@ void execute_command(const char *command) {
             } else {
                 console_print_error("Failed to create debug task (PID 0 is reserved, PID already in use, or no free task slot)");
             }
+        } else if (strcmp(args, "-stress") == 0 || strncmp(args, "-stress ", 8) == 0) {
+            stress_command(args[7] == ' ' ? args + 8 : "");
         } else if (strcmp(args, "-list") == 0) {
             // List all running tasks
             console_newline();

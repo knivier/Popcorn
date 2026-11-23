@@ -24,6 +24,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 use crate::catalog;
 use crate::drivers::bus::pci;
+use crate::sync::IrqSpinLock;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -81,6 +82,37 @@ struct DiskEntry {
     foreign: AtomicU8,
 }
 
+/// Copy of a table entry (minus the `foreign` cache, reached through `idx`), so
+/// I/O can run after the table lock is dropped.
+#[derive(Clone, Copy)]
+struct DiskView {
+    idx: usize,
+    name: &'static str,
+    class: DiskClass,
+    sectors: u64,
+    sector_size: u32,
+    backend: Backend,
+    install_unlocked: bool,
+    protected: bool,
+    master_unlocked: bool,
+}
+
+impl DiskEntry {
+    fn view(&self, idx: usize) -> DiskView {
+        DiskView {
+            idx,
+            name: self.name,
+            class: self.class,
+            sectors: self.sectors,
+            sector_size: self.sector_size,
+            backend: self.backend,
+            install_unlocked: self.install_unlocked,
+            protected: self.protected,
+            master_unlocked: self.master_unlocked,
+        }
+    }
+}
+
 const FOREIGN_UNKNOWN: u8 = 0;
 const FOREIGN_NO: u8 = 1;
 const FOREIGN_YES: u8 = 2;
@@ -89,7 +121,18 @@ const FOREIGN_YES: u8 = 2;
 const PROTECT_ZONE: u64 = 34;
 
 static INITED: AtomicBool = AtomicBool::new(false);
-static mut DISKS: Option<Vec<DiskEntry>> = None;
+/// The disk table. Entries are only appended during `init` (indices are then
+/// stable, so `SELECTED`/`PENDING_*` can hold them).
+///
+/// IrqSpinLock, short sections only: look up / update entries, copy out a
+/// `DiskView`, drop the guard, then do the work. Never hold it across device
+/// I/O (`raw_read`/`raw_write`), fat32 (which re-enters this module through
+/// `read_selected`/`write_selected`/`selected_*`), console output, or catalog.
+///
+/// Lock order: this lock is a leaf. It is never held while taking a device
+/// TaskLock (nvme `DEV`, virtio_blk `DEVS`, usb_msc `DISKS`, xhci `HC`), the
+/// fat32 lock, or the catalog lock; device code never calls back into here.
+static DISKS: IrqSpinLock<Vec<DiskEntry>> = IrqSpinLock::new(Vec::new());
 static SELECTED: AtomicUsize = AtomicUsize::new(usize::MAX);
 /// Pending install target index, or MAX if none.
 static PENDING_INSTALL: AtomicUsize = AtomicUsize::new(usize::MAX);
@@ -111,19 +154,23 @@ const NAME_RAM0: &str = "ram0";
 const NAME_SATA0: &str = "sata0";
 const NAME_IDE0: &str = "ide0";
 
-/// The disk table. Every call hands out a fresh borrow, so callers must not
-/// keep the result across calls that re-enter the block layer (fat32, staging,
-/// `selected_entry`): re-fetch `table()[idx]` after such calls instead.
-fn table() -> &'static mut Vec<DiskEntry> {
-    unsafe {
-        if DISKS.is_none() {
-            DISKS = Some(Vec::new());
-        }
-        DISKS.as_mut().unwrap()
-    }
+/// Snapshot of entry `idx` (table lock held only for the copy).
+fn entry(idx: usize) -> Option<DiskView> {
+    DISKS.with(|t| t.get(idx).map(|d| d.view(idx)))
 }
 
-fn is_writable(d: &DiskEntry) -> bool {
+/// Index of the disk called `name`, if any.
+fn find_disk(name: &str) -> Option<usize> {
+    DISKS.with(|t| t.iter().position(|d| d.name == name))
+}
+
+/// Append an entry (publish to the catalog first, outside the table lock).
+fn add_disk(d: DiskEntry) {
+    publish_disk(&d);
+    DISKS.lock().push(d);
+}
+
+fn is_writable(d: &DiskView) -> bool {
     if is_internal_disk(d) {
         return d.master_unlocked;
     }
@@ -135,12 +182,12 @@ fn is_writable(d: &DiskEntry) -> bool {
     }
 }
 
-fn is_internal_disk(d: &DiskEntry) -> bool {
+fn is_internal_disk(d: &DiskView) -> bool {
     d.class == DiskClass::Internal || matches!(d.backend, Backend::Nvme(_))
 }
 
 pub fn selected_is_internal() -> bool {
-    selected_entry().map(is_internal_disk).unwrap_or(false)
+    selected_entry().map(|d| is_internal_disk(&d)).unwrap_or(false)
 }
 
 pub fn selected_master_unlocked() -> bool {
@@ -208,15 +255,13 @@ fn loader_is_test_install(efi: &[u8]) -> bool {
 }
 
 fn auto_select_boot() {
-    let t = table();
-    let idx = t
-        .iter()
-        .position(|d| d.is_boot && is_writable(d))
-        .or_else(|| t.iter().position(|d| d.class == DiskClass::Usb && is_writable(d)))
-        .or_else(|| {
-            t.iter()
-                .position(|d| d.class == DiskClass::Virtio && is_writable(d))
-        });
+    let idx = DISKS.with(|t| {
+        let w = |i: usize| is_writable(&t[i].view(i));
+        (0..t.len())
+            .position(|i| t[i].is_boot && w(i))
+            .or_else(|| (0..t.len()).position(|i| t[i].class == DiskClass::Usb && w(i)))
+            .or_else(|| (0..t.len()).position(|i| t[i].class == DiskClass::Virtio && w(i)))
+    });
     if let Some(i) = idx {
         SELECTED.store(i, Ordering::Release);
     }
@@ -229,8 +274,7 @@ pub fn init() {
     if INITED.swap(true, Ordering::SeqCst) {
         return;
     }
-    let t = table();
-    t.clear();
+    DISKS.lock().clear();
     SELECTED.store(usize::MAX, Ordering::Release);
     PENDING_INSTALL.store(usize::MAX, Ordering::Release);
     PENDING_WIPE.store(usize::MAX, Ordering::Release);
@@ -251,8 +295,7 @@ pub fn init() {
             master_unlocked: false,
             foreign: AtomicU8::new(FOREIGN_UNKNOWN),
         };
-        publish_disk(&d);
-        t.push(d);
+        add_disk(d);
     }
 
     /* Real NVMe first so virtio[1] can yield the nvme0 name. Failure is non-fatal. */
@@ -313,8 +356,7 @@ pub fn init() {
                     master_unlocked: false,
                     foreign: AtomicU8::new(FOREIGN_UNKNOWN),
                 };
-                publish_disk(&d);
-                t.push(d);
+                add_disk(d);
                 usb_real = true;
             }
         }
@@ -347,7 +389,7 @@ pub fn init() {
                 /* First vd* name not already taken (vdb may be virtio[1]). */
                 let name = [NAME_VDA, NAME_VDB, NAME_VDC, NAME_VDD]
                     .into_iter()
-                    .find(|n| !t.iter().any(|d| d.name == *n))
+                    .find(|n| find_disk(n).is_none())
                     .unwrap_or(NAME_VDD);
                 (name, DiskClass::Virtio, false)
             };
@@ -364,8 +406,7 @@ pub fn init() {
                 master_unlocked: false,
                 foreign: AtomicU8::new(FOREIGN_UNKNOWN),
             };
-            publish_disk(&d);
-            t.push(d);
+            add_disk(d);
         }
     }
 
@@ -383,28 +424,27 @@ pub fn init() {
             master_unlocked: false,
             foreign: AtomicU8::new(FOREIGN_UNKNOWN),
         };
-        publish_disk(&d);
-        t.push(d);
+        add_disk(d);
     }
 
     /* Wave 2: enumerate real PCI storage as locked internals (list-only). */
     let mut sata_i = 0u32;
     let mut ide_i = 0u32;
     pci::foreach_storage_controller(|_addr, _class, subclass| {
-        let t = table();
+        let has = |p: &str| DISKS.with(|t| t.iter().any(|d| d.name.starts_with(p)));
         /* Skip if we already have virtio stand-ins filling those roles. */
         let (name, skip) = match subclass {
             0x08 => {
                 /* NVMe */
                 /* Only the first NVMe controller is listed (as nvme0). */
-                if t.iter().any(|d| d.name.starts_with("nvme")) {
+                if has("nvme") {
                     ("", true)
                 } else {
                     (NAME_NVME0, false)
                 }
             }
             0x06 => {
-                if t.iter().any(|d| d.name.starts_with("sata")) {
+                if has("sata") {
                     ("", true)
                 } else {
                     sata_i += 1;
@@ -412,7 +452,7 @@ pub fn init() {
                 }
             }
             0x01 => {
-                if t.iter().any(|d| d.name.starts_with("ide")) {
+                if has("ide") {
                     ("", true)
                 } else {
                     ide_i += 1;
@@ -437,15 +477,15 @@ pub fn init() {
             master_unlocked: false,
             foreign: AtomicU8::new(FOREIGN_UNKNOWN),
         };
-        publish_disk(&d);
-        t.push(d);
+        add_disk(d);
     });
 
     auto_select_boot();
 }
 
 pub fn list(buf: &mut [u8]) -> usize {
-    let t = table();
+    /* Formatting only (no I/O) under the table lock; dropped before returning. */
+    let t = DISKS.lock();
     let sel = SELECTED.load(Ordering::Acquire);
     let mut s = String::new();
     if t.is_empty() {
@@ -472,25 +512,24 @@ pub fn list(buf: &mut [u8]) -> usize {
             append_u64(&mut s, mib);
             s.push_str("MiB");
         }
-        if is_writable(d) {
+        let v = d.view(i);
+        if is_writable(&v) {
             s.push_str(" rw");
-        } else if is_internal_disk(d) {
+        } else if is_internal_disk(&v) {
             s.push_str(" MASTER-LOCKED");
         } else {
             s.push_str(" LOCKED");
         }
         s.push(' ');
     }
+    drop(t);
     write_cstr(&s, buf)
 }
 
 pub fn use_disk(name: &str) -> Result<(), &'static str> {
-    let t = table();
-    let idx = t
-        .iter()
-        .position(|d| d.name == name)
-        .ok_or("unknown disk")?;
-    if matches!(t[idx].backend, Backend::Stub) {
+    /* Lookup copies out; the table lock is not held across fat32::unmount. */
+    let idx = find_disk(name).ok_or("unknown disk")?;
+    if matches!(entry(idx).map(|d| d.backend), Some(Backend::Stub)) {
         return Err("stub disk has no I/O");
     }
     /* Internal/NVMe may be selected for reads while MASTER-LOCKED. Writes still fail. */
@@ -502,15 +541,12 @@ pub fn use_disk(name: &str) -> Result<(), &'static str> {
 /// Unlock Internal/NVMe writes for this boot. Never called from install, wipe, or
 /// the QEMU selftest. Returns Ok(true) if unlocked, Ok(false) if armed (needs YES).
 pub fn master(name: &str, confirm_yes: bool) -> Result<bool, &'static str> {
-    let t = table();
-    let idx = t
-        .iter()
-        .position(|d| d.name == name)
-        .ok_or("unknown disk")?;
-    if matches!(t[idx].backend, Backend::Stub | Backend::Ram) {
+    let idx = find_disk(name).ok_or("unknown disk")?;
+    let d = entry(idx).ok_or("unknown disk")?;
+    if matches!(d.backend, Backend::Stub | Backend::Ram) {
         return Err("master is only for internal/NVMe disks");
     }
-    if !is_internal_disk(&t[idx]) {
+    if !is_internal_disk(&d) {
         return Err("master is only for internal/NVMe disks");
     }
     if !confirm_yes {
@@ -521,8 +557,8 @@ pub fn master(name: &str, confirm_yes: bool) -> Result<bool, &'static str> {
     if armed != usize::MAX && armed != idx {
         return Err("another disk is armed — master that name, or master this one without a prior arm");
     }
-    t[idx].master_unlocked = true;
-    if let Backend::Nvme(_) = t[idx].backend {
+    DISKS.with(|t| t[idx].master_unlocked = true);
+    if let Backend::Nvme(_) = d.backend {
         nvme::set_write_enabled(true);
     }
     PENDING_MASTER.store(usize::MAX, Ordering::Release);
@@ -539,20 +575,18 @@ pub fn master(name: &str, confirm_yes: bool) -> Result<bool, &'static str> {
 /// the target selected + writable (so it is both bootable and the working disk).
 /// Returns Ok(true) if installed, Ok(false) if armed (needs YES).
 pub fn install(name: &str, confirm_yes: bool) -> Result<bool, &'static str> {
-    /* Short borrow only: staging/fat32 below re-enter table(). */
+    /* Copy out only: staging/fat32 below re-enter the block layer, so the
+     * table lock is never held past these short lookups. */
     let idx = {
-        let t = table();
-        let idx = t
-            .iter()
-            .position(|d| d.name == name)
-            .ok_or("unknown disk")?;
-        if matches!(t[idx].backend, Backend::Stub | Backend::Ram) {
+        let idx = find_disk(name).ok_or("unknown disk")?;
+        let d = entry(idx).ok_or("unknown disk")?;
+        if matches!(d.backend, Backend::Stub | Backend::Ram) {
             return Err("cannot install to ram/stub disks");
         }
-        if is_internal_disk(&t[idx]) && !t[idx].master_unlocked {
+        if is_internal_disk(&d) && !d.master_unlocked {
             return Err("internal/NVMe locked — disk master <name> YES first");
         }
-        if t[idx].sectors < 68_000 {
+        if d.sectors < 68_000 {
             return Err("disk too small for install (~33MiB+)");
         }
         idx
@@ -591,28 +625,28 @@ pub fn install(name: &str, confirm_yes: bool) -> Result<bool, &'static str> {
     /* Format target (same quick wipe as disk wipe). */
     let prev = SELECTED.load(Ordering::Acquire);
     {
-        let d = &mut table()[idx];
+        let mut t = DISKS.lock();
+        let d = &mut t[idx];
         d.install_unlocked = true;
         d.protected = false;
     }
     crate::fs::fat32::unmount(); /* flush the old volume while it is still selected */
     SELECTED.store(idx, Ordering::Release);
 
-    let (sectors, ss) = {
-        let d = &table()[idx];
-        (d.sectors, d.sector_size as usize)
-    };
+    /* Snapshot after the unlock above; raw_write runs with the table unlocked. */
+    let target = entry(idx).ok_or_else(|| restore_selection(prev, "unknown disk"))?;
+    let (sectors, ss) = (target.sectors, target.sector_size as usize);
     let zero = alloc::vec![0u8; ss];
     crate::console_ffi::println_color(
         "install: [2/4] formatting target as Popcorn FAT32...",
         crate::console_ffi::COLOR_WHITE,
     );
     for lba in 0..PROTECT_ZONE.min(sectors) {
-        if raw_write(&table()[idx], lba, &zero) < 0 {
+        if raw_write(&target,lba, &zero) < 0 {
             return Err(restore_selection(prev, "install: failed clearing partition tables"));
         }
     }
-    let _ = raw_write(&table()[idx], sectors.saturating_sub(1), &zero);
+    let _ = raw_write(&target,sectors.saturating_sub(1), &zero);
 
     if crate::fs::fat32::force_format().is_err() {
         return Err(restore_selection(prev, "install: FAT32 format failed"));
@@ -623,7 +657,8 @@ pub fn install(name: &str, confirm_yes: bool) -> Result<bool, &'static str> {
     }
 
     {
-        let d = &mut table()[idx];
+        let mut t = DISKS.lock();
+        let d = &mut t[idx];
         d.protected = false;
         d.install_unlocked = true;
         d.is_boot = true;
@@ -665,7 +700,8 @@ fn kernel_is_auto_install(k: &[u8]) -> bool {
 }
 
 fn ok_stage_source(d: &DiskEntry) -> bool {
-    if is_internal_disk(d) || matches!(d.backend, Backend::Stub | Backend::Ram | Backend::Nvme(_)) {
+    /* `class == Internal` + the Nvme arm are exactly `is_internal_disk`. */
+    if d.class == DiskClass::Internal || matches!(d.backend, Backend::Stub | Backend::Ram | Backend::Nvme(_)) {
         return false;
     }
     matches!(d.backend, Backend::UsbMsc(_) | Backend::Virtio(_))
@@ -679,10 +715,11 @@ fn ok_stage_source(d: &DiskEntry) -> bool {
 /// reinstall onto the stick that was booted from).
 fn stage_boot_payloads(target_idx: usize) -> Result<(Vec<u8>, Vec<u8>), &'static str> {
     let prev = SELECTED.load(Ordering::Acquire);
-    /* Short borrow only: the fat32 calls below re-enter table(). */
+    /* Table locked only to pick the order: the fat32 calls below re-enter
+     * the block layer (read_selected etc.), which takes the table lock. */
     let mut return_order_only = false;
     let order: Vec<usize> = {
-        let t = table();
+        let t = DISKS.lock();
         let n = t.len();
         let mut order: Vec<usize> = Vec::new();
         /* The loader told us which disk we booted from: copy from that disk
@@ -727,7 +764,7 @@ fn stage_boot_payloads(target_idx: usize) -> Result<(Vec<u8>, Vec<u8>), &'static
 
     let mut found: Option<(Vec<u8>, Vec<u8>)> = None;
     for i in order {
-        let disk_name = table()[i].name;
+        let Some(disk_name) = entry(i).map(|d| d.name) else { continue };
         crate::fs::fat32::unmount(); /* flush while the old disk is still selected */
         SELECTED.store(i, Ordering::Release);
         if crate::fs::fat32::mount_or_format().is_err() {
@@ -811,20 +848,18 @@ fn stage_boot_payloads(target_idx: usize) -> Result<(Vec<u8>, Vec<u8>), &'static
 /// confirm). A prior bare `disk wipe <name>` still arms if preferred.
 /// Returns Ok(true) if wiped+formatted, Ok(false) if armed.
 pub fn wipe(name: &str, confirm_yes: bool) -> Result<bool, &'static str> {
-    /* Short borrow only: fat32 below re-enters table(). */
+    /* Copy out only: fat32 below re-enters the block layer, so the table
+     * lock is never held past these short lookups. */
     let idx = {
-        let t = table();
-        let idx = t
-            .iter()
-            .position(|d| d.name == name)
-            .ok_or("unknown disk")?;
-        if matches!(t[idx].backend, Backend::Stub | Backend::Ram) {
+        let idx = find_disk(name).ok_or("unknown disk")?;
+        let d = entry(idx).ok_or("unknown disk")?;
+        if matches!(d.backend, Backend::Stub | Backend::Ram) {
             return Err("cannot wipe ram/stub disks");
         }
-        if is_internal_disk(&t[idx]) && !t[idx].master_unlocked {
+        if is_internal_disk(&d) && !d.master_unlocked {
             return Err("internal/NVMe locked — disk master <name> YES first");
         }
-        if t[idx].sectors < 68_000 {
+        if d.sectors < 68_000 {
             return Err("disk too small for FAT32 (~33MiB+)");
         }
         idx
@@ -842,17 +877,17 @@ pub fn wipe(name: &str, confirm_yes: bool) -> Result<bool, &'static str> {
     /* Allow writes through the foreign-data gate for this operation. */
     let prev = SELECTED.load(Ordering::Acquire);
     {
-        let d = &mut table()[idx];
+        let mut t = DISKS.lock();
+        let d = &mut t[idx];
         d.install_unlocked = true;
         d.protected = false; /* wipe owns this stick for the duration */
     }
     crate::fs::fat32::unmount(); /* flush the old volume while it is still selected */
     SELECTED.store(idx, Ordering::Release);
 
-    let (sectors, ss) = {
-        let d = &table()[idx];
-        (d.sectors, d.sector_size as usize)
-    };
+    /* Snapshot after the unlock above; raw_write runs with the table unlocked. */
+    let target = entry(idx).ok_or_else(|| restore_selection(prev, "unknown disk"))?;
+    let (sectors, ss) = (target.sectors, target.sector_size as usize);
     let zero = alloc::vec![0u8; ss];
     /* Quick wipe: destroy partition table / BPB head. Last-sector GPT backup
      * is best-effort — failing it must not abort the format (USB end-LBA
@@ -862,12 +897,12 @@ pub fn wipe(name: &str, confirm_yes: bool) -> Result<bool, &'static str> {
         crate::console_ffi::COLOR_WHITE,
     );
     for lba in 0..PROTECT_ZONE.min(sectors) {
-        if raw_write(&table()[idx], lba, &zero) < 0 {
+        if raw_write(&target,lba, &zero) < 0 {
             return Err(restore_selection(prev, "wipe write failed (USB rejected head write)"));
         }
     }
     if sectors > PROTECT_ZONE {
-        let _ = raw_write(&table()[idx], sectors - 1, &zero);
+        let _ = raw_write(&target,sectors - 1, &zero);
     }
 
     crate::console_ffi::println_color(
@@ -879,7 +914,8 @@ pub fn wipe(name: &str, confirm_yes: bool) -> Result<bool, &'static str> {
     }
 
     {
-        let d = &mut table()[idx];
+        let mut t = DISKS.lock();
+        let d = &mut t[idx];
         d.protected = false;
         d.install_unlocked = true;
         d.is_boot = true; /* Popcorn volume — prefer for auto-select next time */
@@ -890,12 +926,14 @@ pub fn wipe(name: &str, confirm_yes: bool) -> Result<bool, &'static str> {
 
 pub fn info(buf: &mut [u8]) -> usize {
     let mut s = String::new();
-    let t = table();
+    /* Formatting only (no I/O) under the table lock; dropped before returning. */
+    let t = DISKS.lock();
     let i = SELECTED.load(Ordering::Acquire);
     if i >= t.len() {
         s.push_str("selected: none");
     } else {
         let d = &t[i];
+        let v = d.view(i);
         s.push_str("selected: ");
         s.push_str(d.name);
         s.push_str(" class=");
@@ -905,25 +943,35 @@ pub fn info(buf: &mut [u8]) -> usize {
         }
         s.push_str(" sectors=");
         append_u64(&mut s, d.sectors);
-        if is_writable(d) {
+        if is_writable(&v) {
             s.push_str(" writable");
-        } else if is_internal_disk(d) {
+        } else if is_internal_disk(&v) {
             s.push_str(" MASTER-LOCKED");
         } else {
             s.push_str(" LOCKED");
         }
     }
+    drop(t);
     write_cstr(&s, buf)
 }
 
-fn selected_entry() -> Option<&'static DiskEntry> {
-    let i = SELECTED.load(Ordering::Acquire);
-    let t = table();
-    if i >= t.len() {
-        None
-    } else {
-        Some(&t[i])
-    }
+/// Snapshot of the selected disk; the table lock is released before returning,
+/// so callers may do I/O (and fat32 may call back in) with it.
+fn selected_entry() -> Option<DiskView> {
+    entry(SELECTED.load(Ordering::Acquire))
+}
+
+/// Read entry `idx`'s cached `holds_foreign_data` answer.
+fn foreign_get(idx: usize) -> u8 {
+    DISKS.with(|t| t.get(idx).map_or(FOREIGN_UNKNOWN, |d| d.foreign.load(Ordering::Acquire)))
+}
+
+fn foreign_set(idx: usize, v: u8) {
+    DISKS.with(|t| {
+        if let Some(d) = t.get(idx) {
+            d.foreign.store(v, Ordering::Release);
+        }
+    });
 }
 
 pub fn selected_capacity() -> Option<(u64, u32)> {
@@ -941,7 +989,8 @@ pub fn selected_id() -> usize {
     SELECTED.load(Ordering::Acquire)
 }
 
-fn raw_read(d: &DiskEntry, lba: u64, buf: &mut [u8]) -> i64 {
+/// Device I/O: call with the table lock released (takes device TaskLocks).
+fn raw_read(d: &DiskView, lba: u64, buf: &mut [u8]) -> i64 {
     match d.backend {
         Backend::Ram => ramdisk::read(lba, buf),
         Backend::Virtio(i) => virtio_blk::read(i, lba, buf),
@@ -951,7 +1000,8 @@ fn raw_read(d: &DiskEntry, lba: u64, buf: &mut [u8]) -> i64 {
     }
 }
 
-fn raw_write(d: &DiskEntry, lba: u64, buf: &[u8]) -> i64 {
+/// Device I/O: call with the table lock released (takes device TaskLocks).
+fn raw_write(d: &DiskView, lba: u64, buf: &[u8]) -> i64 {
     /* Internal/NVMe writes require `disk master <name> YES` this boot. */
     if is_internal_disk(d) && !d.master_unlocked {
         return -5;
@@ -966,7 +1016,7 @@ fn raw_write(d: &DiskEntry, lba: u64, buf: &[u8]) -> i64 {
     /* holds_foreign_data looks at LBA 0/1: any write there (even a failed,
      * possibly partial one) makes the cached answer stale. */
     if lba < 2 {
-        d.foreign.store(FOREIGN_UNKNOWN, Ordering::Release);
+        foreign_set(d.idx, FOREIGN_UNKNOWN);
     }
     rc
 }
@@ -975,18 +1025,17 @@ fn raw_write(d: &DiskEntry, lba: u64, buf: &[u8]) -> i64 {
 /// LBA 1 is not a GPT header. Fails closed (true) on any read error.
 /// The answer is cached per disk (reset by `raw_write` to LBA 0/1); a read
 /// error is never cached, so a transient USB failure cannot lock the disk.
-fn holds_foreign_data(d: &DiskEntry) -> bool {
+fn holds_foreign_data(d: &DiskView) -> bool {
     if d.class == DiskClass::Ram {
         return false;
     }
-    match d.foreign.load(Ordering::Acquire) {
+    match foreign_get(d.idx) {
         FOREIGN_NO => return false,
         FOREIGN_YES => return true,
         _ => {}
     }
     let cache = |v: bool| {
-        d.foreign
-            .store(if v { FOREIGN_YES } else { FOREIGN_NO }, Ordering::Release);
+        foreign_set(d.idx, if v { FOREIGN_YES } else { FOREIGN_NO });
         v
     };
     let ss = d.sector_size as usize;
@@ -1021,7 +1070,7 @@ pub fn read_selected(lba: u64, buf: &mut [u8]) -> i64 {
     if buf.len() < d.sector_size as usize || (d.sectors != 0 && lba >= d.sectors) {
         return -2;
     }
-    raw_read(d, lba, buf)
+    raw_read(&d, lba, buf)
 }
 
 /// Write one sector to the selected disk.
@@ -1030,7 +1079,7 @@ pub fn write_selected(lba: u64, buf: &[u8]) -> i64 {
     let Some(d) = selected_entry() else {
         return -4;
     };
-    if !is_writable(d) {
+    if !is_writable(&d) {
         return -5;
     }
     if buf.len() < d.sector_size as usize || (d.sectors != 0 && lba >= d.sectors) {
@@ -1043,11 +1092,11 @@ pub fn write_selected(lba: u64, buf: &[u8]) -> i64 {
          * Cheap checks first: the (cached) sector 0/1 probe runs last. */
         let in_zone = lba < PROTECT_ZONE
             || (d.sectors > PROTECT_ZONE && lba >= d.sectors - PROTECT_ZONE);
-        if in_zone && !d.install_unlocked && !d.master_unlocked && holds_foreign_data(d) {
+        if in_zone && !d.install_unlocked && !d.master_unlocked && holds_foreign_data(&d) {
             return -6;
         }
     }
-    raw_write(d, lba, buf)
+    raw_write(&d, lba, buf)
 }
 
 fn append_u64(s: &mut String, mut v: u64) {
@@ -1232,8 +1281,8 @@ pub extern "C" fn rust_test_disk_install() -> i32 {
         return fail();
     }
 
-    /* No long-lived table() borrow: the fat32 calls below re-enter it. */
-    let n = table().len();
+    /* Table lock only for short copies: the fat32 calls below re-enter it. */
+    let n = DISKS.lock().len();
     let mut source = usize::MAX;
     let mut target = usize::MAX;
 
@@ -1241,8 +1290,8 @@ pub extern "C" fn rust_test_disk_install() -> i32 {
     let prev = SELECTED.load(Ordering::Acquire);
     for i in 0..n {
         {
-            let d = &table()[i];
-            if matches!(d.backend, Backend::Stub | Backend::Ram) || is_internal_disk(d) {
+            let Some(d) = entry(i) else { continue };
+            if matches!(d.backend, Backend::Stub | Backend::Ram) || is_internal_disk(&d) {
                 continue;
             }
         }
@@ -1261,9 +1310,9 @@ pub extern "C" fn rust_test_disk_install() -> i32 {
 
     /* USB/virtio only, never Internal, never the live boot source. */
     {
-        let t = table();
+        let t = DISKS.lock();
         for i in 0..n {
-            if i == source || is_internal_disk(&t[i]) {
+            if i == source || is_internal_disk(&t[i].view(i)) {
                 continue;
             }
             if !matches!(t[i].backend, Backend::UsbMsc(_) | Backend::Virtio(_)) {
@@ -1286,7 +1335,7 @@ pub extern "C" fn rust_test_disk_install() -> i32 {
         return fail();
     }
 
-    let name = table()[target].name;
+    let name = DISKS.with(|t| t[target].name);
     crate::fs::fat32::unmount();
     SELECTED.store(prev, Ordering::Release);
 

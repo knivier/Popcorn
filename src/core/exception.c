@@ -1,26 +1,14 @@
-/* CPU exception panic dump (COM1 + debugcon). Called from idt.asm stubs. */
+/* CPU exceptions (vectors 0x00-0x1F), reached through isr_dispatch with a PopFrame.
+ * #DB and #BP are reported and resumed; every other exception in Ring 0 is fatal:
+ * a full dump on COM1 + debugcon, then halt. */
 #include "../includes/boot_fb.h"
+#include "../includes/exception.h"
+#include "../includes/scheduler.h"
 #include <stddef.h>
 #include <stdint.h>
 
-/* Stack layout built by cpu_exception_common (idt.asm): saved GPRs (rax pushed first),
- * then the vector and error code pushed by the stub/CPU, then the CPU frame. */
-typedef struct {
-    uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
-    uint64_t rbp, rdi, rsi, rdx, rcx, rbx, rax;
-    uint64_t vector;
-    uint64_t error;
-    uint64_t rip, cs, rflags, rsp, ss;
-} exc_frame_t;
-
-_Static_assert(offsetof(exc_frame_t, rax) == 112, "idt.asm PUSH_GPRS layout");
-_Static_assert(offsetof(exc_frame_t, vector) == 120, "idt.asm exception vector slot");
-_Static_assert(offsetof(exc_frame_t, rip) == 136, "idt.asm exception CPU frame");
-
-/* default_cpu_exception (shared gate): vector and error-code presence unknown. */
-#define EXC_VECTOR_UNKNOWN 0xFFFFu
-
-void cpu_exception_panic(const exc_frame_t* f, uint64_t cr2);
+static uint64_t g_breakpoints;
+static uint64_t g_debug_traps;
 
 static void exc_putc(char c) {
     boot_serial_putc(c);
@@ -40,50 +28,41 @@ static void exc_put_hex64(uint64_t v) {
     }
 }
 
-static const char* exc_name(uint64_t vector) {
+static void exc_put_dec(uint64_t v) {
+    char buf[24];
+    int n = 0;
+    do {
+        buf[n++] = (char)('0' + (v % 10u));
+        v /= 10u;
+    } while (v && n < (int)sizeof buf);
+    while (n > 0) {
+        exc_putc(buf[--n]);
+    }
+}
+
+const char* exception_name(uint64_t vector) {
     switch (vector) {
-        case 0:
-            return "#DE";
-        case 1:
-            return "#DB";
-        case 2:
-            return "NMI";
-        case 3:
-            return "#BP";
-        case 4:
-            return "#OF";
-        case 5:
-            return "#BR";
-        case 6:
-            return "#UD";
-        case 7:
-            return "#NM";
-        case 8:
-            return "#DF";
-        case 10:
-            return "#TS";
-        case 11:
-            return "#NP";
-        case 12:
-            return "#SS";
-        case 13:
-            return "#GP";
-        case 14:
-            return "#PF";
-        case 16:
-            return "#MF";
-        case 17:
-            return "#AC";
-        case 18:
-            return "#MC";
-        case 19:
-            return "#XM";
-        case 20:
-            return "#VE";
-        case 21:
-            return "#CP";
-        default:
-            return "#EXC";
+        case 0: return "#DE";
+        case 1: return "#DB";
+        case 2: return "NMI";
+        case 3: return "#BP";
+        case 4: return "#OF";
+        case 5: return "#BR";
+        case 6: return "#UD";
+        case 7: return "#NM";
+        case 8: return "#DF";
+        case 10: return "#TS";
+        case 11: return "#NP";
+        case 12: return "#SS";
+        case 13: return "#GP";
+        case 14: return "#PF";
+        case 16: return "#MF";
+        case 17: return "#AC";
+        case 18: return "#MC";
+        case 19: return "#XM";
+        case 20: return "#VE";
+        case 21: return "#CP";
+        default: return "#EXC";
     }
 }
 
@@ -92,16 +71,28 @@ static void exc_put_reg(const char* name, uint64_t v) {
     exc_put_hex64(v);
 }
 
-void cpu_exception_panic(const exc_frame_t* f, uint64_t cr2) {
+/* Only dereference stack words that sit in mapped kernel memory: the 64 GiB
+ * identity map or the high half. A wild RSP must not fault inside the dump. */
+static int exc_stack_readable(uint64_t rsp) {
+    if (rsp & 7u) {
+        return 0;
+    }
+    if (rsp >= 0x1000u && rsp + 64u < (64ULL << 30)) {
+        return 1;
+    }
+    return rsp >= 0xFFFF800000000000ULL && rsp + 64u > rsp;
+}
+
+static void __attribute__((noreturn)) exception_fatal(const PopFrame* f) {
     const uint64_t vector = f->vector;
     const uint64_t error = f->error;
+    uint64_t cr2, cr3;
+    __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
 
     exc_puts("\r\n*** CPU EXCEPTION ");
-    exc_puts(exc_name(vector));
+    exc_puts(exception_name(vector));
     exc_puts(" ***\r\n");
-    if (vector == EXC_VECTOR_UNKNOWN) {
-        exc_puts("  (shared gate: vector unknown; frame may be shifted by an error code)\r\n");
-    }
     exc_puts("  vector=");
     exc_put_hex64(vector);
     exc_puts("  error=");
@@ -125,6 +116,17 @@ void cpu_exception_panic(const exc_frame_t* f, uint64_t cr2) {
         exc_putc((error & 16u) ? '1' : '0');
         exc_puts(")");
     }
+    exc_put_reg("\r\n  CR3=", cr3);
+    {
+        TaskStruct* t = scheduler_get_current_task();
+        exc_puts("  task=");
+        if (t) {
+            exc_puts("pid ");
+            exc_put_dec(t->pid);
+        } else {
+            exc_puts("none");
+        }
+    }
     exc_put_reg("\r\n  RSP=", f->rsp);
     exc_put_reg("  SS=", f->ss);
     exc_put_reg("\r\n  RAX=", f->rax);
@@ -142,9 +144,46 @@ void cpu_exception_panic(const exc_frame_t* f, uint64_t cr2) {
     exc_put_reg("\r\n  R13=", f->r13);
     exc_put_reg("  R14=", f->r14);
     exc_put_reg("  R15=", f->r15);
+    if (exc_stack_readable(f->rsp)) {
+        const uint64_t* sp = (const uint64_t*)(uintptr_t)f->rsp;
+        exc_puts("\r\n  stack:");
+        for (int i = 0; i < 8; i++) {
+            exc_puts(i == 4 ? "\r\n        " : " ");
+            exc_put_hex64(sp[i]);
+        }
+    }
     exc_puts("\r\n*** halt ***\r\n");
 
     for (;;) {
         __asm__ volatile("cli; hlt");
     }
+}
+
+PopFrame* exception_handle(PopFrame* f) {
+    switch (f->vector) {
+        case 1: /* #DB: trap after the instruction; nothing to fix up. */
+            g_debug_traps++;
+            exc_puts("\r\n[exception] #DB RIP=");
+            exc_put_hex64(f->rip);
+            exc_puts(" (resumed)\r\n");
+            return f;
+        case 3: /* #BP: int3 is a trap; RIP already points past it. */
+            g_breakpoints++;
+            exc_puts("\r\n[exception] #BP RIP=");
+            exc_put_hex64(f->rip);
+            exc_puts(" (resumed)\r\n");
+            return f;
+        default:
+            /* Ring 0 has no one to blame but itself. (Ring-3 faults will kill the
+             * task instead, once user tasks exist.) */
+            exception_fatal(f);
+    }
+}
+
+uint64_t exception_breakpoint_count(void) {
+    return g_breakpoints;
+}
+
+uint64_t exception_debug_trap_count(void) {
+    return g_debug_traps;
 }

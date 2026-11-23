@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include "vmm.h"
 #include "device.h"
+#include "popframe.h"
 
 // Task states
 typedef enum {
@@ -26,10 +27,8 @@ typedef enum {
 } TaskPriority;
 
 /*
- * Per-task CPU context. Only `rsp` is live: it holds the task's saved kernel stack
- * pointer while it is switched out (switch_to() keeps rbx/rbp/r12-r15 and the return
- * address on that stack). The other fields record the initial entry state for
- * diagnostics and are not loaded by the switch.
+ * Per-task CPU context: diagnostics only (initial entry state). The live state of a
+ * switched-out task is its saved PopFrame (TaskStruct.frame) on its kernel stack.
  */
 typedef struct {
     // General purpose registers (x86-64 calling convention)
@@ -62,9 +61,8 @@ typedef struct {
     uint64_t fs;   // extra segment
     uint64_t gs;   // extra segment
     
-    /* Reserved, never loaded or saved: switch_to() switches at a call boundary where
-     * SysV treats XMM/x87 as caller-saved, and IRQ stubs (idt.asm) fxsave/fxrstor the
-     * interrupted state on the interrupted task's own stack. Kept for layout stability. */
+    /* Reserved, never loaded or saved: each saved PopFrame carries its own FXSAVE
+     * area (idt.asm isr_common). Kept for layout stability. */
     uint64_t fpu_state[32];
     uint64_t fpu_control;
 } CPUContext;
@@ -91,6 +89,9 @@ typedef struct task_struct {
     
     // CPU context
     CPUContext context;
+    /* Saved interrupt frame while switched out (on this task's kernel stack); the
+     * first one is built by setup_task_context(). NULL until the task can run. */
+    PopFrame* frame;
     
     // Scheduling
     uint64_t vruntime;
@@ -171,14 +172,17 @@ void scheduler_service_sleepers(void);
 void task_init(TaskStruct* task, void (*function)(void), void* data, TaskPriority priority);
 void task_set_address_space(TaskStruct* task, uint64_t pml4_phys);
 uint64_t scheduler_kernel_pml4_phys(void);
-/* Switch CR3 + kernel stack from `from` to `to`; returns when `from` is resumed. */
-void task_switch(TaskStruct* from, TaskStruct* to);
-/* Prepare a new task's stack so its first switch_to() enters task_entry_trampoline. */
+/* Frame switching (scheduler.c): isr_dispatch entry points and the poll-mode hook. */
+PopFrame* scheduler_on_yield(PopFrame* f);
+PopFrame* scheduler_on_irq_exit(PopFrame* f);
+void scheduler_preempt_point(void);
+uint32_t scheduler_current_pid(void);
+int scheduler_pid_alive(uint32_t pid);
+uint64_t scheduler_context_switches(void);
+/* Build a new task's initial PopFrame so its first resume enters task_entry_trampoline. */
 void setup_task_context(TaskStruct* task);
 
 // Assembly (context_switch.asm)
-/* Save callee-saved regs on the current stack, *old_rsp = RSP, switch to new_rsp. */
-void switch_to(uint64_t* old_rsp, uint64_t new_rsp);
 void task_entry_trampoline(void);
 /* Called by task_entry_trampoline on a new task's first run. Never returns. */
 void scheduler_task_entry(void (*fn)(void), void* data) __attribute__((noreturn));

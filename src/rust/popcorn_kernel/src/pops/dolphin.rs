@@ -5,8 +5,8 @@ use crate::console_ffi::{
     self, print, print_color, print_u32, println, println_color, COLOR_HEADER, COLOR_INFO,
     COLOR_PROMPT, COLOR_SUCCESS, COLOR_WARNING, COLOR_WHITE,
 };
+use crate::sync::TaskLock;
 use core::ffi::c_char;
-use core::sync::atomic::{AtomicBool, Ordering};
 
 const MAX_LINES: usize = 100;
 const MAX_LINE_LENGTH: usize = 80;
@@ -66,22 +66,33 @@ impl Editor {
     }
 }
 
-static mut EDITOR: Editor = Editor::empty();
-static EDITOR_LOCK: AtomicBool = AtomicBool::new(false);
-/// Serialization buffer for saves (~8 KiB: kept off the kernel stack). Only
-/// touched by `save_inner`, which always runs under EDITOR_LOCK.
-static mut SAVE_BUF: [u8; SAVE_BUF_LEN] = [0; SAVE_BUF_LEN];
+struct DolphinState {
+    ed: Editor,
+    /// Serialization buffer for saves (~8 KiB: kept off the kernel stack). Only
+    /// touched by `save_inner`.
+    save_buf: [u8; SAVE_BUF_LEN],
+}
+
+/// Editor state. A TaskLock (not a spinlock): it is held across file saves/loads
+/// (disk I/O) and while ESC command mode waits for keys with interrupts on.
+///
+/// Lock order: dolphin `EDITOR` → fat32 `FS` → block table. Dolphin calls the
+/// filesystem (read_file / write_file / get_current_directory) while holding this
+/// lock; the filesystem must never call back into dolphin. Re-entering from the
+/// holder (e.g. a `dolphin_*` export called from inside an editor callback) panics.
+static EDITOR: TaskLock<DolphinState> =
+    TaskLock::new(DolphinState { ed: Editor::empty(), save_buf: [0; SAVE_BUF_LEN] });
 
 fn with_editor<R>(f: impl FnOnce(&mut Editor) -> R) -> R {
-    while EDITOR_LOCK
-        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        core::hint::spin_loop();
-    }
-    let r = unsafe { f(&mut *core::ptr::addr_of_mut!(EDITOR)) };
-    EDITOR_LOCK.store(false, Ordering::Release);
-    r
+    let mut g = EDITOR.lock();
+    f(&mut g.ed)
+}
+
+/// Like `with_editor`, also lending the save buffer (paths that may save).
+fn with_editor_save<R>(f: impl FnOnce(&mut Editor, &mut [u8; SAVE_BUF_LEN]) -> R) -> R {
+    let mut g = EDITOR.lock();
+    let DolphinState { ed, save_buf } = &mut *g;
+    f(ed, save_buf)
 }
 
 extern "C" {
@@ -257,13 +268,14 @@ pub extern "C" fn dolphin_open(filename: *const c_char) {
     copy_cstr(&mut fname, name);
     ensure_txt(&mut fname);
 
-    let content = unsafe { read_file(fname.as_ptr() as *const c_char) };
-    if content.is_null() {
-        console_ffi::error("File not found. Use 'dol -new' to create it");
-        return;
-    }
-
+    /* Read under the editor lock (order: editor → FS) and parse straight away:
+     * read_file's buffer is only valid until the next read_file call. */
     with_editor(|ed| {
+        let content = unsafe { read_file(fname.as_ptr() as *const c_char) };
+        if content.is_null() {
+            console_ffi::error("File not found. Use 'dol -new' to create it");
+            return;
+        }
         ed.filename = fname;
         ed.num_lines = 0;
         let mut line_pos = 0usize;
@@ -306,12 +318,12 @@ pub extern "C" fn dolphin_open(filename: *const c_char) {
 
 #[no_mangle]
 pub extern "C" fn dolphin_save() {
-    with_editor(|ed| {
+    with_editor_save(|ed, buf| {
         if !ed.active {
             console_ffi::error("No file open in editor");
             return;
         }
-        save_inner(ed, false);
+        save_inner(ed, buf, false);
     });
 }
 
@@ -510,9 +522,9 @@ fn clamp_col(ed: &mut Editor) {
     }
 }
 
-fn handle_command_mode(ed: &mut Editor) {
+fn handle_command_mode(ed: &mut Editor, save_buf: &mut [u8; SAVE_BUF_LEN]) {
     if unsafe { timer_is_poll_mode() } {
-        save_inner(ed, true);
+        save_inner(ed, save_buf, true);
         if !ed.modified {
             close_clean(ed);
         }
@@ -586,11 +598,11 @@ fn handle_command_mode(ed: &mut Editor) {
                 return;
             }
             if cstr_eq(&cmd_buffer, b"w") {
-                save_inner(ed, true);
+                save_inner(ed, save_buf, true);
                 return;
             }
             if cstr_eq(&cmd_buffer, b"wq") || cstr_eq(&cmd_buffer, b"x") {
-                save_inner(ed, true);
+                save_inner(ed, save_buf, true);
                 if !ed.modified {
                     close_clean(ed);
                 }
@@ -624,14 +636,14 @@ fn handle_command_mode(ed: &mut Editor) {
 }
 
 /// The one save body (`dol -save` from the shell and ESC w / wq / x inside the
-/// editor). Caller must already hold the editor lock. `in_editor` drops the
-/// shell-command tips, which would draw over the editor's status rows.
-fn save_inner(ed: &mut Editor, in_editor: bool) {
+/// editor). Caller holds the editor lock (it lends `content`, the save buffer).
+/// `in_editor` drops the shell-command tips, which would draw over the editor's
+/// status rows.
+fn save_inner(ed: &mut Editor, content: &mut [u8; SAVE_BUF_LEN], in_editor: bool) {
     if ed.num_lines == 0 || (ed.num_lines == 1 && ed.lines[0][0] == 0) {
         console_ffi::set_cursor(0, 22);
         print_color("Saving empty file...", COLOR_INFO);
     }
-    let content = unsafe { &mut *core::ptr::addr_of_mut!(SAVE_BUF) };
     let mut pos = 0usize;
     let mut truncated = false;
     'lines: for i in 0..ed.num_lines {
@@ -705,7 +717,7 @@ pub extern "C" fn dolphin_handle_key(keycode: u8) {
     if keycode & 0x80 != 0 {
         return;
     }
-    with_editor(|ed| {
+    with_editor_save(|ed, save_buf| {
         if !ed.active {
             return;
         }
@@ -753,7 +765,7 @@ pub extern "C" fn dolphin_handle_key(keycode: u8) {
                 delete_char(ed);
                 render(ed);
             }
-            KEY_ESC => handle_command_mode(ed),
+            KEY_ESC => handle_command_mode(ed, save_buf),
             _ => {
                 let ch = unsafe {
                     kbd_scancode_to_char(keycode, kbd_shift_active(), kbd_caps_active())

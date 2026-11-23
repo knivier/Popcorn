@@ -11,6 +11,8 @@
 #include "../includes/rust_abi.h"
 #include "../includes/utils.h"
 #include "../includes/boot_fb.h"
+#include "../includes/lapic.h"
+#include "../includes/irq.h"
 #include <stddef.h>
 
 extern void multiboot2_parse(void);
@@ -396,11 +398,41 @@ void init_transition_to_console(void) {
     /* PS/2 keyboard after ExitBootServices (firmware ConIn is not used in the kernel). */
     kb_init();
     timer_set_tick_handler(scheduler_tick);
-    if (multiboot2_is_uefi_boot()) {
-        timer_enable_poll();
-    } else {
-        pic_acknowledge_pending();
-        timer_enable();
+    /*
+     * Both boot paths run the PIT on IRQ0 (real preemption). UEFI firmware leaves the
+     * LAPIC enabled with its own timer/IOAPIC routes, which used to make sti;hlt hang:
+     * put the LAPIC in virtual-wire mode first so PIC interrupts reach the CPU. If IRQ0
+     * still never fires, fall back to polling the PIT (cooperative scheduling only).
+     */
+    lapic_setup_virtual_wire();
+    pic_acknowledge_pending();
+    timer_enable();
+    {
+        uint64_t f = irq_save_disable();
+        __asm__ volatile("sti" ::: "memory");
+        bool irq_ok = timer_irq_check(10);
+        /* LAPIC delivery self-test (vector 0x30): proves stubs, IDT, LAPIC and EOI for
+         * the vectors MSI-X will use, before any device relies on them. */
+        extern int rust_irq_selftest(void);
+        int ipi = rust_irq_selftest();
+        irq_restore_flags(f);
+        if (!(f & 0x200u)) {
+            __asm__ volatile("cli" ::: "memory");
+        }
+        if (ipi == 1) {
+            console_println_color("IRQ: LAPIC self-IPI ok (vector 0x30)", CONSOLE_INFO_COLOR);
+        } else if (ipi == 0) {
+            console_println_color("IRQ: LAPIC self-IPI not delivered", CONSOLE_WARNING_COLOR);
+        }
+        if (irq_ok) {
+            console_println_color(lapic_active() ? "Timer: PIT IRQ0 (LAPIC virtual wire)"
+                                                 : "Timer: PIT IRQ0 (8259)",
+                                  CONSOLE_INFO_COLOR);
+        } else {
+            timer_enable_poll();
+            console_println_color("Timer: IRQ0 not delivered; polling the PIT (no preemption)",
+                                  CONSOLE_WARNING_COLOR);
+        }
     }
 
     console_draw_prompt_with_path(get_current_directory());

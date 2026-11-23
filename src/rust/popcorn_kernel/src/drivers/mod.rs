@@ -9,6 +9,17 @@ pub mod irq;
 pub mod dma;
 pub mod usb;
 pub mod class;
+// Driver framework (virtio-net review, M0). Much of the API is first used by
+// virtio-net in M1, so dead-code warnings are silenced for these modules only.
+#[allow(dead_code)]
+pub mod grant;
+#[allow(dead_code)]
+pub mod queue;
+#[allow(dead_code)]
+pub mod virtio;
+#[allow(dead_code)]
+pub mod net;
+pub mod pci_drivers;
 
 pub use registry::{drive_cmd, init_drive, init_drives, list_devices, list_drives};
 pub use registry::{device_ioctl, device_read, device_write};

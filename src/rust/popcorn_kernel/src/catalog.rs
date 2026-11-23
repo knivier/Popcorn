@@ -10,20 +10,13 @@ use crate::abi::{
     CatalogEntryC, CATALOG_KIND_DEVICE, CATALOG_KIND_DRIVE, CATALOG_KIND_IRQ, CATALOG_KIND_POP,
     CATALOG_KIND_SYSCALL, CATALOG_STATE_BOUND, CATALOG_STATE_IDLE, CATALOG_STATE_READY,
 };
+use crate::sync::IrqSpinLock;
 
 const MAX_ENTRIES: usize = 96;
 
-static mut TABLE: Option<Vec<CatalogEntryC>> = None;
+/// Leaf lock: nothing here calls out to other modules while holding it.
+static TABLE: IrqSpinLock<Vec<CatalogEntryC>> = IrqSpinLock::new(Vec::new());
 static INIT: AtomicBool = AtomicBool::new(false);
-
-fn table() -> &'static mut Vec<CatalogEntryC> {
-    unsafe {
-        if TABLE.is_none() {
-            TABLE = Some(Vec::with_capacity(MAX_ENTRIES));
-        }
-        TABLE.as_mut().unwrap()
-    }
-}
 
 fn fill_name(dst: &mut [u8], src: &str) {
     dst.fill(0);
@@ -49,7 +42,10 @@ pub fn publish(kind: u8, name: &str, class_name: &str, state: u8, id: u32) {
     if name.is_empty() {
         return;
     }
-    let t = table();
+    let mut t = TABLE.lock();
+    if t.capacity() == 0 {
+        t.reserve(MAX_ENTRIES);
+    }
     if let Some(e) = t.iter_mut().find(|e| e.kind == kind && same_name(e, name)) {
         e.state = state;
         e.id = id;
@@ -104,18 +100,19 @@ pub fn publish_syscall(name: &str, num: u32) {
 }
 
 pub fn lookup(name: &str) -> Option<CatalogEntryC> {
-    table().iter().find(|e| same_name(e, name)).copied()
+    TABLE.lock().iter().find(|e| same_name(e, name)).copied()
 }
 
 pub fn lookup_kind(kind: u8, name: &str) -> Option<CatalogEntryC> {
-    table()
+    TABLE
+        .lock()
         .iter()
         .find(|e| e.kind == kind && same_name(e, name))
         .copied()
 }
 
 pub fn count() -> usize {
-    table().len()
+    TABLE.lock().len()
 }
 
 /// Write a human listing into `buf` (NUL-terminated). Optional kind filter (0 = all).
@@ -123,8 +120,10 @@ pub fn list(kind_filter: u8, buf: &mut [u8]) -> usize {
     if buf.is_empty() {
         return 0;
     }
+    // Snapshot, then format without holding the lock.
+    let snapshot: Vec<CatalogEntryC> = TABLE.lock().clone();
     let mut out = alloc::string::String::new();
-    for e in table().iter() {
+    for e in snapshot.iter() {
         if kind_filter != 0 && e.kind != kind_filter {
             continue;
         }
@@ -207,7 +206,6 @@ pub fn init() {
     if INIT.swap(true, Ordering::SeqCst) {
         return;
     }
-    let _ = table();
     seed_syscalls();
     seed_pops();
 }

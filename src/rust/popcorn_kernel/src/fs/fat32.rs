@@ -8,16 +8,28 @@
 //!   structures onto another device.
 //! - Every cluster number is range-checked before it becomes an LBA, and every
 //!   chain/directory walk is hop-bounded (corrupt volumes cannot loop forever).
+//!
+//! Locking:
+//! - All volume state and the C-facing return buffers live in one
+//!   `TaskLock<FsState>` (`FS`). Every public function locks it exactly once and
+//!   hands `&mut Fat32` to private helpers; a public function never calls another
+//!   public (locking) function while it holds the guard (TaskLock re-entry panics).
+//! - Lock order: dolphin editor → fat32 `FS` → block table (short, taken inside
+//!   `block::*_selected`). The block layer must never call back into fat32 while it
+//!   holds its own table lock, and nothing below fat32 may call into dolphin.
+//! - `unmount()` blocks until any in-flight operation (another task) finishes, then
+//!   flushes. Callers (block/mod.rs disk switches) must not already hold `FS`;
+//!   inside this file use `unmount_locked`.
 
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::ffi::c_char;
-use core::ptr::addr_of_mut;
 
 use crate::console_ffi::{print_color, println_color, COLOR_LIGHT_GREEN, COLOR_WHITE, COLOR_YELLOW};
 use crate::drivers::backends::clock;
 use crate::drivers::block;
+use crate::sync::TaskLock;
 
 const ATTR_READ_ONLY: u8 = 0x01;
 const ATTR_HIDDEN: u8 = 0x02;
@@ -76,13 +88,31 @@ struct Fat32 {
     fat_c_sec: [u8; 512],
 }
 
-static mut FS: Option<Fat32> = None;
-static mut READ_BUF: [u8; MAX_CONTENT + 1] = [0; MAX_CONTENT + 1];
-static mut SEARCH_BUF: [u8; MAX_PATH] = [0; MAX_PATH];
-static mut CWD_BUF: [u8; MAX_PATH] = [0; MAX_PATH];
+/// Everything guarded by `FS`.
+///
+/// `read_buf`, `search_buf` and `cwd_buf` back the `*const c_char` results that
+/// `read_file`, `search` and `cwd_cstr` hand to C. They are only written under the
+/// lock; the returned pointer stays valid memory forever (it points into this
+/// static), but its *contents* are only guaranteed until the next call of the same
+/// function (by any task) — the same contract the old `static mut` buffers had.
+/// C callers must consume or copy the string before calling back into the FS.
+struct FsState {
+    vol: Option<Fat32>,
+    read_buf: [u8; MAX_CONTENT + 1],
+    search_buf: [u8; MAX_PATH],
+    cwd_buf: [u8; MAX_PATH],
+}
 
-fn fs() -> Result<&'static mut Fat32, FsError> {
-    let f = unsafe { (*addr_of_mut!(FS)).as_mut() }.ok_or(FsError::NotMounted)?;
+static FS: TaskLock<FsState> = TaskLock::new(FsState {
+    vol: None,
+    read_buf: [0; MAX_CONTENT + 1],
+    search_buf: [0; MAX_PATH],
+    cwd_buf: [0; MAX_PATH],
+});
+
+/// The mounted volume, if it is still bound to the selected disk.
+fn mounted(vol: &mut Option<Fat32>) -> Result<&mut Fat32, FsError> {
+    let f = vol.as_mut().ok_or(FsError::NotMounted)?;
     if f.disk != block::selected_id() {
         return Err(FsError::NotMounted);
     }
@@ -96,13 +126,18 @@ fn fs() -> Result<&'static mut Fat32, FsError> {
 /// normally nothing is dirty here. If the selection has already moved to a
 /// different disk, `fat_flush` refuses (it never writes one volume's FAT onto
 /// another device) and the stale cache is simply dropped.
+///
+/// Blocks (yielding) while another task is mid-operation, so the flush happens
+/// after that operation completes. The caller must not hold `FS` itself.
 pub fn unmount() {
-    unsafe {
-        if let Some(ref mut f) = *addr_of_mut!(FS) {
-            let _ = f.fat_flush();
-        }
-        *addr_of_mut!(FS) = None;
+    unmount_locked(&mut FS.lock().vol);
+}
+
+fn unmount_locked(vol: &mut Option<Fat32>) {
+    if let Some(f) = vol.as_mut() {
+        let _ = f.fat_flush();
     }
+    *vol = None;
 }
 
 fn rd(lba: u64, buf: &mut [u8]) -> Result<(), FsError> {
@@ -785,7 +820,9 @@ fn sfn_display(ent: &[u8; 32]) -> String {
 /// Mount the selected disk. Never auto-formats — blank/foreign disks stay
 /// unmounted so boot cannot hang writing a FAT over USB.
 pub fn mount_or_format() -> Result<(), FsError> {
-    unmount();
+    let mut g = FS.lock();
+    let vol = &mut g.vol;
+    unmount_locked(vol);
     let (sectors, _) = block::selected_capacity().ok_or(FsError::Io)?;
     let mut sec0 = [0u8; 512];
     rd(0, &mut sec0)?;
@@ -803,7 +840,7 @@ pub fn mount_or_format() -> Result<(), FsError> {
                 fat.free_count = le32(&info, 488);
             }
         }
-        unsafe { *addr_of_mut!(FS) = Some(fat) };
+        *vol = Some(fat);
         return Ok(());
     }
 
@@ -813,7 +850,9 @@ pub fn mount_or_format() -> Result<(), FsError> {
 
 /// Format the selected disk as Popcorn FAT32 (caller must have wiped it).
 pub fn force_format() -> Result<(), FsError> {
-    unmount();
+    let mut g = FS.lock();
+    let vol = &mut g.vol;
+    unmount_locked(vol);
     if block::selected_is_internal() && !block::selected_master_unlocked() {
         return Err(FsError::Io);
     }
@@ -823,7 +862,7 @@ pub fn force_format() -> Result<(), FsError> {
     if seed_defaults(&mut fat).is_err() {
         println_color("FAT32: volume ok (default files skipped)", COLOR_WHITE);
     }
-    unsafe { *addr_of_mut!(FS) = Some(fat) };
+    *vol = Some(fat);
     println_color("FAT32 formatted on selected disk", COLOR_LIGHT_GREEN);
     Ok(())
 }
@@ -866,7 +905,12 @@ fn resolve_dir(fat: &mut Fat32, parts: &[&str]) -> Result<u32, FsError> {
 
 /// Read a file from a directory path on the currently mounted volume (binary-safe).
 pub fn read_binary(dir_parts: &[&str], name: &str) -> Result<alloc::vec::Vec<u8>, FsError> {
-    let fat = fs()?;
+    let mut g = FS.lock();
+    let fat = mounted(&mut g.vol)?;
+    read_binary_in(fat, dir_parts, name)
+}
+
+fn read_binary_in(fat: &mut Fat32, dir_parts: &[&str], name: &str) -> Result<alloc::vec::Vec<u8>, FsError> {
     let dir = resolve_dir(fat, dir_parts)?;
     let (_idx, ent) = find_in_dir(fat, dir, name)?;
     if ent[11] & ATTR_DIRECTORY != 0 {
@@ -889,7 +933,8 @@ pub fn read_binary(dir_parts: &[&str], name: &str) -> Result<alloc::vec::Vec<u8>
 /// Write UEFI removable layout onto the mounted Popcorn volume:
 /// `EFI/BOOT/BOOTX64.EFI` and `BOOT/KERNEL` (loader also accepts the latter path).
 pub fn write_boot_layout(efi: &[u8], kernel: &[u8]) -> Result<(), FsError> {
-    let fat = fs()?;
+    let mut g = FS.lock();
+    let fat = mounted(&mut g.vol)?;
     if efi.is_empty() || kernel.is_empty() {
         return Err(FsError::Io);
     }
@@ -915,8 +960,8 @@ pub fn write_boot_layout(efi: &[u8], kernel: &[u8]) -> Result<(), FsError> {
     )?;
 
     /* Verify both payloads landed before claiming success. */
-    let efi_check = read_binary(&["EFI", "BOOT"], "BOOTX64.EFI")?;
-    let kern_check = read_binary(&["BOOT"], "KERNEL")?;
+    let efi_check = read_binary_in(fat, &["EFI", "BOOT"], "BOOTX64.EFI")?;
+    let kern_check = read_binary_in(fat, &["BOOT"], "KERNEL")?;
     if efi_check.len() != efi.len() || kern_check.len() != kernel.len() {
         return Err(FsError::Io);
     }
@@ -1151,13 +1196,18 @@ fn read_chain(fat: &mut Fat32, mut cluster: u32, size: usize, out: &mut [u8]) ->
 }
 
 pub fn write_file(name: &str, data: &[u8]) -> Result<(), FsError> {
-    let fat = fs()?;
+    let mut g = FS.lock();
+    let fat = mounted(&mut g.vol)?;
     let dir = fat.cwd;
     write_file_at(fat, dir, name, data)
 }
 
+/// NUL-terminated file contents in the shared read buffer: valid until the next
+/// `read_file` call (see `FsState`).
 pub fn read_file(name: &str) -> Result<*const c_char, FsError> {
-    let fat = fs()?;
+    let mut g = FS.lock();
+    let FsState { vol, read_buf, .. } = &mut *g;
+    let fat = mounted(vol)?;
     let (_idx, ent) = find_in_dir(fat, fat.cwd, name)?;
     if ent[11] & ATTR_DIRECTORY != 0 {
         return Err(FsError::NotFound);
@@ -1167,17 +1217,16 @@ pub fn read_file(name: &str) -> Result<*const c_char, FsError> {
         return Err(FsError::NoSpace);
     }
     let clu = Fat32::clus_from_ent(&ent);
-    unsafe {
-        let buf = &mut *addr_of_mut!(READ_BUF);
-        core::ptr::write_bytes(buf.as_mut_ptr(), 0, buf.len()); /* no 64 KiB stack temporary */
-        let n = read_chain(fat, clu, size, buf)?;
-        buf[n.min(MAX_CONTENT)] = 0;
-        Ok(buf.as_ptr() as *const c_char)
-    }
+    let buf: &mut [u8; MAX_CONTENT + 1] = read_buf;
+    buf.fill(0); /* in place: no 64 KiB stack temporary */
+    let n = read_chain(fat, clu, size, buf)?;
+    buf[n.min(MAX_CONTENT)] = 0;
+    Ok(buf.as_ptr() as *const c_char)
 }
 
 pub fn list_cwd() -> Result<(), FsError> {
-    let fat = fs()?;
+    let mut g = FS.lock();
+    let fat = mounted(&mut g.vol)?;
     println_color("Directory:", COLOR_WHITE);
     fat.for_each_entry(fat.cwd, |_i, ent| {
         if ent[11] == ATTR_VOLUME_ID {
@@ -1196,7 +1245,8 @@ pub fn list_cwd() -> Result<(), FsError> {
 }
 
 pub fn delete_entry(name: &str) -> Result<(), FsError> {
-    let fat = fs()?;
+    let mut g = FS.lock();
+    let fat = mounted(&mut g.vol)?;
     let (idx, ent) = find_in_dir(fat, fat.cwd, name)?;
     if &ent[..11] == b".          " || &ent[..11] == b"..         " {
         return Err(FsError::BadName);
@@ -1237,17 +1287,20 @@ pub fn delete_entry(name: &str) -> Result<(), FsError> {
 }
 
 pub fn mkdir(name: &str) -> Result<(), FsError> {
-    let fat = fs()?;
+    let mut g = FS.lock();
+    let fat = mounted(&mut g.vol)?;
     let dir = fat.cwd;
     mkdir_at(fat, dir, name)
 }
 
 pub fn chdir(name: &str) -> Result<(), FsError> {
-    let fat = fs()?;
+    let mut g = FS.lock();
+    let FsState { vol, cwd_buf, .. } = &mut *g;
+    let fat = mounted(vol)?;
     if name == "back" || name == ".." {
         if fat.cwd == fat.root_cluster {
             fat.cwd_path = String::from("/");
-            sync_cwd_buf(fat);
+            sync_cwd_buf(fat, cwd_buf);
             /* `back` at / reports "Already at root"; `go ..` at / is a no-op
              * success like POSIX `cd ..` (it used to claim "not found"). */
             return if name == "back" { Err(FsError::NotFound) } else { Ok(()) };
@@ -1266,13 +1319,13 @@ pub fn chdir(name: &str) -> Result<(), FsError> {
                 fat.cwd_path.truncate(pos);
             }
         }
-        sync_cwd_buf(fat);
+        sync_cwd_buf(fat, cwd_buf);
         return Ok(());
     }
     if name == "/" || name == "root" {
         fat.cwd = fat.root_cluster;
         fat.cwd_path = String::from("/");
-        sync_cwd_buf(fat);
+        sync_cwd_buf(fat, cwd_buf);
         return Ok(());
     }
     if name.trim() == "." {
@@ -1293,46 +1346,44 @@ pub fn chdir(name: &str) -> Result<(), FsError> {
         fat.cwd_path.push('/');
     }
     fat.cwd_path.push_str(&shown);
-    sync_cwd_buf(fat);
+    sync_cwd_buf(fat, cwd_buf);
     Ok(())
 }
 
-fn sync_cwd_buf(fat: &Fat32) {
-    unsafe {
-        let buf = &mut *addr_of_mut!(CWD_BUF);
-        *buf = [0; MAX_PATH];
-        let b = fat.cwd_path.as_bytes();
-        let n = b.len().min(MAX_PATH - 1);
-        buf[..n].copy_from_slice(&b[..n]);
-    }
+fn sync_cwd_buf(fat: &Fat32, buf: &mut [u8; MAX_PATH]) {
+    copy_cstr_buf(buf, fat.cwd_path.as_bytes());
 }
 
+/// Zero `buf` and copy `src` in, truncated so a NUL terminator always remains.
+fn copy_cstr_buf(buf: &mut [u8; MAX_PATH], src: &[u8]) {
+    *buf = [0; MAX_PATH];
+    let n = src.len().min(MAX_PATH - 1);
+    buf[..n].copy_from_slice(&src[..n]);
+}
+
+/// Current directory as a C string in the shared cwd buffer ("/" when nothing is
+/// mounted). Valid until the next `cwd_cstr`/`chdir` call (see `FsState`).
 pub fn cwd_cstr() -> *const c_char {
-    if let Ok(fat) = fs() {
-        sync_cwd_buf(fat);
-    } else {
-        unsafe {
-            let buf = &mut *addr_of_mut!(CWD_BUF);
-            *buf = [0; MAX_PATH];
-            buf[0] = b'/';
-        }
+    let mut g = FS.lock();
+    let FsState { vol, cwd_buf, .. } = &mut *g;
+    match mounted(vol) {
+        Ok(fat) => sync_cwd_buf(fat, cwd_buf),
+        Err(_) => copy_cstr_buf(cwd_buf, b"/"),
     }
-    unsafe { (*addr_of_mut!(CWD_BUF)).as_ptr() as *const c_char }
+    cwd_buf.as_ptr() as *const c_char
 }
 
+/// Full path of the first match in the shared search buffer: valid until the
+/// next `search` call (see `FsState`).
 pub fn search(name: &str) -> Result<*const c_char, FsError> {
-    let fat = fs()?;
+    let mut g = FS.lock();
+    let FsState { vol, search_buf, .. } = &mut *g;
+    let fat = mounted(vol)?;
     let sfn = to_sfn(name)?;
     let mut path = String::new();
     if search_rec(fat, fat.root_cluster, "/", &sfn, &mut path, 0)? {
-        unsafe {
-            let buf = &mut *addr_of_mut!(SEARCH_BUF);
-            *buf = [0; MAX_PATH];
-            let b = path.as_bytes();
-            let n = b.len().min(MAX_PATH - 1);
-            buf[..n].copy_from_slice(&b[..n]);
-            return Ok(buf.as_ptr() as *const c_char);
-        }
+        copy_cstr_buf(search_buf, path.as_bytes());
+        return Ok(search_buf.as_ptr() as *const c_char);
     }
     Err(FsError::NotFound)
 }
@@ -1396,7 +1447,8 @@ fn format_path(prefix: &str, name: &str) -> String {
 }
 
 pub fn copy_file(src: &str, dest_dir: &str) -> Result<(), FsError> {
-    let fat = fs()?;
+    let mut g = FS.lock();
+    let fat = mounted(&mut g.vol)?;
     let (_i, ent) = find_in_dir(fat, fat.cwd, src)?;
     if ent[11] & ATTR_DIRECTORY != 0 {
         return Err(FsError::BadName);
@@ -1418,7 +1470,8 @@ pub fn copy_file(src: &str, dest_dir: &str) -> Result<(), FsError> {
 }
 
 pub fn list_hierarchy() -> Result<(), FsError> {
-    let fat = fs()?;
+    let mut g = FS.lock();
+    let fat = mounted(&mut g.vol)?;
     println_color("FAT32 tree:", COLOR_WHITE);
     list_rec(fat, fat.root_cluster, "/", 0)
 }

@@ -106,6 +106,11 @@ void kmain(void) {
         bool from_queue = false;
 
         timer_poll();
+        scheduler_preempt_point(); /* PIT poll-mode fallback: switch where it is safe */
+        {
+            extern void rust_net_pump(void);
+            rust_net_pump(); /* network stack pass (RX, ARP timers, TX flush); never blocks */
+        }
         /* Push console rows a paced (coalesced) update left pending. */
         rust_screen_idle_flush();
         if ((loop_iter & 0xFFu) == 0u) {

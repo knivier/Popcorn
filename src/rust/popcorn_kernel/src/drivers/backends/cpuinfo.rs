@@ -1,7 +1,8 @@
 //! CPUID / frequency info drive (`cpu` → `/dev/cpu`).
 
 use alloc::string::String;
-use core::sync::atomic::{AtomicBool, Ordering};
+
+use crate::sync::{irq_restore, irq_save_disable, Once, TaskLock};
 
 use crate::console_ffi::{
     print, print_color, println_color, separator, u64_to_dec, COLOR_LIGHT_CYAN,
@@ -59,45 +60,31 @@ pub struct CpuInfo {
     pub has_apic: u8,
 }
 
-static mut EXT: ExtendedCpuInfo = ExtendedCpuInfo {
-    vendor: [0; 13],
-    brand_string: [0; 49],
-    family: 0,
-    model: 0,
-    stepping: 0,
-    cores: 1,
-    has_fpu: 0,
-    has_sse: 0,
-    has_sse2: 0,
-    has_sse3: 0,
-    has_ssse3: 0,
-    has_sse41: 0,
-    has_sse42: 0,
-    has_avx: 0,
-    has_avx2: 0,
-    has_apic: 0,
-    has_tsc: 0,
-    has_msr: 0,
-};
-static mut FREQ: CpuFrequency = CpuFrequency {
-    tsc_hz: 0,
-    mhz: 0,
-    frequency_detected: 0,
-};
-static mut COMPACT: CpuInfo = CpuInfo {
-    vendor: [0; 13],
-    family: 0,
-    model: 0,
-    stepping: 0,
-    has_fpu: 0,
-    has_sse: 0,
-    has_sse2: 0,
-    has_sse3: 0,
-    has_avx: 0,
-    has_apic: 0,
-};
-static EXT_READY: AtomicBool = AtomicBool::new(false);
-static FREQ_READY: AtomicBool = AtomicBool::new(false);
+/// CPUID results: full and compact (sysinfo ABI) views, filled together.
+struct CpuIds {
+    ext: ExtendedCpuInfo,
+    compact: CpuInfo,
+}
+
+/// Write-once; stable addresses for the pointer-returning C exports below.
+static IDS: Once<CpuIds> = Once::new();
+static FREQ: Once<CpuFrequency> = Once::new();
+/// Serialises TSC calibration (it reprograms PIT channel 2 for ~50 ms).
+static CAL_LOCK: TaskLock<()> = TaskLock::new(());
+
+/// Publish a computed value. Racing callers compute the same thing; the first
+/// to publish wins. Interrupts are off across `call_once` so preemption cannot
+/// land inside its busy window (another task would see it as re-entry).
+fn publish<T>(once: &'static Once<T>, v: T) -> &'static T {
+    let flags = irq_save_disable();
+    let r = once.call_once(|| v);
+    irq_restore(flags);
+    r
+}
+
+fn ext() -> &'static ExtendedCpuInfo {
+    &detect_ids().ext
+}
 
 extern "C" {
     fn cpuid_get_vendor(vendor_string: *mut u8);
@@ -125,16 +112,16 @@ pub fn ioctl(request: u64, argp: *mut u8) -> i64 {
     }
     match request {
         IOC_CPU_INFO => {
-            detect_extended();
+            let e = *ext();
             unsafe {
-                *(argp as *mut ExtendedCpuInfo) = EXT;
+                *(argp as *mut ExtendedCpuInfo) = e;
             }
             0
         }
         IOC_CPU_FREQ => {
-            detect_frequency();
+            let f = *freq();
             unsafe {
-                *(argp as *mut CpuFrequency) = FREQ;
+                *(argp as *mut CpuFrequency) = f;
             }
             0
         }
@@ -146,7 +133,7 @@ pub fn cmd(cmd: &str) -> String {
     detect_extended();
     match cmd {
         "status" | "info" => {
-            let e = unsafe { EXT };
+            let e = *ext();
             let mut s = String::from("cpu ready vendor=");
             push_cstr(&mut s, &e.vendor);
             s.push_str(" fam=");
@@ -156,8 +143,7 @@ pub fn cmd(cmd: &str) -> String {
             s
         }
         "hz" | "freq" => {
-            detect_frequency();
-            let f = unsafe { FREQ };
+            let f = *freq();
             if f.frequency_detected == 0 {
                 String::from("tsc unavailable")
             } else {
@@ -172,8 +158,13 @@ pub fn cmd(cmd: &str) -> String {
 }
 
 pub fn detect_extended() {
-    if EXT_READY.load(Ordering::Acquire) {
-        return;
+    detect_ids();
+}
+
+/// Run CPUID (first call) and return the cached results.
+fn detect_ids() -> &'static CpuIds {
+    if let Some(ids) = IDS.get() {
+        return ids;
     }
     let mut e = ExtendedCpuInfo {
         vendor: [0; 13],
@@ -245,60 +236,53 @@ pub fn detect_extended() {
             cpuid_extended_brand(7, cpuid7.as_mut_ptr());
             e.has_avx2 = u8::from((cpuid7[1] & (1 << 5)) != 0);
         }
-        EXT = e;
-        COMPACT = CpuInfo {
-            vendor: e.vendor,
-            family: e.family,
-            model: e.model,
-            stepping: e.stepping,
-            has_fpu: e.has_fpu,
-            has_sse: e.has_sse,
-            has_sse2: e.has_sse2,
-            has_sse3: e.has_sse3,
-            has_avx: e.has_avx,
-            has_apic: e.has_apic,
-        };
     }
-    EXT_READY.store(true, Ordering::Release);
+    let compact = CpuInfo {
+        vendor: e.vendor,
+        family: e.family,
+        model: e.model,
+        stepping: e.stepping,
+        has_fpu: e.has_fpu,
+        has_sse: e.has_sse,
+        has_sse2: e.has_sse2,
+        has_sse3: e.has_sse3,
+        has_avx: e.has_avx,
+        has_apic: e.has_apic,
+    };
+    publish(&IDS, CpuIds { ext: e, compact })
 }
 
 pub fn detect_frequency() {
-    if FREQ_READY.load(Ordering::Acquire) {
-        return;
+    freq();
+}
+
+/// Calibrate (first call) and return the cached frequency.
+fn freq() -> &'static CpuFrequency {
+    if let Some(f) = FREQ.get() {
+        return f;
     }
-    detect_extended();
+    let has_tsc = ext().has_tsc != 0;
+    let _cal = CAL_LOCK.lock();
+    if let Some(f) = FREQ.get() {
+        return f; // another task calibrated while we waited
+    }
     let mut f = CpuFrequency {
         tsc_hz: 0,
         mhz: 0,
         frequency_detected: 0,
     };
-    if unsafe { EXT.has_tsc } == 0 {
-        unsafe {
-            FREQ = f;
-        }
-        FREQ_READY.store(true, Ordering::Release);
-        return;
+    if !has_tsc {
+        return publish(&FREQ, f);
     }
-    match calibrate_tsc_hz() {
-        Some(hz) => {
-            f.tsc_hz = hz;
-            f.mhz = (hz / 1_000_000) as u32;
-            f.frequency_detected = 1;
-            unsafe {
-                FREQ = f;
-            }
-            FREQ_READY.store(true, Ordering::Release);
-        }
-        None => {
-            /* PIT channel 2 never reached terminal count (gated off or not
-             * emulated). That will not change, so latch "undetected" instead
-             * of re-spinning on every cpu hz / IOC_CPU_FREQ call. */
-            unsafe {
-                FREQ = f;
-            }
-            FREQ_READY.store(true, Ordering::Release);
-        }
+    /* None: PIT channel 2 never reached terminal count (gated off or not
+     * emulated). That will not change, so latch "undetected" instead of
+     * re-spinning on every cpu hz / IOC_CPU_FREQ call. */
+    if let Some(hz) = calibrate_tsc_hz() {
+        f.tsc_hz = hz;
+        f.mhz = (hz / 1_000_000) as u32;
+        f.frequency_detected = 1;
     }
+    publish(&FREQ, f)
 }
 
 /// PIT input clock (Hz), same as PIT_FREQUENCY in timer.h.
@@ -372,14 +356,12 @@ pub extern "C" fn cpu_detect_frequency() {
 
 #[no_mangle]
 pub extern "C" fn cpu_get_extended_info() -> *const ExtendedCpuInfo {
-    detect_extended();
-    core::ptr::addr_of!(EXT)
+    ext() as *const ExtendedCpuInfo
 }
 
 #[no_mangle]
 pub extern "C" fn cpu_get_frequency() -> *const CpuFrequency {
-    detect_frequency();
-    core::ptr::addr_of!(FREQ)
+    freq() as *const CpuFrequency
 }
 
 #[no_mangle]
@@ -389,14 +371,12 @@ pub extern "C" fn sysinfo_detect_cpu() {
 
 #[no_mangle]
 pub extern "C" fn sysinfo_get_cpu_info() -> *const CpuInfo {
-    detect_extended();
-    core::ptr::addr_of!(COMPACT)
+    &detect_ids().compact as *const CpuInfo
 }
 
 #[no_mangle]
 pub extern "C" fn cpu_print_info() {
-    detect_extended();
-    let e = unsafe { EXT };
+    let e = *ext();
     unsafe { crate::console_ffi::console_newline() };
     println_color("=== CPU INFORMATION ===", COLOR_LIGHT_MAGENTA);
     separator();
@@ -439,8 +419,7 @@ pub extern "C" fn cpu_print_info() {
 
 #[no_mangle]
 pub extern "C" fn cpu_print_frequency() {
-    detect_frequency();
-    let f = unsafe { FREQ };
+    let f = *freq();
     unsafe { crate::console_ffi::console_newline() };
     println_color("=== CPU FREQUENCY ===", COLOR_LIGHT_MAGENTA);
     separator();
@@ -460,8 +439,7 @@ pub extern "C" fn cpu_print_frequency() {
 }
 
 pub fn print_compact_for_sysinfo() {
-    detect_extended();
-    let e = unsafe { EXT };
+    let e = *ext();
     println_color("--- CPU Information ---", COLOR_LIGHT_MAGENTA);
     print_color("Vendor: ", COLOR_LIGHT_CYAN);
     print_color(bytes_str(&e.vendor), COLOR_WHITE);

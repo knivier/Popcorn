@@ -3,8 +3,8 @@
 
 extern void write_port(unsigned short port, unsigned char data);
 extern char read_port(unsigned short port);
-/* idt.asm: one generic entry stub per ISA IRQ (vectors 0x20-0x2F). */
-extern const uint64_t irq_stub_table[IRQ_COUNT];
+/* idt.asm: one PopFrame entry stub per vector; ISA IRQs use vectors 0x20-0x2F. */
+extern const uint64_t isr_stub_table[256];
 
 #define INTERRUPT_GATE 0x8eU
 #define PIC1_CMD 0x20
@@ -41,7 +41,7 @@ void irq_init(void) {
      * on a not-present gate would raise #NP instead of reaching irq_dispatch.
      */
     for (uint8_t i = 0; i < IRQ_COUNT; i++) {
-        idt_set_gate((uint8_t)(0x20U + i), irq_stub_table[i], INTERRUPT_GATE, 0U);
+        idt_set_gate((uint8_t)(0x20U + i), isr_stub_table[0x20U + i], INTERRUPT_GATE, 0U);
     }
 }
 
@@ -65,7 +65,7 @@ bool irq_register(uint8_t irq, irq_handler_t handler) {
     }
     g_irq_handlers[irq] = handler;
     /* Gate already present from irq_init; re-set it so registration alone is enough. */
-    idt_set_gate((uint8_t)(0x20U + irq), irq_stub_table[irq], INTERRUPT_GATE, 0U);
+    idt_set_gate((uint8_t)(0x20U + irq), isr_stub_table[0x20U + irq], INTERRUPT_GATE, 0U);
     return true;
 }
 

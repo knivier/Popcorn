@@ -143,18 +143,18 @@ Do this before expanding storage.
 
 ### Layer isolation
 
-- [ ] Verify `ram0` write path
-- [ ] Verify virtio-blk write path
+- [x] Verify `ram0` write path (QEMU: `disk_ram0_raw_sector_io`)
+- [x] Verify virtio-blk write path (QEMU: FAT32 files on `vda`, `ported_disk_switch_fat_isolation`)
 - [ ] Verify QEMU NVMe write path
 - [ ] Verify real NVMe write path
 - [ ] Verify real USB MSC write path
-- [ ] Verify FAT32 only after raw block path works
-- [ ] Test FAT directory update
-- [ ] Test cluster allocation
+- [x] Verify FAT32 only after raw block path works (QEMU, `test-shell`; real hardware still open)
+- [x] Test FAT directory update (QEMU, `test-shell`; real hardware still open)
+- [x] Test cluster allocation (QEMU: `fs_large_multicluster_file_*`; every scratch disk is checked with `fsck.fat -n`)
 - [ ] Test file extension
-- [ ] Test file overwrite
-- [ ] Test file truncate
-- [ ] Test file persistence after reboot
+- [x] Test file overwrite (QEMU, `test-shell`; real hardware still open)
+- [x] Test file truncate (QEMU, `test-shell`; real hardware still open)
+- [x] Test file persistence after reboot (QEMU: `persistence_across_reboot`, `ported_reboot_repeat_persistence`)
 
 ### GATE 1
 
@@ -190,8 +190,8 @@ DONE!
 - [ ] Verify 100 Hz means approximately 100 ticks per real second
 - [ ] Measure 10-second timer interval
 - [ ] Compare timer result with an external clock
-- [ ] Test GRUB PIT IRQ mode
-- [ ] Test UEFI polling mode
+- [x] Test GRUB PIT IRQ mode
+- [x] Test UEFI timer: UEFI now runs the PIT on IRQ0 too (LAPIC virtual wire, `src/core/lapic.c`); polling is only the fallback when `timer_irq_check()` sees no IRQ0
 - [ ] Verify both report similar uptime
 - [ ] Verify sleep(1000 ms) lasts approximately one second
 - [ ] Define constant version number to pull from as popcorn constant vcn
@@ -247,7 +247,7 @@ typedef struct {
 
 Name suggestion:
 
-- [ ] `*PopFrame`
+- [x] `*PopFrame` (`src/includes/popframe.h`: GPRs, vector, error, CPU frame; FXSAVE area just below it)
 
 ## 3.2 Common ASM interrupt wrapper
 
@@ -257,12 +257,12 @@ Name suggestion:
 - [x] Push vector number (exceptions push the vector; IRQ stubs push the ISA IRQ number)
 - [x] Execute `cld`
 - [x] Align stack correctly before C calls
-- [ ] Pass `*PopFrame*` to C (exceptions pass `exc_frame_t*`; IRQs pass only the IRQ number)
+- [x] Pass `*PopFrame*` to C (`isr_common` in `idt.asm` → `isr_dispatch(PopFrame*)` in `src/core/isr.c`, for all 256 vectors)
 - [x] Restore original stack exactly (IRQ and int 0x80 paths; exceptions halt)
 - [x] Restore GPRs
-- [ ] Remove normalized vector/error fields
+- [x] Remove normalized vector/error fields (`add rsp, 16` before `iretq`)
 - [x] Finish with `iretq`
-- [ ] Verify no C code sees a malformed stack
+- [x] Verify no C code sees a malformed stack (`_Static_assert` layout checks + runtime 16-byte alignment check in `isr_dispatch`)
 
 ## 3.3 Exceptions
 
@@ -297,18 +297,18 @@ Add dedicated handlers for:
 - [x] Print RFLAGS
 - [x] Print CR2 for #PF
 - [x] Decode #PF bits
-- [ ] Print CR3
-- [ ] Print current `*PopTask`
+- [x] Print CR3
+- [x] Print current `*PopTask` (pid)
 - [ ] Print current `*PopRealm`
-- [ ] Dump a few stack words
-- [ ] Halt only for fatal Ring-0 faults
+- [x] Dump a few stack words (only when RSP is in mapped kernel memory)
+- [x] Halt only for fatal Ring-0 faults (`#DB` / `#BP` are reported and resumed)
 
 ### GATE 2
 
 - [ ] Exception self-tests work
-- [ ] Timer IRQ runs continuously
-- [ ] Keyboard IRQ runs continuously
-- [ ] No random crashes from ABI stack alignment
+- [x] Timer IRQ runs continuously (both boot paths; 60 s preemption soak in `test-shell`)
+- [x] Keyboard IRQ runs continuously (IRQ1 on both boot paths; PS/2 typing cases)
+- [x] No random crashes from ABI stack alignment
 
 ---
 
@@ -326,12 +326,12 @@ Stop treating all of these as one object:
 
 ## 4.2 Switch using interrupt frames
 
-> Implemented differently: preemption switches at a call boundary. `switch_to()` (`src/core/context_switch.asm`) keeps callee-saved registers on each task's own kernel stack. The IRQ stub (`irq_common` in `src/core/idt.asm`) keeps the full interrupted GPR+FXSAVE state there, and the preempted task resumes through its `iretq`. Frame-based switching is only needed once Ring-3 tasks exist (Phase 7).
+> Done (23 Nov 2026): every switch is a frame switch. A task that is not running is one saved `*PopFrame` on its kernel stack (`TaskStruct.frame`). `isr_dispatch` returns the frame to resume; `switch_frames()` in `scheduler.c` stores the outgoing frame and returns the incoming one, and `isr_common` restores FXSAVE + GPRs and `iretq`s into it. Voluntary switches use `int 0x81`, so yield, block, sleep and exit take the same path; new tasks start from a prepared frame. `switch_to()` is gone.
 
-- [ ] Timer interrupt receives `*PopFrame`
-- [ ] Save interrupted frame into current task
+- [x] Timer interrupt receives `*PopFrame`
+- [x] Save interrupted frame into current task (`TaskStruct.frame`)
 - [x] Scheduler chooses next task (`pick_next`)
-- [ ] Load selected task's frame
+- [x] Load selected task's frame
 - [x] Restore CR3 when address space differs (`task_switch`)
 - [x] Return through `iretq` (preempted task resumes via `irq_common`)
 - [x] Remove timer-preemption dependency on normal C `context_save()`
@@ -367,7 +367,7 @@ task_function(argument)
 Tasks:
 
 - [x] Ensure C entry stack obeys SysV ABI
-- [ ] Provide task argument (passed in RSI but dropped with `(void)data`: tasks are `void(void)`)
+- [x] Provide task argument (`scheduler_task_entry` calls the task function with its data in RDI)
 - [x] Catch normal task return
 - [x] Mark returned task dead
 - [x] Reschedule
@@ -375,19 +375,19 @@ Tasks:
 
 ## 4.5 Scheduler stress tests
 
-- [ ] Create task A counter
-- [ ] Create task B counter
-- [ ] Create task C counter
-- [ ] Preempt all three at 100 Hz
-- [ ] Run 1 minute
+- [x] Create task A counter (`mon -stress`, `src/core/stress.c`)
+- [x] Create task B counter
+- [x] Create task C counter
+- [x] Preempt all three at 100 Hz (they never yield; 5-tick quantum)
+- [x] Run 1 minute (`preemption_stress_soak_60s`, both boot paths, ~1,500 switches, 0 errors)
 - [ ] Run 10 minutes
 - [ ] Run 1 hour
-- [ ] Verify all counters progress
-- [ ] Verify no register corruption
+- [x] Verify all counters progress
+- [x] Verify no register corruption (rbx, r8-r15, xmm0/xmm1 checked across every spin)
 - [ ] Verify no stack corruption
-- [ ] Verify keyboard remains responsive
-- [ ] Verify filesystem still works
-- [ ] Verify sleep/wake works
+- [x] Verify keyboard remains responsive (the shell answers while the spinners run)
+- [x] Verify filesystem still works (wipe/write/read under load)
+- [x] Verify sleep/wake works (sleeper task in `mon -stress`)
 
 ### GATE 3
 
@@ -1224,17 +1224,18 @@ Mark final choice in architecture docs.
 
 ## Local APIC
 
-- [ ] detect APIC support
-- [ ] enable LAPIC
-- [ ] configure spurious vector
-- [ ] EOI
+- [x] detect APIC support (CPUID + `IA32_APIC_BASE`)
+- [x] enable LAPIC (virtual-wire mode: LINT0 = ExtINT, LINT1 = NMI; `src/core/lapic.c`)
+- [x] configure spurious vector (0xFF)
+- [x] EOI (`lapic_eoi`)
 - [ ] timer
 - [ ] calibrate timer
+- [x] self-IPI delivery test (vector 0x30, counted exactly once at boot; `irq`)
 
 ## IOAPIC
 
-- [ ] map IOAPIC MMIO
-- [ ] read version
+- [x] map IOAPIC MMIO (default 0xFEC00000 until MADT parsing; uncached)
+- [x] read version (entries are masked so firmware routes cannot fire)
 - [ ] program redirection entries
 - [ ] route keyboard IRQ
 - [ ] route timer where applicable
@@ -1244,7 +1245,7 @@ Mark final choice in architecture docs.
 
 Later:
 
-- [ ] allocate interrupt vectors
+- [x] allocate interrupt vectors (device pool 0x40-0xEF in `drivers/grant/irq.rs`; MSI-X programming is M2)
 - [ ] program MSI
 - [ ] program MSI-X
 - [ ] track vector ownership with `*PopIRQ`
@@ -1372,12 +1373,12 @@ Don't copy Linux socket internals unless useful.
 
 ## 26.1 Network driver
 
-- [ ] first QEMU virtio-net
-- [ ] TX descriptors
-- [ ] RX descriptors
-- [ ] interrupts
-- [ ] MAC address
-- [ ] packet send/receive
+- [x] first QEMU virtio-net (`drivers/virtio/net.rs`, M1; in-kernel for now, see the driver note in Phase 24)
+- [x] TX descriptors
+- [x] RX descriptors
+- [ ] interrupts (M2: MSI-X hybrid; polled today)
+- [x] MAC address
+- [x] packet send/receive (ARP + ICMP echo: `ping 10.0.2.2` and `ping 8.8.8.8` work in QEMU)
 
 ## 26.2 Userspace network stack
 
@@ -2492,12 +2493,12 @@ For **right now**, your queue is:
 - [x] **2. Fix PIC cascade configuration**
 - [x] **3. Fix PIT polling time accounting** (code fixed: poll mode emits one tick per PIT period like IRQ0; runtime measurements in Phase 2.2 still open)
 - [x] **4. Verify `-mno-red-zone`**
-- [ ] **5. Build one normalized `*PopFrame` interrupt frame**
-- [x] **6. Normalize ASM interrupt entry** (shared `PUSH_GPRS` + `cld`; exceptions use a uniform vector/error frame; the `*PopFrame` hand-off to C is still open, see item 5)
+- [x] **5. Build one normalized `*PopFrame` interrupt frame**
+- [x] **6. Normalize ASM interrupt entry** (one `isr_common` for all 256 vectors)
 - [x] **7. Fix stack alignment before ASM → C calls**
-- [ ] **8. Move timer preemption to interrupt-frame context switching**
-- [x] **9. Add `*PopTaskEntry` trampoline** (`task_entry_trampoline` → `scheduler_task_entry`; task data argument not yet passed to the task function)
-- [ ] **10. Stress-test kernel multitasking**
+- [x] **8. Move timer preemption to interrupt-frame context switching** (also real IRQ0 on UEFI via the LAPIC virtual wire)
+- [x] **9. Add `*PopTaskEntry` trampoline** (`task_entry_trampoline` → `scheduler_task_entry`, data passed in RDI)
+- [x] **10. Stress-test kernel multitasking** (`mon -stress` + 60 s soak in `test-shell`; 10-minute / 1-hour runs still open)
 - [ ] **11. Clean GDT selector definitions**
 - [ ] **12. Add user code/data descriptors**
 - [ ] **13. Create separate per-task kernel stacks**

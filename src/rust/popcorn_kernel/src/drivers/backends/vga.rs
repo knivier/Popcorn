@@ -1,5 +1,7 @@
 //! VGA text /dev/tty0 — CRTC + 0xB8000 cell writes.
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use crate::drivers::io::outb;
 
 const VGA_MEM: usize = 0xB8000;
@@ -8,17 +10,15 @@ const VGA_HEIGHT: u32 = 25;
 const VGA_CTRL: u16 = 0x3D4;
 const VGA_DATA: u16 = 0x3D5;
 
-static mut ACTIVE: bool = false;
+static ACTIVE: AtomicBool = AtomicBool::new(false);
 
 pub fn probe() -> Result<(), &'static str> {
-    unsafe {
-        ACTIVE = true;
-    }
+    ACTIVE.store(true, Ordering::Relaxed);
     Ok(())
 }
 
 pub fn is_active() -> bool {
-    unsafe { ACTIVE }
+    ACTIVE.load(Ordering::Relaxed)
 }
 
 pub fn set_cursor(x: u32, y: u32) {

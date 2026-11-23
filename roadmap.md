@@ -8,7 +8,7 @@ Popcorn is a modular x86-64 kernel framework for learning operating system devel
 
 **Next version:** v0.8 — remove the remaining C port I/O from `src/core/` (console, init, kernel, multiboot2, shell), then Phase 4.3 platform work (ACPI → IOAPIC, MMIO BAR mapping). Block storage (ram0 / virtio-blk / NVMe / USB MSC over xHCI) and FAT32 are done. Driver-framework direction (grants, submit/complete queues, LAPIC+MSI-X): `docs/drivers/virtio-net-review.md`.
 
-**Verified:** 22 Nov 2026 — every checkbox and table row in this file re-checked against the working-tree source (a source review, not a fresh QEMU run). Covered: the `switch_to` + `task_entry_trampoline` context switch, IDT gates for all PIC vectors 0x20–0x2F, `int 0x80` returning RAX, PIT poll accounting, kernel GDT + CS reload on both boot paths, the UEFI MBI handoff via `mbi_phys`, the block / FAT32 stack, the multi-bus PCI walk, and DMA below 4 GiB. Last QEMU gate run: 3 Oct 2026 (`test-uefi`: `#PF` dump, GRUB+UEFI smoke, debugcon `I/B/S/2`). CI runs `test-uefi` on branch `prod`; `core.sh test-shell` drives shell commands over COM1 on both boots (not in CI yet). Process leftovers: pre-release marking, real-hardware boot.
+**Verified:** 23 Nov 2026 — QEMU: `test-shell` (UEFI + GRUB, ~118 cases incl. a 60 s preemption soak and `fsck.fat` on every scratch disk), `test-uefi`, `test-install`, `test-pf`. Earlier source review (22 Nov) covered: IDT gates for all PIC vectors 0x20–0x2F, `int 0x80` returning RAX, PIT poll accounting, kernel GDT + CS reload on both boot paths, the UEFI MBI handoff via `mbi_phys`, the block / FAT32 stack, the multi-bus PCI walk, and DMA below 4 GiB. CI runs `test-uefi` on branch `prod`; `core.sh test-shell` drives shell commands over COM1 on both boots (not in CI yet). Process leftovers: pre-release marking, real-hardware boot.
 
 **Roadmap scope:** Phases 3, 4.1 and 4.2 are done (FAT32 on the selected disk included; full VFS deferred). Next is Phase 4.3 (ACPI / IOAPIC interrupt routing, MMIO BAR mapping; the PDE splitter is already done) and the driver framework from `docs/drivers/virtio-net-review.md`. VFS, userspace, and the network stack stay in Phase 5.
 
@@ -23,7 +23,7 @@ Popcorn is a modular x86-64 kernel framework for learning operating system devel
 | PMM + kmalloc | Done (prototype) | `src/core/memory.c` |
 | VMM (4-level paging) | Partial | `src/core/vmm.c` — direct map 64 GiB; process PML4 shares PML4[0] + clones upper 256; 2 MiB PDE splitter; no user (`VMM_PTE_US`) mappings yet |
 | PMM (bitmap) | Done (≤16 GiB track) | `memory.c` / `physmap.h` — was hard-capped at 1 GiB |
-| Scheduler + context switch | Partial | `src/core/scheduler.c`, `context_switch.asm` — `switch_to` + `task_entry_trampoline`, per-task 16 KiB kernel stacks, wait queues, sleep, bootstrap guard; `TSS.RSP0` still static |
+| Scheduler + context switch | Done for kernel tasks | `src/core/scheduler.c`, `isr.c`, `idt.asm` — interrupt-frame (`*PopFrame`) switching, timer preemption on both boot paths, `int 0x81` yield, per-level round-robin + anti-starvation, `mon -stress`; `TSS.RSP0` still static (Ring 3) |
 | Syscalls (14 registered) | Partial | `src/core/syscall.c` — real fd/dev/time/heap/cwd only |
 | FAT32 on selected disk | Done (no VFS) | `src/rust/popcorn_kernel/src/fs/` (the in-memory FS pop was removed) |
 | Pop modules | All Rust (incl. Dolphin) | `src/rust/popcorn_kernel/src/pops/`, `src/core/pop_module.c` |
@@ -78,7 +78,7 @@ Verified present in tree.
 - [x] Pop registry (`src/core/pop_module.c`, max 10) — Shimjapii, Spinner, Uptime, Memory, CPU, Sysinfo, Dolphin (all Rust, via `rust_pops_register`)
 - [x] Bitmap PMM + kmalloc; `vmm_init` from `memory_init`; 4-level `vmm_map_4k` / `vmm_unmap_4k`; `vmm_clone_kernel_space`
 - [x] IDT, PIC remap, PIT, PS/2 IRQ1, INT `0x80` (DPL 3 gate `0xEE`)
-- [x] Preemptive scheduler with per-task kernel stacks: `switch_to` (callee-saved push + `ret`) and `task_entry_trampoline` in `src/core/context_switch.asm`; timer IRQ preemption via `idt.asm` stubs
+- [x] Preemptive scheduler with per-task kernel stacks, switched by interrupt frames: `isr_common` (`idt.asm`) saves a `*PopFrame` + FXSAVE for every vector, `isr_dispatch` (`isr.c`) returns the frame to resume, `int 0x81` is the voluntary switch; new tasks enter via `task_entry_trampoline`
 - [x] 14 syscall handlers registered (`src/core/syscall.c`; behavior is still partial — see Phase 1 / 2)
 
 ### Bring-up I/O (inline, no framework)
@@ -103,9 +103,9 @@ Coding gate items are done (QEMU + CI). Remaining are release/process and hardwa
 
 - [ ] Mark releases pre-release until v0.7 exit criteria
 - [x] Keep `test-uefi` green on GRUB ISO and UEFI img
-- [ ] Boot on real hardware (T440p / Ventoy USB, Secure Boot off)
-- [x] Diagnosable CPU exceptions — `#PF`, `#GP`, `#DF` dump CR2 / error / RIP on COM1, then halt
-- [x] Stop forcing poll-only time in `kmain` (UEFI poll; GRUB IRQ PIT)
+- [ ] Boot on real hardware: target is a ThinkPad T14s Gen 4 AMD (Secure Boot off); its Wi-Fi is a Qualcomm FastConnect 6900 (WCN6855, PCI 17CB:1103, ath11k-class)
+- [x] Diagnosable CPU exceptions — every vector has its own stub; fatal ones dump CR2 / CR3 / error / RIP / task / stack words on COM1, then halt; `#DB` / `#BP` resume
+- [x] Timer on IRQ0 on both boot paths: UEFI puts the LAPIC in virtual-wire mode and masks IOAPIC routes (`lapic.c`); PIT polling is only the fallback when IRQ0 never arrives
 - [x] One task/stack allocator — shared `g_task_pool[32]`
 - [x] Scheduler bootstrap: `scheduler_end_bootstrap()` clears tick skip
 - [x] CI: GitHub Actions running `./scripts/core.sh test-uefi` (builds + UEFI/GRUB/#PF smoke)
@@ -121,7 +121,7 @@ Do **not** build the driver network until this subset is in place. Finish below;
 ### Must land with v0.7
 
 - [x] Central IRQ table: `irq_register` / `irq_enable` / `irq_disable` (replaces hard-coded `idt_set_gate(0x20/0x21)` in `kernel.c`)
-- [x] Idle `sti; hlt` on paths that are not stuck in UEFI poll mode
+- [x] Idle `sti; hlt` on both boot paths (PIT poll mode only as fallback)
 - [x] `timer_get_ticks()` + `SYS_GETTIME` from one clock source
 - [x] Per-task fd table; `SYS_OPEN` / `READ` / `WRITE` / `IOCTL` go through `dev_*`, not the console
 - [x] `SYS_SLEEP` / `SYS_YIELD` on scheduler wait queues (IRQ wake)
@@ -301,6 +301,8 @@ QEMU (`qemu_uefi_data_disk_args`, all under `target/UNSAFE/`): xHCI usb-storage 
 - [x] Ramdisk `ram0` (4 MiB, 512 B sectors)
 - [x] Multi virtio-blk + boot auto-select / internal lock
 - [x] Shell `disk` (`-help/-list/-use/-info/-read/-write`, `-install <name> [YES]`, `-wipe <name> [YES]`, `-master <name> [YES]`); top-level `install` now just says to use `disk -install`
+- [x] Boot-disk identity: the UEFI loader records the boot volume (BPB serial + size) in the handoff; the kernel tags that disk `,boot` and `disk -install` copies only from it, and refuses the test-only loader
+- [x] FAT32: FSInfo free count kept current, unique volume serial per format (`fsck.fat` clean)
 - [x] QEMU two-disk picker test images
 - [x] Wave 2: NVMe driver (AHCI later)
 - [x] Wave 3: USB MSC over xHCI
@@ -310,9 +312,12 @@ QEMU (`qemu_uefi_data_disk_args`, all under `target/UNSAFE/`): xHCI usb-storage 
 ### 4.3 Platform (stretch)
 
 - [ ] ACPI (RSDP → XSDT) for IRQ routing / HPET — before IOAPIC
-- [ ] IOAPIC
+- [ ] IOAPIC routing (today: entries masked, PIC via LAPIC virtual wire; MADT parsing + redirection comes with the LAPIC/MSI-X work in the virtio-net review, M0)
 - [ ] MMIO BAR map hardening: UC (PWT|PCD) + `VMM_PTE_NX` for all BARs (today `map_mmio` in `drivers/dma.rs` returns the write-back direct map below 64 GiB and maps UC without NX above it; PDE splitter `vmm_split_2m_pde` already done in `vmm.c`)
-- [ ] NIC: virtio-net first (block gate met). Built on the driver framework in `docs/drivers/virtio-net-review.md`: in-kernel resource-granted drivers, universal submit/complete queues, hybrid LAPIC+MSI-X IRQ + poll budget. The hand-written no_std stack up to UDP (TCP decided later) is Phase 5
+- [x] Driver framework M0 (`docs/drivers/virtio-net-review.md`): grants (`drivers/grant`), universal `Queue`, PCI caps + `PciFunction`, shared virtio layer (modern + legacy transports, `SplitQueue`), vector table + LAPIC self-IPI, `irq` / `pci -caps` / `virtio -probe`, grant lint, host unit tests; all Rust `static mut` converted to `sync.rs` locks; slab allocator
+- [x] M1: PCI driver registry, virtio-net (polled), Ethernet/ARP/IPv4/ICMP stack, `net` / `ping` (gateway 4/4 and 8.8.8.8 in QEMU)
+- [ ] M2 MSI-X hybrid, M3 UDP/DHCP/DNS (`ping google.com`), M4 virtio-blk on the framework
+- [ ] Wi-Fi W0–W5 for the target laptop's Qualcomm WCN6855 (firmware loader, MHI, QMI/WMI, scan, open-network association, WPA2, WPA3); needs plain MSI
 
 **Exit criteria:** Phase 0 inline I/O is gone from `src/core/`; `open`/`read`/`write`/`ioctl` work on `ttyS0`, `kbd`, `fb0`; QEMU reads virtio-blk sectors; PCI lists devices at boot.
 

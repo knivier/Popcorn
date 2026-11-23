@@ -11,7 +11,7 @@
 extern const char* get_current_directory(void);
 extern bool change_directory(const char* name);
 
-/* syscall_handler_asm (idt.asm) fills these slots by offset. */
+/* Layout guard (isr.c builds it field by field now; user-mode ABI docs rely on it). */
 _Static_assert(offsetof(syscall_context_t, rax) == 0, "idt.asm syscall ctx: rax");
 _Static_assert(offsetof(syscall_context_t, rdi) == 8, "idt.asm syscall ctx: rdi");
 _Static_assert(offsetof(syscall_context_t, rcx) == 32, "idt.asm syscall ctx: rcx");

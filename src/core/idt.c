@@ -4,13 +4,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-extern void keyboard_handler(void);
-extern void timer_handler(void);
-extern void default_cpu_exception(void);
-extern void exc_double_fault(void);
-extern void exc_general_protection(void);
-extern void exc_page_fault(void);
-extern const uint64_t exc_stub_table[32]; /* idt.asm: exc_stub_<n> for vectors 0-31 */
+#include "../includes/popframe.h"
+
+/* idt.asm: isr_stub_<n> for every vector; all of them build a PopFrame. */
+extern const uint64_t isr_stub_table[IDT_SIZE];
 extern void keyboard_handler_main(void);
 extern char read_port(unsigned short port);
 extern void write_port(unsigned short port, unsigned char data);
@@ -125,25 +122,25 @@ void idt_init(void)
 {
     tss_ist_lgdt_ltr();
 
-    /* Per-vector stubs: the COM1 dump names the real vector and error code.
-     * default_cpu_exception stays as the (unused) catch-all gate. */
-    for (uint8_t n = 0; n < 32U; n++) {
-        idt_set_gate(n, exc_stub_table[n], INTERRUPT_GATE, 0U);
+    /* Every vector gets a present gate to its own stub, so nothing can raise #NP:
+     * exceptions name their real vector, and a stray interrupt on an unused vector
+     * is counted by isr_dispatch instead of faulting. */
+    for (unsigned n = 0; n < IDT_SIZE; n++) {
+        idt_set_gate((uint8_t)n, isr_stub_table[n], INTERRUPT_GATE, 0U);
     }
-    /* #DF / #PF / #GP: same per-vector stubs (exc_stub_table[8/13/14]), but on
-     * IST stacks so a blown kernel stack still produces a dump. */
-    idt_set_gate(0x08, (uint64_t)(uintptr_t)exc_double_fault, INTERRUPT_GATE, 2U);
-    idt_set_gate(0x0d, (uint64_t)(uintptr_t)exc_general_protection, INTERRUPT_GATE, 1U);
-    idt_set_gate(0x0e, (uint64_t)(uintptr_t)exc_page_fault, INTERRUPT_GATE, 1U);
+    /* #DF / #PF / #GP on IST stacks so a blown kernel stack still produces a dump. */
+    idt_set_gate(0x08, isr_stub_table[0x08], INTERRUPT_GATE, 2U);
+    idt_set_gate(0x0d, isr_stub_table[0x0d], INTERRUPT_GATE, 1U);
+    idt_set_gate(0x0e, isr_stub_table[0x0e], INTERRUPT_GATE, 1U);
 
     /* IRQ0 timer / IRQ1 keyboard via central irq table (not hard-coded gates alone). */
     irq_init();
     irq_register(0, timer_interrupt_handler);
     irq_register(1, keyboard_handler_main);
 
-    extern void syscall_handler_asm(void);
-    uint64_t syscall_address = (uint64_t)(uintptr_t)syscall_handler_asm;
-    idt_set_gate(0x80, syscall_address, 0xEEU, 0U);
+    /* int 0x80 is callable from Ring 3 (DPL 3); int 0x81 (yield) is kernel-only. */
+    idt_set_gate(POP_VEC_SYSCALL, isr_stub_table[POP_VEC_SYSCALL], 0xEEU, 0U);
+    idt_set_gate(POP_VEC_YIELD, isr_stub_table[POP_VEC_YIELD], INTERRUPT_GATE, 0U);
 
     /* PIC remap: vectors 0x20/0x28, ICW3 cascade IRQ2 (was wrongly 0x00/0x00). */
     pic_init_remap();

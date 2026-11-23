@@ -8,9 +8,9 @@
 //! `disk install` kernel writes — use irq_quiet instead (EOI, no schedule).
 
 use alloc::vec::Vec;
-use core::ptr::addr_of_mut;
 
 use crate::drivers::usb::xhci;
+use crate::sync::TaskLock;
 
 const SECTOR: usize = 512;
 const CBW_SIG: u32 = 0x4342_5355; /* "USBC" */
@@ -57,11 +57,11 @@ struct Disk {
 /// Sectors scanned (from LBA 0) to decide whether a stick is blank.
 const CLASSIFY_SECTORS: u64 = 34;
 
-static mut DISKS: Vec<Disk> = Vec::new();
-
-fn disks() -> &'static mut Vec<Disk> {
-    unsafe { &mut *addr_of_mut!(DISKS) }
-}
+/// Usable disks. TaskLock: read/write hold it across the whole BOT transfer
+/// (CBW/data/CSW on the shared xHCI), and probe across bring-up, so interrupts
+/// must stay on. Lock order: DISKS, then xhci's HC (inside the xhci calls); the
+/// block table lock in `block/mod.rs` is never held while taking DISKS.
+static DISKS: TaskLock<Vec<Disk>> = TaskLock::new(Vec::new());
 
 fn be32(b: &[u8], o: usize) -> u32 {
     u32::from_be_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
@@ -216,8 +216,8 @@ fn init_disk(xi: usize) -> Result<Disk, &'static str> {
 /// Bring up xHCI and every Bulk-Only MSC device on it. Returns how many
 /// became usable disks. `Err("no xhci controller")` means no USB hardware.
 pub fn probe_all() -> Result<usize, &'static str> {
+    let mut t = DISKS.lock();
     let n = xhci::init()?;
-    let t = disks();
     t.clear();
     let mut last_err = "usb msc: no usable LUN";
     for xi in 0..n {
@@ -235,26 +235,27 @@ pub fn probe_all() -> Result<usize, &'static str> {
 
 /// `(sectors, sector_size)` of usable disk `idx`.
 pub fn capacity(idx: usize) -> Option<(u64, u32)> {
-    disks().get(idx).map(|d| (d.sectors, SECTOR as u32))
+    DISKS.lock().get(idx).map(|d| (d.sectors, SECTOR as u32))
 }
 
 pub fn is_boot_like(idx: usize) -> bool {
-    disks().get(idx).map_or(false, |d| d.boot_like)
+    DISKS.lock().get(idx).map_or(false, |d| d.boot_like)
 }
 
 pub fn is_ours(idx: usize) -> bool {
-    disks().get(idx).map_or(false, |d| d.ours)
+    DISKS.lock().get(idx).map_or(false, |d| d.ours)
 }
 
 pub fn is_blank(idx: usize) -> bool {
-    disks().get(idx).map_or(false, |d| d.blank)
+    DISKS.lock().get(idx).map_or(false, |d| d.blank)
 }
 
 pub fn read(idx: usize, lba: u64, buf: &mut [u8]) -> i64 {
     if buf.len() < SECTOR {
         return -2;
     }
-    let Some(d) = disks().get_mut(idx) else {
+    let mut t = DISKS.lock();
+    let Some(d) = t.get_mut(idx) else {
         return -1;
     };
     if lba >= d.sectors {
@@ -272,7 +273,8 @@ pub fn write(idx: usize, lba: u64, buf: &[u8]) -> i64 {
     if buf.len() < SECTOR {
         return -2;
     }
-    let Some(d) = disks().get_mut(idx) else {
+    let mut t = DISKS.lock();
+    let Some(d) = t.get_mut(idx) else {
         return -1;
     };
     if lba >= d.sectors {

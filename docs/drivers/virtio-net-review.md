@@ -1,6 +1,6 @@
 # Design review: universal driver framework + virtio-net
 
-Status: **for owner review, no code written yet.** This review merges three competing drafts (performance-first, grants-first, ship-first). The grants-first structure won, and the best ideas from the other two were grafted in. Every error the reviewers flagged has been re-checked against the repo and the OASIS VIRTIO 1.2/1.3 text and fixed.
+Status: **M0 and M1 done (23 Nov 2026); M2 next.** See "Progress" below for what landed and what changed against this plan. Originally: This review merges three competing drafts (performance-first, grants-first, ship-first). The grants-first structure won, and the best ideas from the other two were grafted in. Every error the reviewers flagged has been re-checked against the repo and the OASIS VIRTIO 1.2/1.3 text and fixed.
 
 ## Summary
 
@@ -24,6 +24,39 @@ The work lands in five milestones, and each one ends with a check you can see in
 The review also found two problems with the starting assumptions:
 - **QEMU very likely already adds a NIC today.** No QEMU invocation passes `-nodefaults` or any `-nic`/`-net`/`-netdev`, so QEMU adds its default NIC: e1000e on q35, e1000 on pc.
 - **The UEFI "sti hangs" problem has a concrete suspect.** Every IDT vector outside 0–31, 0x20, 0x21 and 0x80 is not-present.
+
+### Progress
+
+**Already landed before M0 (interrupt work, 23 Nov 2026).** These supersede parts of §1 (F4, F5, F11) and §3.3.1:
+- Every IDT vector (0–255) has a stub that builds one `PopFrame` (`src/includes/popframe.h`) with FXSAVE below it and calls `isr_dispatch` (`src/core/isr.c`); there is no separate `irq_vectors.asm`/`vector_common`.
+- UEFI is no longer poll-only: `src/core/lapic.c` puts the LAPIC in virtual-wire mode (LINT0 ExtINT, LINT1 NMI, LAPIC timer + error LVT masked, spurious 0xFF) and masks every IOAPIC entry; IRQ0 drives preemption on both boot paths, with PIT polling only as a fallback. Q1 is settled.
+- Tasks switch by interrupt frame (`int 0x81` for voluntary switches). The LAPIC stays in C (Q5): Rust reaches it through `lapic_eoi` / `lapic_self_ipi`.
+
+**M0 (23 Nov 2026), owner answers applied:** Q14 descriptive names; Q13 deprecation warnings + lint; Q8 a separate `map_mmio_uc` (no page splitting); Q9 cleanup **inside** M0.
+- `sync.rs`: `IrqSpinLock` (interrupts off; re-entry panics with both call sites), `TaskLock` (yielding mutex; reclaims a killed holder), `Once`. `util/copy.rs` (`rep movsb`/`stosb`), `util/csum.rs` (RFC 1071).
+- Panic handler prints `*** RUST PANIC: <msg> at file:line ***` on COM1 only (`com1_putc`/`com1_puts`), then halts.
+- **All 69 `static mut` in the Rust crate converted** (display, storage, fs/editor, registries) to atomics, `IrqSpinLock`, `TaskLock` or `Once`; lock order is documented at each static (editor → fs → block table; block table is a leaf; screen → fb). Slab allocator in `alloc_shim.rs` (classes 16–2048 B, counters).
+- Grants: `drivers/grant/{mmio,port,dma,irq}.rs` — `MmioRegion` (UC, bounds-checked, never panics, `GRANT_VIOLATIONS`), `PortRange`, `DmaPool` (64 KiB runs, page-safe `BufSlab`), vector table + allocator (`rust_vector_dispatch` from `isr_dispatch`). Kernel self-test vector is **0x30** (not 0x40). `drivers::io` is `#[deprecated]`; the build warnings list the drivers still to migrate.
+- `drivers/queue.rs` (`Queue`, `Seg`, `Completion`, `DeviceAddr`), `bus/pci.rs` (CF8/CFC lock with atomic RMW, capability walk, I/O BAR sizing, `PciFunction`, `claim`/`release`, `msix_info`, `pci -caps`).
+- `drivers/virtio/`: `transport.rs`, `modern.rs`, `legacy.rs` (dynamic 20/24 config offset), `pci.rs` (selection), `virtqueue.rs` (`SplitQueue`, pure `core`), `probe.rs`.
+- Shell: `irq`, `pci -caps`, `virtio -probe`. Scripts: `core.sh lint` (`scripts/lib/lint.sh`), `core.sh test-host` (`src/rust_host_tests`).
+
+**M0 exit, verified in QEMU on UEFI and GRUB** (`driver_framework_m0_irq_pci_virtio` in `test-shell`):
+- the LAPIC self-IPI on vector 0x30 is counted exactly once at boot (`irq: selftest vector 0x30 count=1`);
+- `pci -caps` shows MSI-X on virtio-blk, NVMe and xHCI, and the virtio vendor caps (common/notify/device/isr/pci-cfg) on the modern device;
+- `virtio -probe` drives a modern-only virtio-blk (0x1042, ignored by the legacy driver) through claim → ModernTransport → negotiate → `SplitQueue` on a `DmaPool`, reads its capacity (16384 sectors) and sector 0 (the harness's `POPCORN-VIRTIO-M0` signature), resets and releases it — twice in a row. (This replaces "compare capacity with the legacy driver": resetting a device the legacy driver is using would break it.)
+- Host tests green (11): checksum vs a byte-wise reference at every length/alignment, RFC 1071 vectors; SplitQueue against a random-order device model past the u16 wrap (>70k completions) with and without EVENT_IDX, arm race, full ring, kick suppression, legacy layout.
+
+**M1 (23 Nov 2026):** polled virtio-net + Ethernet/ARP/IPv4/ICMP.
+- `drivers/pci_drivers.rs`: the PCI driver registry (name, class, ID table, probe); the matcher claims each function for one driver. virtio-net is its first entry (modern 0x1041, and transitional 0x1000 with subsystem 1).
+- `drivers/net/mod.rs`: the `NetDevice` trait (zero-copy `RxBatch`, lent `TxBuf`, one `tx_flush` doorbell) + `loopback.rs`. Simplified from §6: no `caps`/`arm` yet (M2/M3).
+- `drivers/virtio/net.rs`: modern-only, 256-entry RX/TX `SplitQueue`s, RX at slot+38 (IPv4 at 64), TX header at +52; reset before bus mastering; no notify before DRIVER_OK; `shutdown` resets before the pool is freed.
+- `net/{eth,arp,ipv4,icmp,iface}.rs`: pure `core`, no heap; 16-entry ARP cache (60 s), 8 frames pending ARP (3 requests 1 s apart), 16-entry echo table, per-reason drop counters with `rx_frames == delivered + dropped`.
+- `net_cmd.rs`: kmain-loop pump (`rust_net_pump`, try-lock only), `net -info/-stats/-up/-down/-arp`, `ping <ip> [count] [size]`.
+- QEMU: `qemu_net_args` (user netdev, `disable-legacy=on,romfile=,vectors=0`, `POPCORN_QEMU_NET=off` for no NIC, `POPCORN_NET_PCAP` for a capture), `bootindex=0` on the USB boot stick.
+- **Exit, verified on UEFI and GRUB** (`net_m1_virtio_ping_gateway`): `net: probe ok mac 525400123456`, `net: arp 10.0.2.2 52550a000202`, `net: ping 4/4`, 3/3 with 1000-byte payloads, all 256 RX buffers reposted, an unanswered address times out. Also observed: `ping 8.8.8.8` → 3/3 (30–40 ms) through slirp from this host, so only DNS (M3) stands between this and `ping google.com`.
+- Host tests: 23 (12 new: ARP byte-exact, 20 pings across a simulated two-machine wire, off-link via gateway, ARP timeout timing, malformed IPv4 table, 200k random/mutated frames with no panic and no buffer leak, loopback).
+- Not done yet from §8 M1: the separate `test-net` verb, pcap checker and `net-selftest` build (the `test-shell` case covers the exit instead); `net -down` unconfigures the stack but keeps the device bound.
 
 ### Locked decisions (not reopened here)
 
@@ -891,18 +924,18 @@ Tags are full lowercase lines on **COM1 only**, prefixed `net: ` and written thr
 
 ## 13. Open questions for the owner
 
-1. **UEFI interrupts:** in M2, turn IF on with both PICs and LINT0 masked and only LAPIC/MSI vectors live, after the catch-all fill? Or keep UEFI poll-only for now?
-2. **Legacy virtio-net:** support the transitional/legacy path for net (10 B header, ANY_LAYOUT split, 20/24 shift; about 100 lines on top of the shared legacy transport)? Or modern-only for net, with legacy kept just for blk until M4? The proposal is modern-only.
-3. **Boot behaviour:** probe at boot and configure on `net -up` (proposed), or auto-DHCP at boot?
-4. **Where the pump runs:** in the kmain loop (proposed, matches today), or in a dedicated `io` kernel task in `scheduler.c` woken by `IrqHandle`? The task is the ring-3 shape.
-5. **LAPIC location:** Rust `arch/x86/` (proposed, next to the grant layer) or C `src/core/apic.c` next to the PIC code?
-6. **Perf experiments:** schedule packed ring / IN_ORDER / tap checksum offload after M4, or drop them until TCP?
-7. **Memory budget:** about 1 MiB DMA per NIC (256 + 256 × 2 KiB) and about 128 KiB per virtio disk. Acceptable?
-8. **MMIO cacheability:** may M0 split the 2 MiB direct-map pages over PCI/LAPIC holes and mark them UC (removing WB aliases), beyond adding `map_mmio_uc`?
-9. **Cleanup scope:** convert the existing ~67 `static mut` to `IrqSpinLock`/`Once`, and add a small slab allocator in front of page-granular `kmalloc`, in this effort or as a separate pass?
-10. **Plain MSI fallback:** implement now (unused by virtio), or when the first MSI-only device (e.g. e1000) arrives?
-11. **Boot order:** OK to add `bootindex=0` to the USB stick device in all QEMU runs?
-12. **DHCP failure:** fall back to static 10.0.2.15/24 after 3 s (proposed), or stay unconfigured?
-13. **Grant enforcement strength:** deprecation warnings + lint now (proposed), or hard visibility that forces NVMe/xHCI/kbd/serial onto grants in the same release?
-14. **Naming:** keep descriptive names (`MmioRegion`, `IrqHandle`, `DmaPool`, `net0`, `drivers/net` + `src/net`), or adopt the UTD names (`*PopIO`, `*PopIRQ`, `*PopMem`, `*PopNet`) now?
-15. **Diagnostics channel:** move all multi-character serial output (including `scheduler.c` `serial_print`) to COM1-only and anchor the harness greps, as part of the repo cleanup?
+1. **(Settled 23 Nov: UEFI has interrupts via the LAPIC virtual wire.)** **UEFI interrupts:** in M2, turn IF on with both PICs and LINT0 masked and only LAPIC/MSI vectors live, after the catch-all fill? Or keep UEFI poll-only for now?
+2. **(Answered 23 Nov: modern-only for net.)** **Legacy virtio-net:** support the transitional/legacy path for net (10 B header, ANY_LAYOUT split, 20/24 shift; about 100 lines on top of the shared legacy transport)? Or modern-only for net, with legacy kept just for blk until M4? The proposal is modern-only.
+3. **(Answered: probe at boot, configure on `net -up`.)** **Boot behaviour:** probe at boot and configure on `net -up` (proposed), or auto-DHCP at boot?
+4. **(Answered: kmain loop for now; an `io` task later.)** **Where the pump runs:** in the kmain loop (proposed, matches today), or in a dedicated `io` kernel task in `scheduler.c` woken by `IrqHandle`? The task is the ring-3 shape.
+5. **(Settled: C `lapic.c`, exposed to Rust.)** **LAPIC location:** Rust `arch/x86/` (proposed, next to the grant layer) or C `src/core/apic.c` next to the PIC code?
+6. **(Answered: after M4.)** **Perf experiments:** schedule packed ring / IN_ORDER / tap checksum offload after M4, or drop them until TCP?
+7. **(Answered: accepted.)** **Memory budget:** about 1 MiB DMA per NIC (256 + 256 × 2 KiB) and about 128 KiB per virtio disk. Acceptable?
+8. **(Answered: separate `map_mmio_uc`, no page splitting.)** **MMIO cacheability:** may M0 split the 2 MiB direct-map pages over PCI/LAPIC holes and mark them UC (removing WB aliases), beyond adding `map_mmio_uc`?
+9. **(Answered: inside M0 — done.)** **Cleanup scope:** convert the existing ~67 `static mut` to `IrqSpinLock`/`Once`, and add a small slab allocator in front of page-granular `kmalloc`, in this effort or as a separate pass?
+10. **(Answered: when the first MSI-only device arrives — that is the target laptop's Qualcomm WCN6855 Wi-Fi, PCI 17CB:1103, which uses plain MSI.)** **Plain MSI fallback:** implement now (unused by virtio), or when the first MSI-only device (e.g. e1000) arrives?
+11. **(Answered: yes.)** **Boot order:** OK to add `bootindex=0` to the USB stick device in all QEMU runs?
+12. **(Answered: static fallback after 3 s.)** **DHCP failure:** fall back to static 10.0.2.15/24 after 3 s (proposed), or stay unconfigured?
+13. **(Answered: deprecation warnings + lint — done.)** **Grant enforcement strength:** deprecation warnings + lint now (proposed), or hard visibility that forces NVMe/xHCI/kbd/serial onto grants in the same release?
+14. **(Answered: descriptive names.)** **Naming:** keep descriptive names (`MmioRegion`, `IrqHandle`, `DmaPool`, `net0`, `drivers/net` + `src/net`), or adopt the UTD names (`*PopIO`, `*PopIRQ`, `*PopMem`, `*PopNet`) now?
+15. **(Answered: yes; new `net:` tags are COM1-only from M1.)** **Diagnostics channel:** move all multi-character serial output (including `scheduler.c` `serial_print`) to COM1-only and anchor the harness greps, as part of the repo cleanup?

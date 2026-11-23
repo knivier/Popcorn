@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::catalog;
+use crate::sync::IrqSpinLock;
 
 use super::backends::{clock, cpuinfo, fb, kbd, meminfo, null, serial, vga, zero};
 use super::bus::pci;
@@ -22,6 +23,7 @@ pub enum DriveKind {
     Info,
 }
 
+#[derive(Clone, Copy)]
 pub struct DriveEntry {
     pub name: &'static str,
     /// Short plain-English label for listings.
@@ -31,7 +33,9 @@ pub struct DriveEntry {
     pub dev_name: &'static str,
 }
 
-static mut DRIVES: Option<Vec<DriveEntry>> = None;
+/// Leaf lock: probes, device registration and the catalog are called only
+/// after it is dropped (entries are copied out first).
+static DRIVES: IrqSpinLock<Vec<DriveEntry>> = IrqSpinLock::new(Vec::new());
 static INIT: AtomicBool = AtomicBool::new(false);
 
 fn catalog() -> Vec<DriveEntry> {
@@ -102,13 +106,19 @@ fn catalog() -> Vec<DriveEntry> {
     ]
 }
 
-fn table() -> &'static mut Vec<DriveEntry> {
-    unsafe {
-        if DRIVES.is_none() {
-            DRIVES = Some(catalog());
-        }
-        DRIVES.as_mut().unwrap()
+/// Run `f` on the drive table (seeded on first use). Keep `f` short and
+/// self-contained: it runs with interrupts off and must not call out.
+fn with_table<R>(f: impl FnOnce(&mut Vec<DriveEntry>) -> R) -> R {
+    let mut t = DRIVES.lock();
+    if t.is_empty() {
+        *t = catalog();
     }
+    f(&mut t)
+}
+
+/// Copy of the whole table, for formatting without the lock.
+fn snapshot() -> Vec<DriveEntry> {
+    with_table(|t| t.clone())
 }
 
 fn register_dev(name: &str, kind: DriveKind, id: u32) {
@@ -151,8 +161,7 @@ pub fn init_drives() {
     if INIT.swap(true, Ordering::SeqCst) {
         return;
     }
-    let t = table();
-    for (i, d) in t.iter().enumerate() {
+    for (i, d) in snapshot().iter().enumerate() {
         catalog::publish_drive(d.name, class_for(d.kind), false, i as u32);
     }
 
@@ -175,30 +184,43 @@ pub fn init_drives() {
     pci::scan_print();
     /* Block disks: ram0 always; vda if virtio-blk present. Write-gated. */
     super::block::init();
+    /* Framework drivers (registry table): NICs today, Wi-Fi later. */
+    let bound = super::pci_drivers::probe_all();
+    if super::virtio::net::NET0.lock().is_none() {
+        let mut out = crate::Com1;
+        let _ = core::fmt::Write::write_str(&mut out, "net: none\n");
+    }
+    let _ = bound;
 }
 
 /// Start one drive by name and publish its /dev node.
 pub fn init_drive(name: &str) -> Result<(), &'static str> {
-    let t = table();
-    let idx = t
-        .iter()
-        .position(|d| d.name == name || d.dev_name == name || d.title == name)
-        .ok_or("unknown drive")?;
-    if t[idx].ready {
+    let (idx, d) = with_table(|t| {
+        t.iter()
+            .position(|d| d.name == name || d.dev_name == name || d.title == name)
+            .map(|i| (i, t[i]))
+    })
+    .ok_or("unknown drive")?;
+    if d.ready {
         return Ok(());
     }
-    probe(t[idx].name)?;
-    t[idx].ready = true;
-    let name = t[idx].name;
-    let kind = t[idx].kind;
-    let dev_name = t[idx].dev_name;
+    // Probe with the table unlocked (probes may publish to the catalog, etc.).
+    probe(d.name)?;
+    // Mark ready; if another caller won the race, it already registered the node.
+    let already = with_table(|t| core::mem::replace(&mut t[idx].ready, true));
+    if already {
+        return Ok(());
+    }
+    let name = d.name;
+    let kind = d.kind;
+    let dev_name = d.dev_name;
     register_dev(dev_name, kind, idx as u32);
     catalog::publish_drive(name, class_for(kind), true, idx as u32);
     Ok(())
 }
 
 pub fn list_drives(buf: &mut [u8]) -> usize {
-    let t = table();
+    let t = snapshot();
     let mut s = String::new();
     for d in t.iter() {
         s.push_str(d.name);
@@ -213,7 +235,7 @@ pub fn list_drives(buf: &mut [u8]) -> usize {
 }
 
 pub fn list_devices(buf: &mut [u8]) -> usize {
-    let t = table();
+    let t = snapshot();
     let mut s = String::new();
     for d in t.iter().filter(|d| d.ready) {
         s.push_str("/dev/");
@@ -224,17 +246,16 @@ pub fn list_devices(buf: &mut [u8]) -> usize {
 }
 
 pub fn drive_cmd(target: &str, cmd: &str, buf: &mut [u8]) -> usize {
-    let (name, title, dev_name, ready, kind) = {
-        let t = table();
-        match t
-            .iter()
+    let found = with_table(|t| {
+        t.iter()
             .find(|d| d.name == target || d.dev_name == target || d.title == target)
-        {
-            None => {
-                return write_cstr("error: unknown target", buf);
-            }
-            Some(d) => (d.name, d.title, d.dev_name, d.ready, d.kind),
+            .copied()
+    });
+    let (name, title, dev_name, ready, kind) = match found {
+        None => {
+            return write_cstr("error: unknown target", buf);
         }
+        Some(d) => (d.name, d.title, d.dev_name, d.ready, d.kind),
     };
 
     let reply = if cmd == "init" || cmd == "load" {
@@ -263,11 +284,12 @@ pub fn drive_cmd(target: &str, cmd: &str, buf: &mut [u8]) -> usize {
             _ if cmd == "status" || cmd == "info" => {
                 let mut s = String::from(name);
                 s.push(' ');
-                let now_ready = table()
-                    .iter()
-                    .find(|d| d.name == name)
-                    .map(|d| d.ready)
-                    .unwrap_or(false);
+                let now_ready = with_table(|t| {
+                    t.iter()
+                        .find(|d| d.name == name)
+                        .map(|d| d.ready)
+                        .unwrap_or(false)
+                });
                 s.push_str(if now_ready { "ready" } else { "idle" });
                 s.push_str(" node=/dev/");
                 s.push_str(dev_name);

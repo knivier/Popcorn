@@ -39,9 +39,8 @@
 
 /*
  * int 0x80 ABI: RAX = syscall number, args in RDI, RSI, RDX, RCX, R8, R9; the result
- * comes back in RAX and every other register is preserved. syscall_handler_asm
- * (idt.asm) builds this struct field by field; keep the order in sync with it and with
- * the _Static_asserts in syscall.c. rsp/rip/rflags/cs/ss are the interrupted context.
+ * comes back in RAX and every other register is preserved. isr_syscall (isr.c)
+ * builds this struct from the PopFrame. rsp/rip/rflags/cs/ss are the interrupted context.
  */
 typedef struct {
     uint64_t rax;
@@ -75,7 +74,6 @@ typedef struct {
 void syscall_init(void);
 void syscall_register(uint32_t syscall_num, syscall_handler_t handler, const char* name, uint32_t flags);
 int64_t syscall_dispatch(syscall_context_t* ctx);
-void syscall_handler_asm(void);
 
 int64_t sys_exit(syscall_context_t* ctx);
 int64_t sys_read(syscall_context_t* ctx);

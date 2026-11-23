@@ -226,6 +226,9 @@ build_kernel() {
   compile_c "core/vmm.c" "$OBJ_DIR/vmm.o"
   compile_c "core/init.c" "$OBJ_DIR/init.o"
   compile_c "core/syscall.c" "$OBJ_DIR/syscall.o"
+  compile_c "core/isr.c" "$OBJ_DIR/isr.o"
+  compile_c "core/lapic.c" "$OBJ_DIR/lapic.o"
+  compile_c "core/stress.c" "$OBJ_DIR/stress.o"
 
   local objs=(
     "$OBJ_DIR/kasm.o" "$OBJ_DIR/kc.o" "$OBJ_DIR/idt_c.o" "$OBJ_DIR/kbd.o" "$OBJ_DIR/shell.o"
@@ -237,7 +240,7 @@ build_kernel() {
     "$OBJ_DIR/timer.o"
     "$OBJ_DIR/scheduler.o" "$OBJ_DIR/exception.o" "$OBJ_DIR/irq.o" "$OBJ_DIR/device.o"
     "$OBJ_DIR/phase2_selftest.o" "$OBJ_DIR/memory.o" "$OBJ_DIR/vmm.o"
-    "$OBJ_DIR/init.o" "$OBJ_DIR/syscall.o"
+    "$OBJ_DIR/init.o" "$OBJ_DIR/syscall.o" "$OBJ_DIR/isr.o" "$OBJ_DIR/lapic.o" "$OBJ_DIR/stress.o"
   )
   for obj in "${objs[@]}"; do
     [[ -f "$obj" ]] || die "Missing object file: $obj"

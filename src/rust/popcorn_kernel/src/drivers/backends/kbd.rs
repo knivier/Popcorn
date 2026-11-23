@@ -2,7 +2,8 @@
 //! Controller channels are split (keyboard vs mouse/aux); mouse stays disabled for now.
 
 use crate::drivers::io::{inb, outb};
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use crate::sync::IrqSpinLock;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 const DATA: u16 = 0x60;
 const STATUS: u16 = 0x64;
@@ -77,45 +78,39 @@ mod kbc {
     }
 }
 
-/// Save RFLAGS and mask interrupts. The 8042 read + queue push must not be
-/// split by IRQ1, which runs the same producer path.
-#[inline(always)]
-fn irq_save() -> u64 {
-    let flags: u64;
-    unsafe {
-        core::arch::asm!("pushfq", "pop {}", "cli", out(reg) flags);
-    }
-    flags
+/// Scancode ring. Head == tail means empty; one slot stays unused.
+struct Ring {
+    buf: [u8; QUEUE_CAP],
+    head: usize,
+    tail: usize,
 }
 
-/// Restore the caller's IF state (stays masked if it was masked, e.g. UEFI poll mode or IRQ context).
-#[inline(always)]
-fn irq_restore(flags: u64) {
-    if (flags & (1 << 9)) != 0 {
-        unsafe {
-            core::arch::asm!("sti", options(nostack));
+impl Ring {
+    /// Drops the byte when full.
+    fn push(&mut self, scancode: u8) {
+        let next = (self.tail + 1) % QUEUE_CAP;
+        if next == self.head {
+            return;
         }
+        self.buf[self.tail] = scancode;
+        self.tail = next;
+    }
+
+    fn pop(&mut self) -> Option<u8> {
+        if self.head == self.tail {
+            return None;
+        }
+        let b = self.buf[self.head];
+        self.head = (self.head + 1) % QUEUE_CAP;
+        Some(b)
     }
 }
 
 static READY: AtomicBool = AtomicBool::new(false);
-static HEAD: AtomicU32 = AtomicU32::new(0);
-static TAIL: AtomicU32 = AtomicU32::new(0);
-static mut QUEUE: [u8; QUEUE_CAP] = [0; QUEUE_CAP];
-
-/// Single producer: only called from `poll_masked`, with interrupts off.
-fn push(scancode: u8) {
-    let tail = TAIL.load(Ordering::Relaxed);
-    let next = (tail + 1) % QUEUE_CAP as u32;
-    let head = HEAD.load(Ordering::Relaxed);
-    if next == head {
-        return;
-    }
-    unsafe {
-        QUEUE[tail as usize] = scancode;
-    }
-    TAIL.store(next, Ordering::Release);
-}
+/// Producers (IRQ1, thread-context polls) and consumers (shell, Dolphin, /dev/kbd)
+/// all take this lock, which masks interrupts: the 8042 read + push cannot be
+/// split by IRQ1, and a reader cannot be interleaved with the IRQ producer.
+static QUEUE: IrqSpinLock<Ring> = IrqSpinLock::new(Ring { buf: [0; QUEUE_CAP], head: 0, tail: 0 });
 
 pub fn probe() -> Result<(), &'static str> {
     if READY.load(Ordering::Acquire) {
@@ -141,8 +136,8 @@ pub fn probe() -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Move at most one waiting byte into the queue. Caller has interrupts masked.
-fn poll_masked() {
+/// Move at most one waiting byte into the queue. Caller holds the queue lock (interrupts masked).
+fn poll_masked(q: &mut Ring) {
     /* One status read decides both "byte waiting" and "which channel": a second
      * read could see a different byte's flags or OBF already cleared. */
     let st = kbc::status();
@@ -153,19 +148,18 @@ fn poll_masked() {
     if (st & ST_AUX) != 0 {
         return; // discard aux until mouse drive exists
     }
-    push(b);
+    q.push(b);
 }
 
 /// Drain keyboard-channel bytes into the queue (ignore aux if flagged).
 /// Safe from both thread context (main loop / Dolphin) and IRQ1: the 8042
-/// read and queue push run with interrupts masked, so there is one producer at a time.
+/// read and queue push run under the queue lock with interrupts masked, so
+/// there is one producer at a time.
 pub fn poll() {
     if !READY.load(Ordering::Acquire) {
         return; // no controller (or probe not run yet): never read a floating 0x60
     }
-    let flags = irq_save();
-    poll_masked();
-    irq_restore(flags);
+    QUEUE.with(poll_masked);
 }
 
 pub fn irq() {
@@ -173,14 +167,7 @@ pub fn irq() {
 }
 
 pub fn pop() -> Option<u8> {
-    let head = HEAD.load(Ordering::Acquire);
-    let tail = TAIL.load(Ordering::Acquire);
-    if head == tail {
-        return None;
-    }
-    let b = unsafe { QUEUE[head as usize] };
-    HEAD.store((head + 1) % QUEUE_CAP as u32, Ordering::Release);
-    Some(b)
+    QUEUE.lock().pop()
 }
 
 pub fn read(buf: &mut [u8]) -> i64 {

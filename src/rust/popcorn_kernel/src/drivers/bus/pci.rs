@@ -4,7 +4,14 @@
 //! scans miss them; we walk type-1 bridges so real hardware can see USB/NVMe.
 
 use crate::console_ffi::{print_color, println_color, u64_to_dec, COLOR_LIGHT_CYAN, COLOR_WHITE};
-use crate::drivers::io::{inl, outl};
+use crate::drivers::grant::port::raw::{inl, outl};
+use crate::drivers::grant::{GrantError, GrantId, MmioRegion, PortRange};
+use crate::sync::IrqSpinLock;
+
+/// CF8/CFC is a two-step access: an ISR or a preempting task between the address
+/// write and the data access would read/write the wrong register. One lock
+/// serialises every config access (held for one dword, or one read-modify-write).
+static CFG_LOCK: IrqSpinLock<()> = IrqSpinLock::new(());
 
 const CONFIG_ADDR: u16 = 0xCF8;
 const CONFIG_DATA: u16 = 0xCFC;
@@ -13,27 +20,35 @@ pub const VENDOR_VIRTIO: u16 = 0x1AF4;
 pub const DEV_VIRTIO_BLK_LEGACY: u16 = 0x1001;
 pub const DEV_VIRTIO_BLK_MODERN: u16 = 0x1042;
 
+#[inline]
+fn cfg_addr(bus: u8, slot: u8, func: u8, offset: u8) -> u32 {
+    (1u32 << 31) | ((bus as u32) << 16) | ((slot as u32) << 11) | ((func as u32) << 8) | ((offset as u32) & 0xFC)
+}
+
 pub fn cfg_read32(bus: u8, slot: u8, func: u8, offset: u8) -> u32 {
-    let addr = (1u32 << 31)
-        | ((bus as u32) << 16)
-        | ((slot as u32) << 11)
-        | ((func as u32) << 8)
-        | ((offset as u32) & 0xFC);
+    let _g = CFG_LOCK.lock();
     unsafe {
-        outl(CONFIG_ADDR, addr);
+        outl(CONFIG_ADDR, cfg_addr(bus, slot, func, offset));
         inl(CONFIG_DATA)
     }
 }
 
 pub fn cfg_write32(bus: u8, slot: u8, func: u8, offset: u8, value: u32) {
-    let addr = (1u32 << 31)
-        | ((bus as u32) << 16)
-        | ((slot as u32) << 11)
-        | ((func as u32) << 8)
-        | ((offset as u32) & 0xFC);
+    let _g = CFG_LOCK.lock();
     unsafe {
-        outl(CONFIG_ADDR, addr);
+        outl(CONFIG_ADDR, cfg_addr(bus, slot, func, offset));
         outl(CONFIG_DATA, value);
+    }
+}
+
+/// Atomic read-modify-write of one config dword.
+fn cfg_rmw32(bus: u8, slot: u8, func: u8, offset: u8, f: impl FnOnce(u32) -> u32) {
+    let _g = CFG_LOCK.lock();
+    unsafe {
+        outl(CONFIG_ADDR, cfg_addr(bus, slot, func, offset));
+        let v = inl(CONFIG_DATA);
+        outl(CONFIG_ADDR, cfg_addr(bus, slot, func, offset));
+        outl(CONFIG_DATA, f(v));
     }
 }
 
@@ -54,22 +69,26 @@ pub fn cfg_read16(bus: u8, slot: u8, func: u8, offset: u8) -> u16 {
 /// for Status writes the caller's value is the intended clear mask.
 pub fn cfg_write16(bus: u8, slot: u8, func: u8, offset: u8, value: u16) {
     let aligned = offset & !3;
-    let mut v = cfg_read32(bus, slot, func, aligned);
-    if aligned == 0x04 {
-        v = if (offset & 2) != 0 {
+    cfg_rmw32(bus, slot, func, aligned, |v| {
+        if aligned == 0x04 {
+            if (offset & 2) != 0 {
+                (v & 0x0000_FFFF) | ((value as u32) << 16)
+            } else {
+                value as u32
+            }
+        } else if (offset & 2) != 0 {
             (v & 0x0000_FFFF) | ((value as u32) << 16)
         } else {
-            value as u32
-        };
-    } else if (offset & 2) != 0 {
-        v = (v & 0x0000_FFFF) | ((value as u32) << 16);
-    } else {
-        v = (v & 0xFFFF_0000) | (value as u32);
-    }
-    cfg_write32(bus, slot, func, aligned, v);
+            (v & 0xFFFF_0000) | (value as u32)
+        }
+    });
 }
 
-#[derive(Clone, Copy)]
+pub fn cfg_read8(bus: u8, slot: u8, func: u8, offset: u8) -> u8 {
+    (cfg_read32(bus, slot, func, offset & !3) >> ((offset & 3) * 8)) as u8
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PciAddr {
     pub bus: u8,
     pub slot: u8,
@@ -141,6 +160,30 @@ pub fn bar_io(bus: u8, slot: u8, func: u8, bar: u8) -> Option<u16> {
         return None;
     }
     Some((lo & !0x3) as u16)
+}
+
+/// I/O BAR (base, size). Size probe with decode off: write all-ones, read back,
+/// `size = (!(v & !3) + 1) & 0xFFFF`, restore.
+pub fn bar_io_sized(bus: u8, slot: u8, func: u8, bar: u8) -> Option<(u16, u16)> {
+    if bar > 5 {
+        return None;
+    }
+    let off = 0x10 + bar * 4;
+    let lo = cfg_read32(bus, slot, func, off);
+    if (lo & 1) == 0 {
+        return None;
+    }
+    let cmd = cfg_read16(bus, slot, func, 0x04);
+    cfg_write16(bus, slot, func, 0x04, cmd & !0x3);
+    cfg_write32(bus, slot, func, off, 0xFFFF_FFFF);
+    let probe = cfg_read32(bus, slot, func, off);
+    cfg_write32(bus, slot, func, off, lo);
+    cfg_write16(bus, slot, func, 0x04, cmd);
+    let size = ((!(probe & !0x3)).wrapping_add(1) & 0xFFFF) as u16;
+    if size == 0 {
+        return None;
+    }
+    Some(((lo & !0x3) as u16, size))
 }
 
 /// Memory BAR (phys base, size). Uses size probe (write all-1s) with I/O + memory
@@ -317,4 +360,269 @@ pub fn scan_print() {
     if found == 0 {
         println_color("  (none)", COLOR_WHITE);
     }
+}
+
+// ------------------------------------------------------------- capabilities
+
+pub const CAP_MSI: u8 = 0x05;
+pub const CAP_VENDOR: u8 = 0x09;
+pub const CAP_PCIE: u8 = 0x10;
+pub const CAP_MSIX: u8 = 0x11;
+
+/// Walk the capability list: (cap id, config offset). Status bit 4 gates it; the
+/// walk stops after 48 entries so a looped list cannot hang the kernel.
+pub fn for_each_cap(a: PciAddr, mut f: impl FnMut(u8, u8)) {
+    let status = cfg_read16(a.bus, a.slot, a.func, 0x06);
+    if status & (1 << 4) == 0 {
+        return;
+    }
+    let mut ptr = cfg_read8(a.bus, a.slot, a.func, 0x34) & 0xFC;
+    let mut guard = 0;
+    while ptr >= 0x40 && guard < 48 {
+        let id = cfg_read8(a.bus, a.slot, a.func, ptr);
+        let next = cfg_read8(a.bus, a.slot, a.func, ptr + 1) & 0xFC;
+        f(id, ptr);
+        ptr = next;
+        guard += 1;
+    }
+}
+
+/// MSI-X capability: (table size, table BIR, table offset, PBA BIR, PBA offset).
+pub fn msix_info(a: PciAddr) -> Option<(u16, u8, u32, u8, u32)> {
+    let mut found = None;
+    for_each_cap(a, |id, off| {
+        if id == CAP_MSIX && found.is_none() {
+            let mc = cfg_read16(a.bus, a.slot, a.func, off + 2);
+            let table = cfg_read32(a.bus, a.slot, a.func, off + 4);
+            let pba = cfg_read32(a.bus, a.slot, a.func, off + 8);
+            found = Some(((mc & 0x7FF) + 1, (table & 7) as u8, table & !7, (pba & 7) as u8, pba & !7));
+        }
+    });
+    found
+}
+
+// ------------------------------------------------------------- PciFunction
+
+pub const DEV_VIRTIO_NET_LEGACY: u16 = 0x1000;
+pub const DEV_VIRTIO_NET_MODERN: u16 = 0x1041;
+
+/// The mediated grant source for one PCI function. Drivers get BARs, capability
+/// reads and `enable` through it; they cannot write BARs, MSI-X entries or
+/// arbitrary config space (the line that later stops a Ring-3 driver injecting
+/// interrupts).
+pub struct PciFunction {
+    addr: PciAddr,
+    vendor: u16,
+    device: u16,
+    subsys_dev: u16,
+    grant: GrantId,
+}
+
+pub enum Bar {
+    Mmio(MmioRegion),
+    Io(PortRange),
+}
+
+impl PciFunction {
+    pub fn addr(&self) -> PciAddr {
+        self.addr
+    }
+    pub fn ids(&self) -> (u16, u16) {
+        (self.vendor, self.device)
+    }
+    pub fn subsystem_device(&self) -> u16 {
+        self.subsys_dev
+    }
+    pub fn grant(&self) -> GrantId {
+        self.grant
+    }
+    pub fn cfg_r8(&self, off: u8) -> u8 {
+        cfg_read8(self.addr.bus, self.addr.slot, self.addr.func, off)
+    }
+    pub fn cfg_r16(&self, off: u8) -> u16 {
+        cfg_read16(self.addr.bus, self.addr.slot, self.addr.func, off)
+    }
+    pub fn cfg_r32(&self, off: u8) -> u32 {
+        cfg_read32(self.addr.bus, self.addr.slot, self.addr.func, off)
+    }
+    pub fn caps(&self, f: impl FnMut(u8, u8)) {
+        for_each_cap(self.addr, f)
+    }
+    /// Raw `virtio_pci_cap` (or any vendor cap) bytes at `cap_off`.
+    pub fn vendor_cap(&self, cap_off: u8) -> [u8; 20] {
+        let mut out = [0u8; 20];
+        for (i, b) in out.iter_mut().enumerate() {
+            *b = self.cfg_r8(cap_off.wrapping_add(i as u8));
+        }
+        out
+    }
+    /// Map BAR `i`: memory BARs uncached through `map_mmio_uc`, I/O BARs sized.
+    pub fn bar(&self, i: u8) -> Result<Bar, GrantError> {
+        let a = self.addr;
+        if let Some((base, size)) = bar_io_sized(a.bus, a.slot, a.func, i) {
+            return Ok(Bar::Io(PortRange::new(base, size, self.grant)));
+        }
+        let (phys, size) = bar_mem(a.bus, a.slot, a.func, i).ok_or(GrantError::Unsupported)?;
+        if size > (1 << 30) {
+            return Err(GrantError::OutOfRange);
+        }
+        Ok(Bar::Mmio(MmioRegion::map(phys, size as usize, self.grant)?))
+    }
+    /// Enable decoding / bus mastering. Always sets INTx-disable (bit 10): PCI
+    /// devices never use legacy PIC INTx in this kernel.
+    pub fn enable(&self, mem: bool, io: bool, bus_master: bool) {
+        let a = self.addr;
+        let mut cmd = cfg_read16(a.bus, a.slot, a.func, 0x04);
+        cmd |= 1 << 10;
+        if io {
+            cmd |= 1;
+        }
+        if mem {
+            cmd |= 2;
+        }
+        if bus_master {
+            cmd |= 4;
+        }
+        cfg_write16(a.bus, a.slot, a.func, 0x04, cmd);
+    }
+    pub fn disable_bus_master(&self) {
+        let a = self.addr;
+        let cmd = cfg_read16(a.bus, a.slot, a.func, 0x04);
+        cfg_write16(a.bus, a.slot, a.func, 0x04, cmd & !4);
+    }
+}
+
+/// Functions handed out by `claim` (bus/slot/func), so two drivers never share one.
+static CLAIMED: IrqSpinLock<[Option<PciAddr>; 32]> = IrqSpinLock::new([None; 32]);
+
+/// Claim the `n`th function matching `ids` (and the subsystem device, if given:
+/// transitional virtio IDs are shared by every virtio type) that nobody claimed.
+pub fn claim(ids: &[(u16, u16)], subsys: Option<u16>, n: usize) -> Option<PciFunction> {
+    let mut seen = 0usize;
+    let mut found: Option<(PciAddr, u16, u16, u16)> = None;
+    scan(|addr, id, _class| {
+        let v = (id & 0xFFFF) as u16;
+        let d = (id >> 16) as u16;
+        if !ids.iter().any(|&(iv, idv)| iv == v && idv == d) {
+            return true;
+        }
+        let sub = cfg_read16(addr.bus, addr.slot, addr.func, 0x2E);
+        if subsys.map_or(false, |want| want != sub) {
+            return true;
+        }
+        if seen == n {
+            found = Some((addr, v, d, sub));
+            return false;
+        }
+        seen += 1;
+        true
+    });
+    let (addr, vendor, device, subsys_dev) = found?;
+    let mut claimed = CLAIMED.lock();
+    if claimed.iter().flatten().any(|c| *c == addr) {
+        return None;
+    }
+    let slot = claimed.iter_mut().find(|c| c.is_none())?;
+    *slot = Some(addr);
+    Some(PciFunction { addr, vendor, device, subsys_dev, grant: crate::drivers::grant::new_grant_id() })
+}
+
+/// Give a claimed function back (driver teardown).
+pub fn release(f: PciFunction) {
+    let mut claimed = CLAIMED.lock();
+    for c in claimed.iter_mut() {
+        if *c == Some(f.addr) {
+            *c = None;
+        }
+    }
+}
+
+/// All functions matching (vendor, device) pairs, any claim state: (addr, device id).
+pub fn find_all(ids: &[(u16, u16)], mut f: impl FnMut(PciAddr, u16)) {
+    scan(|addr, id, _| {
+        let v = (id & 0xFFFF) as u16;
+        let d = (id >> 16) as u16;
+        if ids.iter().any(|&(iv, idv)| iv == v && idv == d) {
+            f(addr, d);
+        }
+        true
+    });
+}
+
+fn cap_name(id: u8) -> &'static str {
+    match id {
+        0x01 => "pm",
+        CAP_MSI => "msi",
+        CAP_VENDOR => "vendor",
+        CAP_PCIE => "pcie",
+        CAP_MSIX => "msix",
+        0x12 => "sata",
+        0x13 => "af",
+        _ => "other",
+    }
+}
+
+fn virtio_cfg_name(t: u8) -> &'static str {
+    match t {
+        1 => "common",
+        2 => "notify",
+        3 => "isr",
+        4 => "device",
+        5 => "pci-cfg",
+        8 => "shm",
+        _ => "?",
+    }
+}
+
+fn print_dec(v: u64) {
+    let mut num = [0u8; 20];
+    let n = u64_to_dec(v, &mut num);
+    print_color(core::str::from_utf8(&num[..n]).unwrap_or("?"), COLOR_WHITE);
+}
+
+/// `pci -caps`: every function with its capability list (MSI-X table size,
+/// virtio cfg types).
+pub fn scan_caps_print() {
+    println_color("PCI capabilities:", COLOR_LIGHT_CYAN);
+    scan(|addr, id, class_reg| {
+        let vendor = (id & 0xFFFF) as u16;
+        let device = (id >> 16) as u16;
+        print_color("  ", COLOR_WHITE);
+        print_hex16(vendor);
+        print_color(":", COLOR_WHITE);
+        print_hex16(device);
+        print_color(" @ ", COLOR_WHITE);
+        print_dec(addr.bus as u64);
+        print_color(":", COLOR_WHITE);
+        print_dec(addr.slot as u64);
+        print_color(".", COLOR_WHITE);
+        print_dec(addr.func as u64);
+        print_color(" class ", COLOR_LIGHT_CYAN);
+        print_hex16((class_reg >> 16) as u16);
+        print_color(" caps:", COLOR_LIGHT_CYAN);
+        let mut any = false;
+        for_each_cap(addr, |cid, off| {
+            any = true;
+            print_color(" ", COLOR_WHITE);
+            print_color(cap_name(cid), COLOR_WHITE);
+            if cid == CAP_MSIX {
+                let mc = cfg_read16(addr.bus, addr.slot, addr.func, off + 2);
+                print_color("(", COLOR_WHITE);
+                print_dec(((mc & 0x7FF) + 1) as u64);
+                print_color(")", COLOR_WHITE);
+            } else if cid == CAP_VENDOR && vendor == VENDOR_VIRTIO {
+                let t = cfg_read8(addr.bus, addr.slot, addr.func, off + 3);
+                print_color("(", COLOR_WHITE);
+                print_color(virtio_cfg_name(t), COLOR_WHITE);
+                print_color(")", COLOR_WHITE);
+            }
+        });
+        if !any {
+            print_color(" none", COLOR_WHITE);
+        }
+        unsafe {
+            crate::console_ffi::console_newline();
+        }
+        true
+    });
 }

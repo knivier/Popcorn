@@ -23,6 +23,8 @@ source "$POPCORN_SCRIPTS/lib/img-uefi.sh"
 source "$POPCORN_SCRIPTS/lib/iso-uefi.sh"
 # shellcheck source=lib/qemu-uefi.sh
 source "$POPCORN_SCRIPTS/lib/qemu-uefi.sh"
+# shellcheck source=lib/lint.sh
+source "$POPCORN_SCRIPTS/lib/lint.sh"
 
 usage() {
   cat <<'EOF'
@@ -50,6 +52,11 @@ Test:
               check the COM1 mirror (UNSAFE test imgs; safe img rebuilt after).
               Extra args go to scripts/lib/shell_test.py (--mode, --only, --jobs, --quick)
   test-quick  test-shell --quick: about 1 min smoke tier (cases marked "quick")
+
+Checks:
+  lint        Grant lint: no raw hardware access in drivers/virtio, drivers/net, net/;
+              no static mut in the Rust crate
+  test-host   Host unit tests (src/rust_host_tests: virtqueue model, checksum)
 
 Other:
   stop        Stop the QEMU guest started by these scripts (other VMs untouched)
@@ -248,6 +255,13 @@ main() {
       rm -f "${USB_DATA_IMG:-$POPCORN_TARGET/UNSAFE/UNSAFE-qemu-usb-data.img}"
       build_all_uefi
       qemu_uefi_test_install
+      ;;
+    lint)
+      lint_grants
+      ;;
+    test-host)
+      have cargo || die "cargo required for test-host"
+      ( cd "$POPCORN_SRC/rust_host_tests" && cargo test --release 2>&1 ) || die "host unit tests failed"
       ;;
     stop)
       qemu_kill_guest

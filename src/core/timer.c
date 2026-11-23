@@ -46,15 +46,15 @@ void timer_init(uint32_t frequency_hz) {
     console_println_color("Timer initialized", CONSOLE_SUCCESS_COLOR);
 }
 
-// Timer interrupt handler (called from assembly)
+// Timer interrupt handler (IRQ0, via isr_dispatch -> irq_dispatch)
 void timer_interrupt_handler(void) {
     global_timer.ticks++;
+    global_timer.irq_ticks++;
 
     /*
-     * EOI before the tick handler: scheduler_tick may switch to another task, and this
-     * frame then only finishes when the preempted task is resumed (a new task never
-     * comes back here at all). IRQ gates keep IF=0 until iretq, so the early EOI cannot
-     * nest IRQ0 on this stack.
+     * EOI first. scheduler_tick only requests a switch; it happens when isr_dispatch
+     * returns another task's frame. IRQ gates keep IF=0 until iretq, so the early EOI
+     * cannot nest IRQ0 on this stack.
      */
     pic_send_eoi(0);
 
@@ -101,6 +101,28 @@ static uint16_t pit_latch_count0(void) {
     uint8_t lo = (uint8_t)read_port(0x40);
     uint8_t hi = (uint8_t)read_port(0x40);
     return (uint16_t)lo | ((uint16_t)hi << 8);
+}
+
+/*
+ * With IRQ0 enabled and IF=1: watch the PIT counter itself for `periods` timer periods
+ * and report whether IRQ0 actually arrived meanwhile. Some firmware leaves the
+ * interrupt path closed (LAPIC LINT0 masked, ...); then the caller falls back to
+ * polling instead of a kernel whose clock and scheduler silently never tick.
+ */
+bool timer_irq_check(uint32_t periods) {
+    uint64_t before = global_timer.irq_ticks;
+    uint32_t clocks = 0, target = (uint32_t)pit_divisor * periods;
+    uint16_t last = pit_latch_count0();
+    /* Bounded even if the PIT counter were frozen: ~2^26 latches is well over 1 s. */
+    for (uint32_t spins = 0; spins < (1u << 26) && clocks < target; spins++) {
+        uint16_t cur = pit_latch_count0();
+        clocks += cur <= last ? (uint32_t)(last - cur) : (uint32_t)last + pit_divisor - cur;
+        last = cur;
+        if (global_timer.irq_ticks - before >= 2u) {
+            return true;
+        }
+    }
+    return global_timer.irq_ticks - before >= 2u;
 }
 
 bool timer_is_poll_mode(void) {

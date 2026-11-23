@@ -7,6 +7,7 @@ use core::sync::atomic::Ordering;
 use crate::drivers::bus::pci;
 use crate::drivers::dma::{self, DmaBuffer};
 use crate::drivers::io::{inb, inl, inw, outb, outl, outw};
+use crate::sync::TaskLock;
 
 extern "C" {
     fn alloc_pages(num_pages: usize, flags: u32) -> *mut u8;
@@ -74,12 +75,20 @@ struct VirtioBlk {
     dead: bool,
 }
 
+// Safety: `queue_pages` is DMA memory owned exclusively by this struct; it is
+// only touched through the per-slot TaskLock in `DEVS`.
+unsafe impl Send for VirtioBlk {}
+
 /* Request page layout (one request in flight at a time). */
 const REQ_HDR_OFF: usize = 0;
 const REQ_DATA_OFF: usize = 16;
 const REQ_STATUS_OFF: usize = 16 + SECTOR_SIZE as usize;
 
-static mut DEVS: [Option<VirtioBlk>; MAX_VIRTIO_DISKS] = [None, None, None, None];
+/// One TaskLock per slot: held across the polled request wait (interrupts stay
+/// on), and independent disks do not serialise each other. Lock order: the block
+/// table lock in `block/mod.rs` is never held while taking one of these.
+static DEVS: [TaskLock<Option<VirtioBlk>>; MAX_VIRTIO_DISKS] =
+    [TaskLock::new(None), TaskLock::new(None), TaskLock::new(None), TaskLock::new(None)];
 
 fn io_read32(base: u16, off: u16) -> u32 {
     unsafe { inl(base + off) }
@@ -171,8 +180,8 @@ fn probe_one(pci_n: usize, slot: usize) -> Result<(u64, u32), &'static str> {
         VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_DRIVER_OK,
     );
 
-    unsafe {
-        DEVS[slot] = Some(VirtioBlk {
+    {
+        *DEVS[slot].lock() = Some(VirtioBlk {
             iobase,
             capacity,
             queue_size: qsz,
@@ -206,18 +215,18 @@ pub fn probe_all() -> usize {
 }
 
 pub fn capacity(idx: usize) -> Option<(u64, u32)> {
-    unsafe { DEVS.get(idx)?.as_ref().map(|d| (d.capacity, SECTOR_SIZE)) }
+    DEVS.get(idx)?.lock().as_ref().map(|d| (d.capacity, SECTOR_SIZE))
 }
 
 fn do_io(idx: usize, is_write: bool, lba: u64, buf: &mut [u8]) -> i64 {
     if buf.len() < SECTOR_SIZE as usize {
         return -2;
     }
-    let dev = unsafe {
-        match DEVS.get_mut(idx).and_then(|s| s.as_mut()) {
-            Some(d) => d,
-            None => return -1,
-        }
+    let Some(slot) = DEVS.get(idx) else { return -1 };
+    let mut guard = slot.lock();
+    let dev = match guard.as_mut() {
+        Some(d) => d,
+        None => return -1,
     };
     if dev.dead {
         return -1;

@@ -188,6 +188,10 @@ class HarnessError(Exception):
     pass
 
 
+# First bytes of the modern-only virtio-blk test disk (see Lane.reset_disks).
+MODERN_SIGNATURE = b"POPCORN-VIRTIO-M0"
+
+
 class BootTimeout(HarnessError):
     pass
 
@@ -202,7 +206,8 @@ class Lane:
         u = TARGET / "UNSAFE"
         self.disks = [u / f"UNSAFE-lane{lane_id}-qemu-virtio.img",
                       u / f"UNSAFE-lane{lane_id}-qemu-usb-data.img",
-                      u / f"UNSAFE-lane{lane_id}-qemu-nvme.img"]
+                      u / f"UNSAFE-lane{lane_id}-qemu-nvme.img",
+                      u / f"UNSAFE-lane{lane_id}-qemu-modern.img"]
         self.ovmf_vars = u / f"UNSAFE-lane{lane_id}-shell-ovmf-vars.fd"
 
     def env(self) -> dict:
@@ -213,6 +218,7 @@ class Lane:
             "DATA_IMG": str(self.disks[0]),
             "USB_DATA_IMG": str(self.disks[1]),
             "INTERNAL_IMG": str(self.disks[2]),
+            "MODERN_IMG": str(self.disks[3]),
             "OVMF_VARS": str(self.ovmf_vars),
         })
         return env
@@ -225,6 +231,11 @@ class Lane:
                 raise HarnessError(f"refusing to reset non-scratch disk {path}")
             if path.exists():
                 path.unlink()
+        # Modern-only virtio-blk for `virtio -probe`: 8 MiB with a known first sector.
+        modern = self.disks[3]
+        with open(modern, "wb") as fh:
+            fh.write(MODERN_SIGNATURE.ljust(512, b"\0"))
+            fh.truncate(8 << 20)
 
     def kill(self) -> None:
         subprocess.run([str(CORE), "_shell-kill"], cwd=ROOT, env=self.env(),
@@ -306,10 +317,10 @@ class Guest:
         self.serial_sock_path = lane.dir / "shell-com1.sock"
         self.com1: socket.socket | None = None
         self.input_mode = args.input  # "serial" (COM1 bytes) or "ps2" (HMP sendkey)
-        # GRUB Dolphin: ESC opens the ':' prompt, which waits for the PS/2 ESC
-        # release (0x81) and then reads only the scancode queue (dolphin.rs
-        # handle_command_mode), never COM1. So ESC and everything up to the
-        # next Enter must go through sendkey there.
+        # Dolphin: ESC opens the ':' prompt, which waits for the PS/2 ESC release
+        # (0x81) and then reads only the scancode queue (dolphin.rs
+        # handle_command_mode), never COM1. So ESC and everything up to the next
+        # Enter go through sendkey (both boot paths run on IRQ0 now).
         self.ps2_latch = False
 
     # -- lifecycle -----------------------------------------------------------
@@ -502,7 +513,7 @@ class Guest:
             return self.type_keys_ps2(keys)
         burst = b""
         for k in keys:
-            if self.mode == "grub" and (k == "esc" or self.ps2_latch):
+            if k == "esc" or self.ps2_latch:
                 if burst:
                     self.mark_send()
                     self.com1.sendall(burst)
