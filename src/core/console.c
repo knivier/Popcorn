@@ -159,7 +159,6 @@ void console_init(void) {
  * wraps -> nothing. The status bar is muted. Every drawn shell prompt is
  * followed by a marker line "[[POPCORN:PROMPT:<n>]]" the harness syncs on.
  */
-static int console_serial_muted;
 static uint64_t console_prompt_seq;
 
 static void console_serial_raw(char c) {
@@ -174,9 +173,6 @@ static void console_serial_raw(char c) {
 }
 
 static void console_serial_mirror(char c) {
-    if (console_serial_muted) {
-        return;
-    }
     if (c == '\n') {
         console_serial_raw('\r');
     }
@@ -205,23 +201,46 @@ void console_test_idle_marker(uint64_t n) {
     console_serial_puts(num);
     console_serial_puts("]]\r\n");
 }
-#define CONSOLE_MIRROR(c) console_serial_mirror(c)
-#define CONSOLE_MIRROR_MUTE(on) (console_serial_muted = (on))
 #define CONSOLE_PROMPT_MARKER() console_serial_prompt_marker()
 #else
-#define CONSOLE_MIRROR(c) ((void)0)
-#define CONSOLE_MIRROR_MUTE(on) ((void)0)
 #define CONSOLE_PROMPT_MARKER() ((void)0)
 #endif
+
+/*
+ * Console text as a line stream (same mapping as the serial mirror above), in
+ * every build: it feeds POPCORN.LOG on the boot stick (rust klog), and in test
+ * builds also COM1. The status bar is muted for both.
+ */
+extern void rust_klog_putc(char c);
+static int console_mirror_muted;
+
+static void console_mirror(char c) {
+    if (console_mirror_muted) {
+        return;
+    }
+    rust_klog_putc(c);
+#ifdef POPCORN_SERIAL_CONSOLE
+    console_serial_mirror(c);
+#endif
+}
+#define CONSOLE_MIRROR(c) console_mirror(c)
+#define CONSOLE_MIRROR_MUTE(on) (console_mirror_muted = (on))
+
+/* The last character drawn filled the row and soft-wrapped (no line break in
+ * the mirror). If the caller then places the cursor itself, that text was a
+ * whole line (a full-width rule or banner), so the mirror ends the line. */
+static bool console_soft_wrapped;
+static void console_paint_blank_row(unsigned int y);
 
 // Clear the entire screen
 void console_clear(void) {
     unsigned char attr = (unsigned char)(CONSOLE_BG_COLOR | CONSOLE_FG_COLOR);
     rust_screen_clear(attr);
     vga_memory = rust_screen_cells();
-    if (console_state.cursor_x != 0 || console_state.cursor_y != 0) {
+    if (console_soft_wrapped || console_state.cursor_x != 0 || console_state.cursor_y != 0) {
         CONSOLE_MIRROR('\n');
     }
+    console_soft_wrapped = false;
     console_state.cursor_x = 0;
     console_state.cursor_y = 0;
     current_loc = 0;
@@ -242,10 +261,13 @@ void console_set_cursor(unsigned int x, unsigned int y) {
     if (x >= console_cols()) x = console_cols() - 1;
     if (y >= console_rows()) y = console_rows() - 1;
     
-    /* Serial mirror: a jump to column 0 of another row starts a new line. */
-    if (x == 0 && (x != console_state.cursor_x || y != console_state.cursor_y)) {
+    /* Serial mirror: a jump to column 0 of another row starts a new line, and
+     * so does any placement right after a soft wrap (see console_soft_wrapped). */
+    if (console_soft_wrapped ||
+        (x == 0 && (x != console_state.cursor_x || y != console_state.cursor_y))) {
         CONSOLE_MIRROR('\n');
     }
+    console_soft_wrapped = false;
     console_state.cursor_x = x;
     console_state.cursor_y = y;
     current_loc = (y * console_cols() + x) * 2;
@@ -266,6 +288,7 @@ static void console_newline_nomirror(void);
 
 // Put a single character at current cursor position
 void console_putchar(char c) {
+    console_soft_wrapped = false;
     if (c == '\n') {
         console_newline();
         return;
@@ -300,6 +323,7 @@ void console_putchar(char c) {
     if (console_state.cursor_x + 1u >= console_cols()) {
         if (console_state.wrap_enabled) {
             console_newline_nomirror(); /* soft wrap: no line break on serial */
+            console_soft_wrapped = true;
         } else {
             console_state.cursor_x = console_cols() - 1u;
             current_loc = (console_state.cursor_y * console_cols() + console_state.cursor_x) * 2;
@@ -345,6 +369,7 @@ void console_println_color(const char* str, unsigned char color) {
 
 // Move to next line
 void console_newline(void) {
+    console_soft_wrapped = false;
     CONSOLE_MIRROR('\n');
     console_newline_nomirror();
 }
@@ -598,10 +623,23 @@ void console_draw_separator(unsigned int y, unsigned char color) {
         console_print_color("-", color);
     }
     /* With wrap on, the last dash already wrapped to the next row; only
-     * wrap-off leaves the cursor on the separator row. */
+     * wrap-off leaves the cursor on the separator row. A soft wrap mirrors no
+     * line break, so end the separator's line in the mirror (log/serial) here,
+     * or the next text would be glued onto the dashes. */
     if (console_state.cursor_x != 0) {
         console_newline();
+    } else {
+        CONSOLE_MIRROR('\n');
+        console_soft_wrapped = false;
     }
+}
+
+/* Blank one screen row without moving the cursor or touching the mirror. */
+void console_clear_row(unsigned int y) {
+    if (y >= console_rows()) {
+        return;
+    }
+    console_paint_blank_row(y);
 }
 
 // Save current line to scrollback buffer

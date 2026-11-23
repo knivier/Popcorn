@@ -141,6 +141,12 @@ impl<T> IrqSpinLock<T> {
     pub unsafe fn force_get(&self) -> &mut T {
         &mut *self.value.get()
     }
+
+    /// Nobody holds it right now (panic path: with interrupts off on one CPU the
+    /// answer cannot change before the caller takes it).
+    pub fn is_free(&self) -> bool {
+        !self.locked.load(Ordering::Acquire)
+    }
 }
 
 pub struct IrqGuard<'a, T> {
@@ -235,6 +241,11 @@ impl<T> TaskLock<T> {
     /// Panic path only: nothing else may be using the value.
     pub unsafe fn force_get(&self) -> &mut T {
         &mut *self.value.get()
+    }
+
+    /// Nobody holds it right now (see `IrqSpinLock::is_free`).
+    pub fn is_free(&self) -> bool {
+        self.owner.load(Ordering::Acquire) == 0
     }
 }
 

@@ -236,7 +236,7 @@
    },
    {
     "send": "mem -debug",
-    "expect": "PMM bitmap \\(16 GiB track / 64 GiB direct map\\)[\\s\\S]*Free 4K frames: \\d+",
+    "expect": "PMM bitmap tracks \\d+ (MiB|GiB) \\(64 GiB direct map\\)[\\s\\S]*Free 4K frames: \\d+",
     "reject": "Unknown mem option|CPU EXCEPTION|#GP|#PF"
    },
    {
@@ -9397,6 +9397,116 @@
    {
     "send": "net -stats",
     "expect": "udp [2-9][\\s\\S]*tx_udp_echo: 2",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   }
+  ]
+ },
+ {
+  "name": "klog_usb_stick_log_written_and_verified",
+  "boot": "uefi",
+  "shard_start": true,
+  "qemu_env": {
+   "POPCORN_SHELL_BOOT_WRITABLE": "1"
+  },
+  "why": "USB-stick log (machines without COM1, e.g. the T14s): the kernel finds POPCORN.LOG on the stick it booted from (usb1, still LOCKED for everything else), writes the boot log into it, and `log -verify` reads it back. The host then reads the file from the image with mtools: header with boot 1, timestamped console lines, the COM1-only driver tags (net: irq msix) and the typed marker. After a reboot the header says boot 2 and the previous boot's text is gone. fsck.fat checks the stick after the shard.",
+  "steps": [
+   {
+    "send": "log",
+    "expect": "log: POPCORN\\.LOG on usb1 lba \\d+\\.\\.\\d+ \\(1024 KiB\\), boot 1[\\s\\S]*log: \\d+ bytes logged, \\d+ on disk, \\d+ unwritten, [1-9]\\d* flushes, dropped 0",
+    "reject": "log: off|#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   },
+   {
+    "send": "disk -list",
+    "expect": "usb1\\(usb,boot\\):\\d+MiB LOCKED",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   },
+   {
+    "send": "log klogmarker42",
+    "expect": "log -verify    flush, then read POPCORN\\.LOG back and compare",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   },
+   {
+    "send": "log -verify",
+    "expect": "log: verify ok \\(\\d+ bytes match the stick\\)",
+    "reject": "FAILED|#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   },
+   {
+    "host_file": "POPCORN.LOG",
+    "expect": "^POPCORN\\.LOG  boot 1  used \\d+ of 1048064 bytes  dropped 0 (?=[\\s\\S]*\\n\\[\\s*\\d+\\.\\d{3}\\] Rust active\\n)(?=[\\s\\S]*\\] net: irq msix v=0x)(?=[\\s\\S]*\\] Timer: PIT IRQ0)(?=[\\s\\S]*\\] log: POPCORN\\.LOG on usb1)(?=[\\s\\S]*klogmarker42)",
+    "reject": "\\[host-file\\]"
+   },
+   {
+    "send": "<REBOOT>"
+   },
+   {
+    "send": "log",
+    "expect": "log: POPCORN\\.LOG on usb1 lba \\d+\\.\\.\\d+ \\(1024 KiB\\), boot 2",
+    "reject": "log: off|#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   },
+   {
+    "send": "log -verify",
+    "expect": "log: verify ok \\(\\d+ bytes match the stick\\)",
+    "reject": "FAILED|#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   },
+   {
+    "host_file": "POPCORN.LOG",
+    "expect": "^POPCORN\\.LOG  boot 2  used \\d+ of 1048064 bytes(?=[\\s\\S]*\\] log: POPCORN\\.LOG on usb1 \\(boot 2)",
+    "reject": "klogmarker42|\\[host-file\\]"
+   },
+   {
+    "send": "log -flush",
+    "expect": "log: \\d+ bytes on disk",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   }
+  ]
+ },
+ {
+  "name": "klog_wipe_arm_turns_log_off",
+  "boot": "uefi",
+  "shard_start": true,
+  "why": "The log may only write while the boot stick is closed to the normal disk layer. Arming a wipe of usb1 (no YES, so nothing is formatted) must turn the log off before anything else writes there: the next flush is refused and `log` reports why. The boot stick is opened with snapshot=on here.",
+  "steps": [
+   {
+    "send": "log",
+    "expect": "log: POPCORN\\.LOG on usb1 lba \\d+\\.\\.\\d+ \\(1024 KiB\\), boot 1",
+    "reject": "log: off|#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   },
+   {
+    "send": "disk -wipe usb1",
+    "expect": "usb1",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   },
+   {
+    "send": "log -flush",
+    "expect": "log: flush failed: boot stick is open for install/wipe",
+    "reject": "bytes on disk|#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   },
+   {
+    "send": "log",
+    "expect": "log: off \\(boot stick is open for install/wipe\\); \\d+ bytes kept in RAM",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   },
+   {
+    "send": "log -verify",
+    "expect": "log: verify FAILED: boot stick is open for install/wipe",
+    "reject": "verify ok|#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   }
+  ]
+ },
+ {
+  "name": "klog_grub_has_no_boot_stick",
+  "boot": "grub",
+  "shard_start": true,
+  "why": "GRUB boots from the CD image, so there is no UEFI boot-volume handoff and no stick to log to: the log stays in RAM and says why, and flush/verify fail cleanly.",
+  "steps": [
+   {
+    "send": "log",
+    "expect": "log: off \\(no boot stick \\(not a UEFI USB boot\\)\\); \\d+ bytes kept in RAM, dropped 0",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   },
+   {
+    "send": "log -flush",
+    "expect": "log: flush failed: no boot stick \\(not a UEFI USB boot\\)",
     "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
    }
   ]

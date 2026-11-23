@@ -26,7 +26,12 @@ Case file (JSON): a list of
               serial input mode, to exercise the PS/2 scancode path),
               "host_udp": "text" (instead of typing: send this datagram from the
               host to the guest's UDP port 5555 through QEMU's hostfwd and record
-              "[host-udp] reply: <text>" or "[host-udp] no reply" as the output)}]}
+              "[host-udp] reply: <text>" or "[host-udp] no reply" as the output),
+              "host_file": "NAME" (instead of typing: the step's output is file NAME
+              read with mtools from the lane's writable boot-stick copy, which a
+              shard gets when its first case sets qemu_env
+              {"POPCORN_SHELL_BOOT_WRITABLE": "1"}; otherwise the boot stick is
+              opened with snapshot=on and nothing reaches the image file)}]}
 
 `send` syntax:
   * plain text is typed, then Enter is pressed ("" = Enter alone)
@@ -214,7 +219,10 @@ class Lane:
         self.disks = [u / f"UNSAFE-lane{lane_id}-qemu-virtio.img",
                       u / f"UNSAFE-lane{lane_id}-qemu-usb-data.img",
                       u / f"UNSAFE-lane{lane_id}-qemu-nvme.img",
-                      u / f"UNSAFE-lane{lane_id}-qemu-modern.img"]
+                      u / f"UNSAFE-lane{lane_id}-qemu-modern.img",
+                      # Writable copy of the boot stick (qemu_env
+                      # POPCORN_SHELL_BOOT_WRITABLE=1); only exists for such shards.
+                      u / f"UNSAFE-lane{lane_id}-qemu-bootstick.img"]
         self.ovmf_vars = u / f"UNSAFE-lane{lane_id}-shell-ovmf-vars.fd"
 
     def udp_port(self) -> int:
@@ -231,6 +239,7 @@ class Lane:
             "USB_DATA_IMG": str(self.disks[1]),
             "INTERNAL_IMG": str(self.disks[2]),
             "MODERN_IMG": str(self.disks[3]),
+            "SHELL_BOOT_COPY": str(self.disks[4]),
             "OVMF_VARS": str(self.ovmf_vars),
         })
         return env
@@ -718,6 +727,21 @@ def host_udp_roundtrip(g: Guest, payload: str, timeout: float) -> str:
     return "[host-udp] no reply"
 
 
+def host_file_read(g: Guest, name: str) -> str:
+    """Contents of `name` on the lane's writable boot-stick copy, read with mtools
+    while the guest runs (QEMU writes land in the host page cache)."""
+    img = g.lane.disks[4]
+    if not img.exists():
+        return ("[host-file] no writable boot stick: the shard's first case needs "
+                "qemu_env POPCORN_SHELL_BOOT_WRITABLE=1")
+    r = subprocess.run(["mtype", "-i", str(img), f"::/{name}"], stdout=subprocess.PIPE,
+                       stderr=subprocess.STDOUT)
+    text = r.stdout.decode("utf-8", errors="replace")
+    if r.returncode != 0:
+        return f"[host-file] mtype failed rc={r.returncode}: {text[-500:]}"
+    return text
+
+
 def run_case(g: Guest, case: dict, args) -> dict:
     res = {"name": case["name"], "why": case.get("why", ""), "steps": [], "status": "pass"}
     t_case = time.time()
@@ -725,6 +749,8 @@ def run_case(g: Guest, case: dict, args) -> dict:
         send = step.get("send", "")
         if "host_udp" in step and not send:
             send = f"<host-udp {step['host_udp']}>"
+        if "host_file" in step and not send:
+            send = f"<host-file {step['host_file']}>"
         rec = {"index": i, "send": send, "expect": step.get("expect", ""),
                "reject": step.get("reject", "")}
         if step.get("delay_before"):
@@ -737,6 +763,9 @@ def run_case(g: Guest, case: dict, args) -> dict:
                 how = "prompt"
             elif "host_udp" in step:
                 out_raw = host_udp_roundtrip(g, step["host_udp"], float(step.get("timeout", 10)))
+                how = "host"
+            elif "host_file" in step:
+                out_raw = host_file_read(g, step["host_file"])
                 how = "host"
             else:
                 keys = parse_send(send, step.get("enter"))
@@ -902,7 +931,9 @@ def load_cases(path: Path) -> list[dict]:
                 raise HarnessError(f"{c['name']}: qemu_env must be an object")
             if s.get("input") not in (None, "ps2", "serial"):
                 raise HarnessError(f"{c['name']}: bad step input {s.get('input')!r}")
-            if s.get("send", "") != "<REBOOT>" and "host_udp" not in s:
+            if "host_file" in s and not re.fullmatch(r"[A-Za-z0-9_./-]+", str(s["host_file"])):
+                raise HarnessError(f"{c['name']}: bad host_file {s['host_file']!r}")
+            if s.get("send", "") != "<REBOOT>" and "host_udp" not in s and "host_file" not in s:
                 parse_send(s.get("send", ""), s.get("enter"))
     return cases
 

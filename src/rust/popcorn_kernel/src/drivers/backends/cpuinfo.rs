@@ -256,6 +256,11 @@ pub fn detect_frequency() {
     freq();
 }
 
+/// Calibrated TSC rate in Hz (calibrating on first call); 0 when unknown.
+pub fn tsc_hz() -> u64 {
+    freq().tsc_hz
+}
+
 /// Calibrate (first call) and return the cached frequency.
 fn freq() -> &'static CpuFrequency {
     if let Some(f) = FREQ.get() {

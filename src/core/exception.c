@@ -10,8 +10,12 @@
 static uint64_t g_breakpoints;
 static uint64_t g_debug_traps;
 
+extern void rust_klog_putc(char c);
+extern void rust_klog_emergency(void);
+
 static void exc_putc(char c) {
     boot_serial_putc(c);
+    rust_klog_putc(c); /* POPCORN.LOG on the boot stick (machines without COM1) */
 }
 
 static void exc_puts(const char* s) {
@@ -153,6 +157,9 @@ static void __attribute__((noreturn)) exception_fatal(const PopFrame* f) {
         }
     }
     exc_puts("\r\n*** halt ***\r\n");
+    /* One last write of the log (polled USB, interrupts stay off; skipped when
+     * the fault hit while a lock on that path was held). */
+    rust_klog_emergency();
 
     for (;;) {
         __asm__ volatile("cli; hlt");

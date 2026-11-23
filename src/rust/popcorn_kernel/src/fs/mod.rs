@@ -91,7 +91,7 @@ pub fn init() {
     if crate::drivers::block::selected_id() == usize::MAX {
         set_err(ERR_INVALID_OPERATION);
         println_color(
-            "FAT32: no disk selected (USB MSC not found? try: disk list)",
+            "FAT32: no data disk (the boot stick and internal disks stay read-only; see: disk -list)",
             COLOR_WHITE,
         );
         return;

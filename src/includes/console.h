@@ -128,6 +128,7 @@ void console_print_info(const char* message);
 void console_print_warning(const char* message);
 
 void console_draw_separator(unsigned int y, unsigned char color);
+void console_clear_row(unsigned int y);
 
 void console_scroll_up(void);
 void console_scroll_down(void);

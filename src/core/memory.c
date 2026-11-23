@@ -19,10 +19,20 @@ extern char __kernel_lma_end[];
 extern ConsoleState console_state;
 extern void console_draw_separator(unsigned int y, unsigned char color);
 
-#define PMM_BITMAP_BYTES ((size_t)(PMM_MAX_4K_FRAMES / 8ull))
+/*
+ * Frame bitmap, bit 1 = used, 0 = free. It is sized at boot to the highest
+ * available RAM address in the memory map (up to the 64 GiB direct map) and
+ * placed in free RAM itself (pmm_place_bitmap): a fixed in-kernel array either
+ * capped RAM (16 GiB left a 32 GiB T14s with ~13 GiB) or bloated the kernel
+ * image the UEFI loader must fit at a fixed address. The small static array is
+ * the fallback when no map is usable (or Boot Services still own the RAM).
+ */
+#define PMM_FALLBACK_FRAMES ((uint64_t)((4ULL << 30) / PAGE_SIZE))
+static uint8_t pmm_fallback_bitmap[PMM_FALLBACK_FRAMES / 8u] __attribute__((aligned(4096)));
+static uint8_t* pmm_bitmap = pmm_fallback_bitmap;
+static uint64_t pmm_max_frames = PMM_FALLBACK_FRAMES;
+#define PMM_TRACK_LIMIT (pmm_max_frames * PAGE_SIZE)
 
-/* Bit 1 = used, 0 = free. Covers PMM_TRACK_GIB (see physmap.h). */
-static uint8_t pmm_bitmap[PMM_BITMAP_BYTES] __attribute__((aligned(4096)));
 static bool pmm_ready = false;
 static uint64_t pmm_free_frames = 0;
 static uint64_t pmm_ram_bytes = 0; /* sum of AVAILABLE regions accepted into the bitmap */
@@ -48,7 +58,7 @@ static mem_block memory_blocks[MAX_MEMORY_BLOCKS];
 static uint32_t memory_block_index = 0;
 
 static void pmm_set_used(uint32_t f) {
-    if ((uint64_t)f >= PMM_MAX_4K_FRAMES) {
+    if ((uint64_t)f >= pmm_max_frames) {
         return;
     }
     uint8_t bit = (uint8_t)(1U << (f & 7U));
@@ -62,7 +72,7 @@ static void pmm_set_used(uint32_t f) {
 }
 
 static void pmm_set_free(uint32_t f) {
-    if ((uint64_t)f >= PMM_MAX_4K_FRAMES) {
+    if ((uint64_t)f >= pmm_max_frames) {
         return;
     }
     uint8_t bit = (uint8_t)(1U << (f & 7U));
@@ -74,7 +84,7 @@ static void pmm_set_free(uint32_t f) {
 }
 
 static int pmm_frame_free(uint32_t f) {
-    if ((uint64_t)f >= PMM_MAX_4K_FRAMES) {
+    if ((uint64_t)f >= pmm_max_frames) {
         return 0;
     }
     return (pmm_bitmap[f >> 3U] & (1U << (f & 7U))) == 0;
@@ -91,11 +101,11 @@ static void pmm_mark_range_used(uint64_t pstart, uint64_t plen) {
     uint64_t pend = pstart + plen;
     pstart = pstart & ~(uint64_t)(PAGE_SIZE - 1);
     pend = (pend + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
-    if (pstart >= PMM_TRACK_BYTES) {
+    if (pstart >= PMM_TRACK_LIMIT) {
         return;
     }
-    if (pend > PMM_TRACK_BYTES) {
-        pend = PMM_TRACK_BYTES;
+    if (pend > PMM_TRACK_LIMIT) {
+        pend = PMM_TRACK_LIMIT;
     }
     for (uint64_t a = pstart; a < pend; a += PAGE_SIZE) {
         pmm_set_used((uint32_t)(a / PAGE_SIZE));
@@ -108,11 +118,11 @@ static void pmm_give_free_range(uint64_t pstart, uint64_t plen) {
     }
     uint64_t end = pstart + plen;
     pstart = (pstart + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
-    if (pstart >= PMM_TRACK_BYTES) {
+    if (pstart >= PMM_TRACK_LIMIT) {
         return;
     }
-    if (end > PMM_TRACK_BYTES) {
-        end = PMM_TRACK_BYTES;
+    if (end > PMM_TRACK_LIMIT) {
+        end = PMM_TRACK_LIMIT;
     }
     /* Only whole pages inside the region: a partial tail page may share its
      * frame with the next (reserved / ACPI) region. */
@@ -182,8 +192,8 @@ static void mmap_unreserve_cb(uint64_t base, uint64_t len, uint32_t type, void* 
 
 /* First-fit run of n free frames, all with index < limit. */
 static int32_t pmm_alloc_contig(uint32_t n, uint32_t limit) {
-    if ((uint64_t)limit > PMM_MAX_4K_FRAMES) {
-        limit = (uint32_t)PMM_MAX_4K_FRAMES;
+    if ((uint64_t)limit > pmm_max_frames) {
+        limit = (uint32_t)pmm_max_frames;
     }
     if (n == 0 || n > limit) {
         return -1;
@@ -217,8 +227,88 @@ static void pmm_free_range_frames(uint32_t start_f, uint32_t n) {
     }
 }
 
+struct pmm_place_ctx {
+    uint64_t top;        /* highest end of an AVAILABLE region (direct-map capped) */
+    uint64_t need;       /* bitmap bytes, page-rounded */
+    uint64_t best;       /* lowest usable start, or 0 */
+    uint64_t avoid[2][2];/* [start, end) ranges the bitmap must not overlap */
+};
+
+static void pmm_top_cb(uint64_t base, uint64_t len, uint32_t type, void* user) {
+    struct pmm_place_ctx* c = (struct pmm_place_ctx*)user;
+    if (type != MULTIBOOT_MEMORY_AVAILABLE || len == 0 || base >= VMM_IDENTITY_BYTES) {
+        return;
+    }
+    uint64_t end = (len > VMM_IDENTITY_BYTES - base) ? VMM_IDENTITY_BYTES : base + len;
+    if (end > c->top) {
+        c->top = end;
+    }
+}
+
+static void pmm_slot_cb(uint64_t base, uint64_t len, uint32_t type, void* user) {
+    struct pmm_place_ctx* c = (struct pmm_place_ctx*)user;
+    if (type != MULTIBOOT_MEMORY_AVAILABLE || len == 0 || base >= VMM_IDENTITY_BYTES) {
+        return;
+    }
+    uint64_t end = (len > VMM_IDENTITY_BYTES - base) ? VMM_IDENTITY_BYTES : base + len;
+    end &= ~(uint64_t)(PAGE_SIZE - 1);
+    uint64_t s = base < 0x100000u ? 0x100000u : base;
+    s = (s + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+    /* Slide past anything in use; two passes settle the two avoid ranges. */
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0; i < 2; i++) {
+            uint64_t a0 = c->avoid[i][0];
+            uint64_t a1 = c->avoid[i][1];
+            if (a1 > a0 && s < a1 && s + c->need > a0) {
+                s = (a1 + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+            }
+        }
+    }
+    if (s < end && end - s >= c->need && (c->best == 0 || s < c->best)) {
+        c->best = s;
+    }
+}
+
+/* Size the bitmap to the RAM in the map and put it in free RAM; on any doubt
+ * keep the static 4 GiB fallback. Returns the bitmap's physical range (len 0 if
+ * the fallback is used) so physmem_init can mark it used. */
+static void pmm_place_bitmap(uint64_t* out_base, uint64_t* out_len) {
+    *out_base = 0;
+    *out_len = 0;
+    pmm_bitmap = pmm_fallback_bitmap;
+    pmm_max_frames = PMM_FALLBACK_FRAMES;
+    if (physmem_uefi_firmware_kbd_active()) {
+        return; /* Boot Services still own "free" RAM */
+    }
+    struct pmm_place_ctx c = {0};
+    multiboot2_foreach_mmap(pmm_top_cb, &c);
+    uint64_t frames = (c.top + PAGE_SIZE - 1) / PAGE_SIZE;
+    if (frames <= PMM_FALLBACK_FRAMES) {
+        return;
+    }
+    c.need = ((frames + 7u) / 8u + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+    c.avoid[0][0] = (uint64_t)(uintptr_t)__kernel_lma_start;
+    c.avoid[0][1] = (uint64_t)(uintptr_t)__kernel_lma_end;
+    if (multiboot2_info_ptr != 0) {
+        c.avoid[1][0] = multiboot2_info_ptr;
+        c.avoid[1][1] = multiboot2_info_ptr +
+                        *(const uint32_t*)(uintptr_t)multiboot2_info_ptr;
+    }
+    multiboot2_foreach_mmap(pmm_slot_cb, &c);
+    if (c.best == 0) {
+        return;
+    }
+    pmm_bitmap = (uint8_t*)phys_to_virt(c.best);
+    pmm_max_frames = frames;
+    *out_base = c.best;
+    *out_len = c.need;
+}
+
 void physmem_init(void) {
-    memset(pmm_bitmap, 0xFF, sizeof(pmm_bitmap));
+    uint64_t bm_base = 0;
+    uint64_t bm_len = 0;
+    pmm_place_bitmap(&bm_base, &bm_len);
+    memset(pmm_bitmap, 0xFF, (size_t)((pmm_max_frames + 7u) / 8u));
     pmm_free_frames = 0;
     pmm_ram_bytes = 0;
     pmm_scan_hint = 0;
@@ -237,8 +327,8 @@ void physmem_init(void) {
             if (inf->mem_upper > 0) {
                 uint64_t from = 1024U * 1024U;
                 uint64_t to = from + (uint64_t)inf->mem_upper * 1024U;
-                if (to > PMM_TRACK_BYTES) {
-                    to = PMM_TRACK_BYTES;
+                if (to > PMM_TRACK_LIMIT) {
+                    to = PMM_TRACK_LIMIT;
                 }
                 pmm_give_free_range(from, to - from);
             }
@@ -248,6 +338,7 @@ void physmem_init(void) {
     /* Reserve low 1 MiB: IVT, BDA, etc. (also avoids handing out 0 / NULL frames). */
     pmm_mark_range_used(0, 0x100000u);
     physmem_reserve_uefi_fixed();
+    pmm_mark_range_used(bm_base, bm_len); /* the bitmap itself (no-op for the fallback) */
 
     /* LMA: physical span [__kernel_lma_start, __kernel_lma_end). */
     pmm_mark_range_used(
@@ -315,13 +406,21 @@ void memory_init(void) {
     normal_pool = (memory_pool){0};
     physmem_init();
     vmm_init();
-    console_println_color("Physical memory: bitmap PMM (tracks up to 16 GiB DRAM)", CONSOLE_SUCCESS_COLOR);
+    {
+        char sz[32];
+        format_memory_size(PMM_TRACK_LIMIT, sz, sizeof sz);
+        console_print_color("Physical memory: bitmap PMM (tracks up to ", CONSOLE_SUCCESS_COLOR);
+        console_print_color(sz, CONSOLE_SUCCESS_COLOR);
+        console_println_color(pmm_bitmap == pmm_fallback_bitmap ? ", built-in bitmap)"
+                                                                : ", bitmap in RAM)",
+                              CONSOLE_SUCCESS_COLOR);
+    }
     console_println_color("Virtual: direct map 64 GiB @ 0xFFFF800000000000; process PML4 clones upper half", CONSOLE_INFO_COLOR);
 }
 
 void* kmalloc(size_t size, uint32_t flags) {
     /* Bound first: larger requests can never succeed, and align_size would wrap. */
-    if (size == 0 || (uint64_t)size > PMM_TRACK_BYTES) {
+    if (size == 0 || (uint64_t)size > PMM_TRACK_LIMIT) {
         return NULL;
     }
     size = align_size(size, PAGE_SIZE);
@@ -385,7 +484,7 @@ bool is_valid_allocation(void* ptr) {
 
 void* alloc_pages(size_t num_pages, uint32_t f) {
     /* Bound before multiplying so num_pages * PAGE_SIZE cannot wrap. */
-    if (num_pages == 0 || (uint64_t)num_pages > PMM_MAX_4K_FRAMES) {
+    if (num_pages == 0 || (uint64_t)num_pages > pmm_max_frames) {
         return NULL;
     }
     return kmalloc(num_pages * PAGE_SIZE, f);
@@ -435,14 +534,14 @@ void* zone_alloc(MemoryZone zone, size_t size, uint32_t flags) {
     }
     /* Reject before the uint32_t page count: a bigger request would truncate
      * (e.g. 16 TiB + 4 KiB -> 1 page) and "succeed" with a tiny buffer. */
-    if ((uint64_t)size > PMM_TRACK_BYTES) {
+    if ((uint64_t)size > PMM_TRACK_LIMIT) {
         return NULL;
     }
     uint32_t npg = (uint32_t)(((uint64_t)size + PAGE_SIZE - 1) / PAGE_SIZE);
     if (npg == 0) {
         return NULL;
     }
-    uint32_t limit = (zone == ZONE_DMA) ? PMM_DMA32_FRAMES : (uint32_t)PMM_MAX_4K_FRAMES;
+    uint32_t limit = (zone == ZONE_DMA) ? PMM_DMA32_FRAMES : (uint32_t)pmm_max_frames;
     int32_t st = pmm_alloc_contig(npg, limit);
     if (st < 0) {
         return NULL;
@@ -510,7 +609,10 @@ void memory_copy(void* d, const void* s, size_t n) {
 
 void memory_debug_print(void) {
     char b[32];
-    console_println_color("PMM bitmap (16 GiB track / 64 GiB direct map)", CONSOLE_INFO_COLOR);
+    format_memory_size(PMM_TRACK_LIMIT, b, sizeof b);
+    console_print_color("PMM bitmap tracks ", CONSOLE_INFO_COLOR);
+    console_print_color(b, CONSOLE_INFO_COLOR);
+    console_println_color(" (64 GiB direct map)", CONSOLE_INFO_COLOR);
     int_to_str((int)pmm_count_free(), b);
     console_print_color("Free 4K frames: ", CONSOLE_INFO_COLOR);
     console_println_color(b, CONSOLE_FG_COLOR);

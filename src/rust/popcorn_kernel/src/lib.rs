@@ -8,6 +8,7 @@ mod catalog;
 mod console_ffi;
 mod drivers;
 mod fs;
+mod klog;
 mod pops;
 mod framework_ffi;
 #[allow(dead_code)]
@@ -52,6 +53,8 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         let _ = write!(out, " at {}:{}", loc.file(), loc.line());
     }
     let _ = out.write_str(" ***\n*** halt ***\n");
+    /* No serial port on most laptops: one last write of the log to the boot stick. */
+    klog::emergency();
     loop {
         unsafe { core::arch::asm!("cli; hlt", options(nostack)) };
     }

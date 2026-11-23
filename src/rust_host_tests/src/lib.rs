@@ -38,8 +38,19 @@ pub mod util {
 
 pub use crate::net_impl as net;
 
+/// POPCORN.LOG layout + FAT32 lookup (`klog/fatlog.rs`; the rest of klog is kernel I/O).
+#[allow(dead_code)]
+#[path = "../../rust/popcorn_kernel/src/klog/fatlog.rs"]
+pub mod fatlog_impl;
+
+pub mod klog {
+    pub use crate::fatlog_impl as fatlog;
+}
+
 #[cfg(test)]
 mod csum_tests;
+#[cfg(test)]
+mod klog_tests;
 #[cfg(test)]
 mod net_dhcp_tests;
 #[cfg(test)]

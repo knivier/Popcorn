@@ -51,6 +51,25 @@ cd /mnt/c/Users/<you>/Documents/Code/popcorn
 
 Do not flash `target/UNSAFE/*`. Do not run `test-install` from Windows.
 
+### Boot log on real hardware (`POPCORN.LOG`)
+
+Most laptops have no serial port, so Popcorn keeps its own log on the USB stick
+it booted from. Flash `target/popcorn-uefi.img`, boot the machine from the stick,
+then plug the stick into another computer and open `POPCORN.LOG` in its root. It
+holds the last boot: every console line plus the driver diagnostics that normally
+go only to COM1 (PCI list, `net:`, `virtio-blk:`, Rust panics, CPU exception
+dumps), each with a timestamp in seconds since boot. The first line says which
+boot it is (`boot N`, counting up on every boot from that stick) and how many
+bytes are used; the rest of the 1 MiB file is blank padding.
+
+It is written right after the disks come up, after the drivers probe, about once a
+second while there is new text, on `log -flush` and `stop`, and on a panic or CPU
+exception. So pull the stick after the machine hangs or halts, or after `stop`.
+`log` shows where it goes, and `log -verify` reads it back from the stick. The
+kernel only rewrites sectors inside that file (never the FAT or directories), and
+stops writing if the stick is opened for `disk -install` / `disk -wipe`. QEMU runs
+open the boot stick with `snapshot=on`, so they never change the flashable image.
+
 ### Try the Features
 
 - `help` — available commands

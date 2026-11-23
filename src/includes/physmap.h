@@ -19,13 +19,9 @@
 #define VMM_IDENTITY_BYTES    ((uint64_t)VMM_IDENTITY_GIB << 30)
 
 /*
- * PMM tracks allocatable DRAM up to this cap (must be ≤ VMM_IDENTITY_BYTES).
- * 16 GiB: 512 KiB bitmap — enough for QEMU/hardware soak without a 2 MiB BSS.
- * Frames above real RAM stay marked used (never freed from the mmap).
+ * The PMM (core/memory.c) sizes its frame bitmap at boot to the highest
+ * available RAM in the memory map, capped at VMM_IDENTITY_BYTES.
  */
-#define PMM_TRACK_GIB         16u
-#define PMM_TRACK_BYTES       ((uint64_t)PMM_TRACK_GIB << 30)
-#define PMM_MAX_4K_FRAMES     (PMM_TRACK_BYTES / 4096ull)
 
 static inline void* phys_to_virt(uint64_t phys) {
     return (void*)(uintptr_t)(VMM_DIRECT_MAP_BASE + phys);

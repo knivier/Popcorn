@@ -184,6 +184,9 @@ pub fn init_drives() {
     pci::scan_print();
     /* Block disks: ram0 always; vda if virtio-blk present. Write-gated. */
     super::block::init();
+    /* POPCORN.LOG on the boot stick: written now, so a hang in a driver probe
+     * below still leaves the boot so far on the stick. */
+    crate::klog::attach();
     /* Framework drivers (registry table): NICs today, Wi-Fi later. */
     let bound = super::pci_drivers::probe_all();
     if super::virtio::net::NET0.lock().is_none() {
@@ -191,6 +194,7 @@ pub fn init_drives() {
         let _ = core::fmt::Write::write_str(&mut out, "net: none\n");
     }
     let _ = bound;
+    let _ = crate::klog::flush();
 }
 
 /// Start one drive by name and publish its /dev node.

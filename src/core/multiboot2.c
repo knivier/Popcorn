@@ -357,8 +357,12 @@ extern uint64_t page_table_l3[];
 
 /* COM1 only (no debugcon): multi-character diagnostics (Rust panics, driver tags
  * such as "net: ...") must not land in the debugcon log, whose single-letter boot
- * tags the smoke tests grep for. */
+ * tags the smoke tests grep for. Also kept for POPCORN.LOG (rust klog): most
+ * laptops have no COM1, so the log file is where these lines end up. */
+extern void rust_klog_putc(char c);
+
 void com1_putc(char c) {
+    rust_klog_putc(c);
     for (int i = 0; i < 100000; i++) {
         unsigned char s;
         __asm__ volatile("inb %1, %0" : "=a"(s) : "Nd"((unsigned short)0x3FD));

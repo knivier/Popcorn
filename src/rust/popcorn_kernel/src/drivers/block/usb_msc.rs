@@ -246,6 +246,12 @@ pub fn is_ours(idx: usize) -> bool {
     DISKS.lock().get(idx).map_or(false, |d| d.ours)
 }
 
+/// Panic path: can `write` run right now without waiting on a lock? (Every
+/// transfer holds DISKS, then the xHCI lock; both must be free.)
+pub fn emergency_ready() -> bool {
+    DISKS.is_free() && xhci::is_free()
+}
+
 pub fn is_blank(idx: usize) -> bool {
     DISKS.lock().get(idx).map_or(false, |d| d.blank)
 }

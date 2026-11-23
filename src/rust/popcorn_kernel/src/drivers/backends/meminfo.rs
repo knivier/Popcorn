@@ -190,27 +190,53 @@ pub extern "C" fn memory_print_map() {
     }
     println_color("Base Address      | Length           | Type", COLOR_LIGHT_CYAN);
     separator();
-    let mut count = 0u32;
+    /* Print every region (this used to stop after 12, which on UEFI machines
+     * hid all RAM above the first few hundred MiB). Firmware maps are split
+     * into many small runs, so back-to-back regions of the same type are merged
+     * into one row. */
+    let mut raw = 0u32;
+    let mut rows = 0u32;
+    let mut run: Option<(u64, u64, u32)> = None;
     walk_mmap(mbi_ptr, |(addr, len, ty)| {
-        if count >= 12 {
-            return;
+        raw += 1;
+        if let Some((a, l, t)) = run {
+            if t == ty && a.checked_add(l) == Some(addr) {
+                run = Some((a, l.saturating_add(len), t));
+                return;
+            }
+            map_row(a, l, t);
+            rows += 1;
         }
-        count += 1;
-        let mut buf = [0u8; 64];
-        format_addr(addr, &mut buf);
-        print_color(cstr_str(&buf), COLOR_WHITE);
-        print(" | ");
-        format_bytes(len, &mut buf);
-        print_color(cstr_str(&buf), COLOR_WHITE);
-        let pad = 16usize.saturating_sub(cstr_str(&buf).len());
-        for _ in 0..pad {
-            print(" ");
-        }
-        print(" | ");
-        let (name, color) = type_name(ty);
-        println_color(name, color);
+        run = Some((addr, len, ty));
     });
+    if let Some((a, l, t)) = run {
+        map_row(a, l, t);
+        rows += 1;
+    }
     separator();
+    let mut num = [0u8; 12];
+    let n = u64_to_dec(rows as u64, &mut num);
+    print_color(core::str::from_utf8(&num[..n]).unwrap_or("0"), COLOR_WHITE);
+    print(" regions (");
+    let n = u64_to_dec(raw as u64, &mut num);
+    print(core::str::from_utf8(&num[..n]).unwrap_or("0"));
+    println_color(" firmware entries, adjacent same-type entries merged)", COLOR_WHITE);
+}
+
+fn map_row(addr: u64, len: u64, ty: u32) {
+    let mut buf = [0u8; 64];
+    format_addr(addr, &mut buf);
+    print_color(cstr_str(&buf), COLOR_WHITE);
+    print(" | ");
+    format_bytes(len, &mut buf);
+    print_color(cstr_str(&buf), COLOR_WHITE);
+    let pad = 16usize.saturating_sub(cstr_str(&buf).len());
+    for _ in 0..pad {
+        print(" ");
+    }
+    print(" | ");
+    let (name, color) = type_name(ty);
+    println_color(name, color);
 }
 
 fn walk_mmap(mbi_ptr: u64, mut f: impl FnMut((u64, u64, u32))) {

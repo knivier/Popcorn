@@ -205,6 +205,11 @@ struct Xhci {
 /// lock in `block/mod.rs` is never held while taking either.
 static HC: TaskLock<Option<Xhci>> = TaskLock::new(None);
 
+/// Panic path: nobody is in the middle of a controller operation.
+pub fn is_free() -> bool {
+    HC.is_free()
+}
+
 fn halt(op: u64) {
     let c = r32(op + OP_USBCMD);
     w32(op + OP_USBCMD, c & !CMD_RS);

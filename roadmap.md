@@ -104,6 +104,7 @@ Coding gate items are done (QEMU + CI). Remaining are release/process and hardwa
 - [ ] Mark releases pre-release until v0.7 exit criteria
 - [x] Keep `test-uefi` green on GRUB ISO and UEFI img
 - [ ] Boot on real hardware: target is a ThinkPad T14s Gen 4 AMD (Secure Boot off); its Wi-Fi is a Qualcomm FastConnect 6900 (WCN6855, PCI 17CB:1103, ath11k-class)
+- [x] Log for machines without COM1: `POPCORN.LOG` on the boot stick (`klog/`): console + COM1-only diagnostics, TSC timestamps, written after the disks come up, ~1/s, on `log -flush` / `stop`, and on a panic or CPU exception; `log`, `log -verify`. The kernel only rewrites sectors inside the file the image build preallocates (never the FAT or directories), and stops when the stick opens for install/wipe
 - [x] Diagnosable CPU exceptions — every vector has its own stub; fatal ones dump CR2 / CR3 / error / RIP / task / stack words on COM1, then halt; `#DB` / `#BP` resume
 - [x] Timer on IRQ0 on both boot paths: UEFI puts the LAPIC in virtual-wire mode and masks IOAPIC routes (`lapic.c`); PIT polling is only the fallback when IRQ0 never arrives
 - [x] One task/stack allocator — shared `g_task_pool[32]`

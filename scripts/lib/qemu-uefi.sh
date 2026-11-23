@@ -76,7 +76,11 @@ qemu_assert_boot_img() {
       fi
       # core.sh test-shell: serial-console test image. Still subject to the
       # auto-install check below.
+      # Also a lane's writable copy of it (POPCORN_SHELL_BOOT_WRITABLE, see
+      # qemu_uefi_shell_boot), so a case can read POPCORN.LOG from the host.
       if [[ "${POPCORN_SHELL_TEST:-}" == 1 && "$(basename "$UEFI_IMG")" == UNSAFE-popcorn-shelltest.img ]]; then
+        :
+      elif [[ "${POPCORN_SHELL_TEST:-}" == 1 && "$(basename "$UEFI_IMG")" == UNSAFE-lane*-qemu-bootstick.img ]]; then
         :
       else
         die "REFUSING to boot $UEFI_IMG. Interactive/flash path is target/popcorn-uefi.img"
@@ -203,6 +207,9 @@ qemu_uefi_display_args() {
   esac
 }
 
+# The boot stick is opened with snapshot=on unless the caller sets
+# QEMU_BOOT_DRIVE_OPTS (empty = writable): the kernel writes POPCORN.LOG on the
+# stick it booted from, and a QEMU run must not change the flashable image.
 qemu_uefi_usb_args() {
   local code="$1"
   local extra=("${@:2}")
@@ -217,7 +224,7 @@ qemu_uefi_usb_args() {
     -machine q35 -accel kvm -accel tcg -m 4096 -cpu max \
     -drive "if=pflash,format=raw,readonly=on,file=$code" \
     -drive "if=pflash,format=raw,file=$OVMF_VARS" \
-    -drive "if=none,id=usbstick,format=raw,file=$UEFI_IMG${QEMU_BOOT_DRIVE_OPTS:-}" \
+    -drive "if=none,id=usbstick,format=raw,file=$UEFI_IMG${QEMU_BOOT_DRIVE_OPTS-,snapshot=on}" \
     -device qemu-xhci,id=xhci \
     -device usb-storage,bus=xhci.0,drive=usbstick,bootindex=0 \
     "${QEMU_DATA_DISK_ARGS[@]}" \
@@ -519,17 +526,21 @@ qemu_uefi_test_pf() {
   qemu_kill_guest
   sleep 1
 
-  qemu_uefi_usb_args "$code" \
+  # Writable boot stick (this PF image is rebuilt as the safe one afterwards): the
+  # kernel's last act after the dump is writing POPCORN.LOG, checked below.
+  QEMU_BOOT_DRIVE_OPTS="" qemu_uefi_usb_args "$code" \
     -debugcon "file:$dbg" -global isa-debugcon.iobase=0xe9 \
     -serial "file:$serial" \
     -display none -no-reboot \
     -daemonize
 
-  local waited=0
-  # Wait for the full dump — '#PF' alone races the kill before CR2= is written.
+  local waited=0 stick_log=""
+  # Wait for the full dump — '#PF' alone races the kill before CR2= is written —
+  # and then for the emergency write of POPCORN.LOG on the boot stick.
   while [[ $waited -lt 45 ]]; do
     if grep -q 'CR2=' "$dbg" 2>/dev/null || grep -q 'CR2=' "$serial" 2>/dev/null; then
-      break
+      stick_log="$(mtype -i "$UEFI_IMG" ::/POPCORN.LOG 2>/dev/null || true)"
+      [[ "$stick_log" == *'*** halt ***'* ]] && break
     fi
     if ! qemu_guest_alive; then
       break
@@ -538,6 +549,7 @@ qemu_uefi_test_pf() {
     waited=$((waited + 1))
   done
   qemu_kill_guest
+  stick_log="$(mtype -i "$UEFI_IMG" ::/POPCORN.LOG 2>/dev/null || true)"
 
   local body
   body="$(cat "$dbg" 2>/dev/null || true)$(cat "$serial" 2>/dev/null || true)"
@@ -553,6 +565,16 @@ qemu_uefi_test_pf() {
     rc=1
   else
     echo "PASS: #PF serial dump"
+  fi
+  # No COM1 on most laptops: the same dump must be in POPCORN.LOG on the stick.
+  if [[ "$stick_log" != "POPCORN.LOG  boot 1 "* ]]; then
+    echo "FAIL: POPCORN.LOG on the boot stick was not written (header: ${stick_log:0:80})"
+    rc=1
+  elif [[ "$stick_log" != *'#PF'* || "$stick_log" != *CR2=* || "$stick_log" != *RIP=* || "$stick_log" != *'*** halt ***'* ]]; then
+    echo "FAIL: POPCORN.LOG on the boot stick lacks the #PF dump"
+    rc=1
+  else
+    echo "PASS: #PF dump written to POPCORN.LOG on the boot stick"
   fi
 
   _qemu_uefi_pf_restore
@@ -707,6 +729,7 @@ qemu_uefi_run_interactive() {
   log INFO "QEMU UEFI USB boot (interactive window)"
   log INFO "Video: virtio-vga/ramfb (GOP). Serial boot tags still print here."
   log INFO "Guest disks: files under target/ only (host Windows/NVMe never attached)"
+  log INFO "Boot stick opened with snapshot=on: guest writes (POPCORN.LOG) never reach the image"
 
   # Video/display args carry no paths, so word-splitting them is safe.
   # shellcheck disable=SC2046
@@ -714,7 +737,7 @@ qemu_uefi_run_interactive() {
     -machine q35 -accel kvm -accel tcg -m 4096 -cpu max \
     -drive "if=pflash,format=raw,readonly=on,file=$code" \
     -drive "if=pflash,format=raw,file=$OVMF_VARS" \
-    -drive "if=none,id=usbstick,format=raw,file=$UEFI_IMG" \
+    -drive "if=none,id=usbstick,format=raw,file=$UEFI_IMG,snapshot=on" \
     -device qemu-xhci,id=xhci \
     -device usb-storage,bus=xhci.0,drive=usbstick,bootindex=0 \
     "${QEMU_DATA_DISK_ARGS[@]}" \
@@ -768,7 +791,22 @@ qemu_uefi_shell_boot() {
   mkdir -p "$(dirname "$SHELL_MON")"
   rm -f "$SHELL_MON"
   _shell_boot_common_args
-  QEMU_BOOT_DRIVE_OPTS=",snapshot=on" qemu_uefi_usb_args "$code" \
+  # POPCORN_SHELL_BOOT_WRITABLE=1 (a case's qemu_env): boot a fresh per-lane copy
+  # of the test image without snapshot, so the guest's writes (POPCORN.LOG) reach
+  # a file the harness can read (step "host_file") and fsck afterwards.
+  local drive_opts=",snapshot=on"
+  if [[ "${POPCORN_SHELL_BOOT_WRITABLE:-}" == 1 ]]; then
+    : "${SHELL_BOOT_COPY:?SHELL_BOOT_COPY must name the lane boot-stick copy}"
+    case "$(basename "$SHELL_BOOT_COPY")" in
+      UNSAFE-lane*-qemu-bootstick.img) ;;
+      *) die "REFUSING boot-stick copy $SHELL_BOOT_COPY (must be target/UNSAFE/UNSAFE-laneN-qemu-bootstick.img)" ;;
+    esac
+    cp "$UEFI_IMG" "$SHELL_BOOT_COPY"
+    qemu_assert_guest_file "$SHELL_BOOT_COPY" "boot-stick copy"
+    UEFI_IMG="$SHELL_BOOT_COPY"
+    drive_opts=""
+  fi
+  QEMU_BOOT_DRIVE_OPTS="$drive_opts" qemu_uefi_usb_args "$code" \
     "${SHELL_QEMU_ARGS[@]}" -daemonize
 }
 

@@ -92,7 +92,7 @@ static const char* available_commands[] = {
     "cl", "cl -help", "cl -gettime", "cl -getime",
     "tasks", "timer", "syscalls", "irq", "pci", "pci -caps", "virtio", "virtio -probe", "virtio -blk",
     "net", "net -help", "net -info", "net -stats", "net -up", "net -down", "net -arp", "net -dhcp", "ping",
-    "nslookup", "udp", "udp -send", "udp -echo",
+    "nslookup", "udp", "udp -send", "udp -echo", "log", "log -flush", "log -verify",
     "mon", "mon -help", "mon -debug", "mon -list", "mon -kill", "mon -ultramon", "mon -stress",
     "dol", "dol -help", "dol -new", "dol -open", "dol -save", "dol -close",
     "drive", "drive -help", "drive -list", "drive -load", "drive -info", "drive -cmd",
@@ -355,7 +355,7 @@ void execute_command(const char *command) {
         console_println_color("Files", CONSOLE_HEADER_COLOR);
         console_println("  ls  write  read  rm  mkdir  go  back  search  cp  listsys");
         console_println_color("System (use <cmd> -help)", CONSOLE_HEADER_COLOR);
-        console_println("  sysinfo   mem   cpu   cl   tasks   timer   syscalls   mon");
+        console_println("  sysinfo   mem   cpu   cl   tasks   timer   syscalls   mon   log");
         console_println_color("Devices (use <cmd> -help)", CONSOLE_HEADER_COLOR);
         console_println("  drive   drv   dev   catalog   disk");
         console_println_color("Editor / keys", CONSOLE_HEADER_COLOR);
@@ -398,6 +398,11 @@ void execute_command(const char *command) {
          * UEFI laptops it freezes the machine without rebooting. */
         console_print_warning("Shutting down...");
         console_present();
+        {
+            /* POPCORN.LOG on the boot stick: everything up to here. */
+            extern void rust_klog_flush(void);
+            rust_klog_flush();
+        }
         /* QEMU isa-debug exit / fw_cfg style poweroff ports */
         asm volatile("outw %0, %1" : : "a"((unsigned short)0x2000), "Nd"((unsigned short)0x604));
         asm volatile("outw %0, %1" : : "a"((unsigned short)0x2000), "Nd"((unsigned short)0xB004));
@@ -787,6 +792,9 @@ void execute_command(const char *command) {
     } else if (strcmp(command, "nslookup") == 0 || strncmp(command, "nslookup ", 9) == 0) {
         extern void rust_nslookup(const char* args);
         rust_nslookup(command[8] == ' ' ? command + 9 : "");
+    } else if (strcmp(command, "log") == 0 || strncmp(command, "log ", 4) == 0) {
+        extern void rust_log_cmd(const char* args);
+        rust_log_cmd(command[3] == ' ' ? command + 4 : "");
     } else if (strcmp(command, "udp") == 0 || strncmp(command, "udp ", 4) == 0) {
         extern void rust_udp_cmd(const char* args);
         rust_udp_cmd(command[3] == ' ' ? command + 4 : "");

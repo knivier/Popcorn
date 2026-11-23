@@ -141,11 +141,22 @@ void init_draw_header(void) {
     console_present();
 }
 
+/* Rows 18-20 hold the finished step's summary; the step's own messages may
+ * have spilled onto row 18 (below the bar), so clear before drawing. */
+static void init_step_summary_begin(void) {
+    console_clear_row(18);
+    console_clear_row(19);
+    console_clear_row(20);
+    console_set_cursor(0, 18);
+}
+
 void init_draw_progress_bar(int current, int total, const char* item) {
     char buffer[64];
     int progress_percent = (current * 100) / total;
 
     console_sync_begin();
+    console_clear_row(16);
+    console_clear_row(17);
     console_set_cursor(0, 16);
     console_print_color("[", BOOT_INFO_COLOR);
 
@@ -168,9 +179,9 @@ void init_draw_progress_bar(int current, int total, const char* item) {
 
     console_print_color(item, BOOT_INFO_COLOR);
 
-    for (int i = 0; i < 20; i++) {
-        console_print_color(" ", CONSOLE_FG_COLOR);
-    }
+    /* What the subsystem prints while it starts goes on its own (cleared) row
+     * below the bar, not after the bar's text: on screen and in POPCORN.LOG. */
+    console_set_cursor(0, 17);
     console_sync_end();
     console_present();
 }
@@ -182,7 +193,7 @@ void init_show_memory_info(void) {
     /* Heap is up: give the GOP console its write-back text shadow (no-op on VGA). */
     rust_screen_enable_shadow();
 
-    console_set_cursor(0, 18);
+    init_step_summary_begin();
     console_print_color("  ✓ Memory Management System", BOOT_SUCCESS_COLOR);
     console_println_color("", CONSOLE_FG_COLOR);
 
@@ -212,7 +223,7 @@ void init_show_timer_info(void) {
 
     timer_init(TIMER_FREQUENCY);
 
-    console_set_cursor(0, 18);
+    init_step_summary_begin();
     console_print_color("  ✓ Programmable Interval Timer (PIT)", BOOT_SUCCESS_COLOR);
     console_println_color("", CONSOLE_FG_COLOR);
 
@@ -241,7 +252,7 @@ void init_show_scheduler_info(void) {
     device_init();
     scheduler_init();
 
-    console_set_cursor(0, 18);
+    init_step_summary_begin();
     console_print_color("  ✓ Preemptive Multi-Task Scheduler", BOOT_SUCCESS_COLOR);
     console_println_color("", CONSOLE_FG_COLOR);
 
@@ -264,7 +275,7 @@ void init_show_syscall_info(void) {
 
     syscall_init();
 
-    console_set_cursor(0, 18);
+    init_step_summary_begin();
     console_print_color("  ✓ System Call Interface", BOOT_SUCCESS_COLOR);
     console_println_color("", CONSOLE_FG_COLOR);
 
@@ -290,7 +301,7 @@ void init_show_modules(void) {
     /* All pops (incl. Dolphin) + FAT32 live in Rust. */
     rust_pops_register();
 
-    console_set_cursor(0, 18);
+    init_step_summary_begin();
     console_print_color("  ✓ Kernel Modules Loaded", BOOT_SUCCESS_COLOR);
     console_println_color("", CONSOLE_FG_COLOR);
 

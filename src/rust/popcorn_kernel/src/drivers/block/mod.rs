@@ -1195,6 +1195,101 @@ fn write_cstr(s: &str, buf: &mut [u8]) -> usize {
     n
 }
 
+/* —— USB-stick log (`klog`) ——
+ *
+ * The one exception to "the boot stick is read-only": `klog` may rewrite sectors
+ * inside POPCORN.LOG, a file the image build created at full size. `klog` finds
+ * and checks the file (`klog::fatlog::locate`) and registers its sectors here;
+ * `log_write` then refuses everything outside them, anything not on the disk the
+ * loader booted from, and everything once that disk becomes writable through the
+ * normal path (install/wipe), because then its FAT may change under the log. */
+
+/// (disk index, first LBA, sectors) of POPCORN.LOG once `klog` has verified it.
+static LOG_EXTENT: IrqSpinLock<Option<(usize, u64, u64)>> = IrqSpinLock::new(None);
+
+/// Index of the disk the UEFI loader booted from (matched by BPB serial + size).
+pub fn booted_disk() -> Option<usize> {
+    DISKS.with(|t| t.iter().position(|d| d.booted))
+}
+
+pub fn disk_name(idx: usize) -> Option<&'static str> {
+    entry(idx).map(|d| d.name)
+}
+
+/// Ok when the log may write to disk `idx` right now; otherwise why not.
+pub fn log_allowed(idx: usize) -> Result<(), &'static str> {
+    let d = entry(idx).ok_or("boot stick is gone")?;
+    if !DISKS.with(|t| t.get(idx).map_or(false, |e| e.booted)) {
+        return Err("not the disk Popcorn booted from");
+    }
+    if is_internal_disk(&d) || !matches!(d.backend, Backend::UsbMsc(_) | Backend::Virtio(_)) {
+        return Err("boot disk is not a USB stick");
+    }
+    if d.sector_size as usize != 512 {
+        return Err("boot stick sector size is not 512");
+    }
+    if is_writable(&d)
+        || PENDING_INSTALL.load(Ordering::Acquire) == idx
+        || PENDING_WIPE.load(Ordering::Acquire) == idx
+    {
+        return Err("boot stick is open for install/wipe");
+    }
+    Ok(())
+}
+
+/// `log_allowed`, plus the disk's size in sectors.
+pub fn log_disk_check(idx: usize) -> Result<u64, &'static str> {
+    log_allowed(idx)?;
+    entry(idx).map(|d| d.sectors).ok_or("boot stick is gone")
+}
+
+/// Read one sector of disk `idx` (any LBA; reads change nothing).
+pub fn log_read(idx: usize, lba: u64, buf: &mut [u8]) -> i64 {
+    let Some(d) = entry(idx) else { return -4 };
+    if buf.len() < d.sector_size as usize || lba >= d.sectors {
+        return -2;
+    }
+    raw_read(&d, lba, buf)
+}
+
+/// Register POPCORN.LOG's sectors. Refused if they touch the partition-table zone
+/// at either end of the disk.
+pub fn log_set_extent(idx: usize, lba: u64, sectors: u64) -> Result<(), &'static str> {
+    let d = entry(idx).ok_or("boot stick is gone")?;
+    let end = lba.checked_add(sectors).ok_or("bad POPCORN.LOG extent")?;
+    if sectors == 0 || lba < PROTECT_ZONE || end > d.sectors.saturating_sub(PROTECT_ZONE) {
+        return Err("POPCORN.LOG overlaps the partition-table zone");
+    }
+    *LOG_EXTENT.lock() = Some((idx, lba, sectors));
+    Ok(())
+}
+
+/// Write one sector of POPCORN.LOG. -6 outside the registered file, -5 when the
+/// log may not write (see `log_allowed`).
+pub fn log_write(idx: usize, lba: u64, buf: &[u8]) -> i64 {
+    let inside = LOG_EXTENT.with(|e| matches!(*e, Some((i, s, n)) if i == idx && lba >= s && lba < s + n));
+    if !inside {
+        return -6;
+    }
+    if log_allowed(idx).is_err() {
+        return -5;
+    }
+    let Some(d) = entry(idx) else { return -4 };
+    if buf.len() < d.sector_size as usize {
+        return -2;
+    }
+    raw_write(&d, lba, buf)
+}
+
+/// Panic path: can `log_write` to `idx` run now without waiting on any lock?
+/// Only real USB sticks (the virtio path sleeps on its interrupt).
+pub fn log_emergency_ready(idx: usize) -> bool {
+    if !DISKS.is_free() || !LOG_EXTENT.is_free() {
+        return false;
+    }
+    matches!(entry(idx).map(|d| d.backend), Some(Backend::UsbMsc(_))) && usb_msc::emergency_ready()
+}
+
 /* —— C FFI —— */
 
 #[no_mangle]

@@ -2,6 +2,7 @@
 #include "../includes/timer.h"
 #include "../includes/console.h"
 #include "../includes/irq.h"
+#include "../includes/cpu_pop.h"
 #include <stddef.h>
 
 // External port I/O functions
@@ -12,6 +13,34 @@ extern char read_port(unsigned short port);
 TimerState global_timer = {0};
 static uint16_t pit_divisor = 11932;
 static bool pit_poll_mode = false;
+static uint64_t timer_tsc0; /* TSC at timer_init, for timer_catch_up */
+
+static uint64_t timer_rdtsc(void) {
+    uint32_t lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+/*
+ * Boot runs for a while (USB enumeration, POPCORN.LOG, driver probes) between
+ * timer_init and the first IRQ0 with interrupts off, so those periods never
+ * became ticks and uptime ran ~2 s slow on the T14s. When ticking starts, set
+ * the count to the time that really passed, measured with the TSC. Only ever
+ * moves the clock forward; skipped if the TSC frequency is unknown.
+ */
+static void timer_catch_up(void) {
+    const CPUFrequency* f = cpu_get_frequency();
+    uint64_t hz = f ? f->tsc_hz : 0;
+    if (hz == 0 || timer_tsc0 == 0 || global_timer.frequency == 0) {
+        return;
+    }
+    uint64_t d = timer_rdtsc() - timer_tsc0;
+    uint64_t due = (d / hz) * global_timer.frequency +
+                   ((d % hz) * global_timer.frequency) / hz;
+    if (due > global_timer.ticks) {
+        global_timer.ticks = due;
+    }
+}
 
 // Initialize PIT (Programmable Interval Timer)
 void timer_init(uint32_t frequency_hz) {
@@ -39,6 +68,7 @@ void timer_init(uint32_t frequency_hz) {
     
     // Initialize timer state
     global_timer.ticks = 0;
+    timer_tsc0 = timer_rdtsc();
     global_timer.frequency = frequency_hz;
     global_timer.is_active = false;
     global_timer.tick_handler = NULL;
@@ -66,6 +96,7 @@ void timer_interrupt_handler(void) {
 
 // Enable timer interrupts
 void timer_enable(void) {
+    timer_catch_up();
     irq_enable(0);
     global_timer.is_active = true;
     pit_poll_mode = false;
@@ -92,6 +123,7 @@ void timer_disable(void) {
 
 void timer_enable_poll(void) {
     timer_disable();
+    timer_catch_up();
     pit_poll_mode = true;
     global_timer.is_active = true;
 }

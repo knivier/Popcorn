@@ -111,6 +111,10 @@ void kmain(void) {
             extern void rust_net_pump(void);
             rust_net_pump(); /* network stack pass (RX, ARP timers, TX flush); never blocks */
         }
+        {
+            extern void rust_klog_tick(void);
+            rust_klog_tick(); /* POPCORN.LOG: write new text to the boot stick ~1/s */
+        }
         /* Push console rows a paced (coalesced) update left pending. */
         rust_screen_idle_flush();
         if ((loop_iter & 0xFFu) == 0u) {

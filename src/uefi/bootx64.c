@@ -307,10 +307,16 @@ static void print(EFI_SYSTEM_TABLE* st, const CHAR16* s) {
     }
 }
 
+/* Fatal loader error. Returning from efi_main sends most firmware straight back
+ * to its boot menu, which wipes the message before anyone can read it, so hold
+ * the screen for 30 s first. Only called while Boot Services are still up. */
 static void print_err(EFI_SYSTEM_TABLE* st, const CHAR16* s) {
     print(st, L"\r\n[Popcorn UEFI] ");
     print(st, s);
-    print(st, L"\r\n");
+    print(st, L"\r\nReturning to the firmware in 30 seconds.\r\n");
+    if (st && st->BootServices && st->BootServices->Stall) {
+        st->BootServices->Stall(30u * 1000u * 1000u);
+    }
 }
 
 static void* memcpy_local(void* dst, const void* src, UINTN n) {
@@ -1167,7 +1173,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* system_table) {
     if (system_table->ConOut) {
         system_table->ConOut->ClearScreen(system_table->ConOut);
     }
-    print(system_table, L"Popcorn UEFI Loader v10\r\n");
+    print(system_table, L"Popcorn UEFI Loader v11\r\n");
 #ifdef POPCORN_TEST_INSTALL
     print(system_table, L"UNSAFE QEMU test-install loader: never flash this image\r\n");
 #endif

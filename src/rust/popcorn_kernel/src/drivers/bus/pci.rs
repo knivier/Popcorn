@@ -109,7 +109,10 @@ fn scan_bus(bus: u8, visited: &mut [u64; 4], f: &mut impl FnMut(PciAddr, u32, u3
         let mut multi = false;
         for func in 0u8..8 {
             let id = cfg_read32(bus, slot, func, 0);
-            if id & 0xFFFF == 0xFFFF {
+            /* 0xFFFF: nothing there. 0x0000 is never a valid vendor either; the
+             * T14s Gen 4 (AMD Phoenix) answers it for unused functions 0:3.2-3.4. */
+            let vendor = id & 0xFFFF;
+            if vendor == 0xFFFF || vendor == 0 {
                 if func == 0 {
                     break;
                 }

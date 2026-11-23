@@ -192,6 +192,32 @@ uefi_stage_layout() {
   if [[ -n "${STAGE_EFI_LOADER:-}" ]]; then
     cp "$STAGE_EFI_LOADER" "$stage/EFI/BOOT/SAFEX64.EFI"
   fi
+  popcorn_log_file "$stage/POPCORN.LOG"
+}
+
+# POPCORN.LOG: the kernel log file on the boot stick (src/rust/popcorn_kernel/src/klog).
+# Created here at its full size so the kernel never allocates clusters or writes the
+# FAT/directories: it only rewrites sectors inside this file. Layout must match
+# klog/fatlog.rs: a 512-byte header sector whose first line carries "boot N" and
+# "used N", then padding of 63 spaces + '\n' per 64 bytes.
+POPCORN_LOG_BYTES=1048576
+popcorn_log_file() {
+  local out="$1"
+  local hdr line pad n=$((POPCORN_LOG_BYTES - 512))
+  # Pure bash (no awk on minimal hosts): one 64-byte blank line, doubled past n.
+  printf -v line '%63s\n' ''
+  pad="$line"
+  while ((${#pad} < n)); do pad+="$pad"; done
+  hdr="POPCORN.LOG  boot 0  used 0 of $((POPCORN_LOG_BYTES - 512)) bytes  dropped 0  uptime 0.000 s
+No boot has written this file yet. Popcorn writes its kernel log here, on the USB
+stick it booted from, while it runs; read it on another computer afterwards."
+  {
+    printf '%-511s\n' "$hdr"
+    printf '%s' "${pad:0:n}"
+  } >"$out"
+  local got
+  got=$(wc -c <"$out")
+  [[ "$got" -eq "$POPCORN_LOG_BYTES" ]] || die "POPCORN.LOG is $got bytes, expected $POPCORN_LOG_BYTES"
 }
 
 # Write a FAT32 image from a staged directory tree.
@@ -218,6 +244,7 @@ populate_fat_image() {
     mkdir -p "$mnt/EFI/BOOT" "$mnt/boot"
     cp "$stage/EFI/BOOT/"* "$mnt/EFI/BOOT/"
     cp "$stage/boot/kernel" "$mnt/boot/kernel"
+    [[ -f "$stage/POPCORN.LOG" ]] && cp "$stage/POPCORN.LOG" "$mnt/POPCORN.LOG"
     umount "$mnt"
     hdiutil detach "$dev" >/dev/null
     rmdir "$mnt"
