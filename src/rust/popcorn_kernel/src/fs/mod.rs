@@ -4,7 +4,9 @@
 //! must be valid UTF-8; bad input sets `get_last_filesystem_error()` and fails
 //! instead of being truncated or reinterpreted.
 
+pub mod bootfs;
 pub mod fat32;
+pub mod fat_ro;
 
 use core::ffi::c_char;
 use core::sync::atomic::{AtomicI32, Ordering};

@@ -43,33 +43,62 @@ static OWNERS: IrqSpinLock<[&'static str; 256]> = IrqSpinLock::new([""; 256]);
 pub enum IrqSource {
     /// MSI-X table entry (kernel-owned table, see bus::pci).
     MsiX { entry: u16 },
+    /// Plain MSI message `index` of a multi-message block (bus::msi).
+    Msi { index: u8 },
     /// No interrupt: the driver polls (fallback, or MSI-X unavailable).
     Polled,
+}
+
+/// How a handle masks its source. Kernel-owned: the driver never sees the table
+/// or the config register behind it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(in crate::drivers) enum MaskCtl {
+    /// No per-source mask (plain MSI without per-vector masking): mask/unmask
+    /// are no-ops and the driver relies on its device's own interrupt enables.
+    None,
+    /// VA of the MSI-X entry's vector-control dword.
+    MsixEntry(usize),
+    /// Plain MSI per-vector masking: bit `bit` of the config dword at `off`.
+    MsiMaskBit { bus: u8, slot: u8, func: u8, off: u8, bit: u8 },
 }
 
 /// A driver's view of one interrupt source.
 pub struct IrqHandle {
     vector: u8,
     source: IrqSource,
-    /// VA of the MSI-X entry's vector-control dword (kernel-owned table), 0 if none.
-    ctrl: usize,
+    ctl: MaskCtl,
 }
 
 impl IrqHandle {
     pub const fn polled() -> IrqHandle {
-        IrqHandle { vector: 0, source: IrqSource::Polled, ctrl: 0 }
+        IrqHandle { vector: 0, source: IrqSource::Polled, ctl: MaskCtl::None }
     }
-    /// Stop this source from interrupting (MSI-X vector control bit 0 = 1).
-    pub fn mask(&self) {
-        if self.ctrl != 0 {
-            unsafe { core::ptr::write_volatile(self.ctrl as *mut u32, 1) };
+    fn set_masked(&self, masked: bool) {
+        match self.ctl {
+            MaskCtl::None => {}
+            MaskCtl::MsixEntry(va) => unsafe { core::ptr::write_volatile(va as *mut u32, masked as u32) },
+            MaskCtl::MsiMaskBit { bus, slot, func, off, bit } => {
+                crate::drivers::bus::pci::cfg_rmw32(bus, slot, func, off, |v| {
+                    if masked {
+                        v | (1 << bit)
+                    } else {
+                        v & !(1 << bit)
+                    }
+                });
+            }
         }
+    }
+    /// Stop this source from interrupting (MSI-X vector control / MSI mask bit).
+    pub fn mask(&self) {
+        self.set_masked(true);
     }
     /// Allow this source to interrupt again.
     pub fn unmask(&self) {
-        if self.ctrl != 0 {
-            unsafe { core::ptr::write_volatile(self.ctrl as *mut u32, 0) };
-        }
+        self.set_masked(false);
+    }
+    /// Whether mask/unmask actually gate this source.
+    pub fn can_mask(&self) -> bool {
+        self.ctl != MaskCtl::None
     }
     /// Pending without consuming it.
     pub fn is_pending(&self) -> bool {
@@ -127,10 +156,27 @@ pub fn alloc_vector(owner: &'static str) -> Option<u8> {
     None
 }
 
+/// Reserve `n` (a power of two, 1..=32) consecutive device vectors starting at a
+/// multiple of `n`: plain MSI multi-message devices put the message index in the
+/// low bits of the data word, so the block must be naturally aligned.
+pub fn alloc_vector_block(n: u8, owner: &'static str) -> Option<u8> {
+    let mut names = OWNERS.lock();
+    let base = crate::drivers::bus::msi_math::find_aligned_block(VEC_POOL_FIRST, VEC_POOL_LAST, n, |v| {
+        poolable(v) && SLOTS[v as usize].state.load(Ordering::Acquire) == 0
+    })?;
+    for v in base..base + n {
+        // Under OWNERS, so no other allocator can race us between check and claim.
+        SLOTS[v as usize].state.store(2, Ordering::Release);
+        SLOTS[v as usize].pending.store(0, Ordering::Relaxed);
+        names[v as usize] = owner;
+    }
+    Some(base)
+}
+
 /// Bind an allocated vector to a source (the grant layer programs the MSI-X entry
-/// and passes the entry's vector-control address).
-pub(in crate::drivers) fn handle_for(vector: u8, source: IrqSource, ctrl: usize) -> IrqHandle {
-    IrqHandle { vector, source, ctrl }
+/// or MSI capability and says how the source is masked).
+pub(in crate::drivers) fn handle_for(vector: u8, source: IrqSource, ctl: MaskCtl) -> IrqHandle {
+    IrqHandle { vector, source, ctl }
 }
 
 fn free_vector(v: u8) {

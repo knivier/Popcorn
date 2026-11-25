@@ -321,7 +321,17 @@ QEMU (`qemu_uefi_data_disk_args`, all under `target/UNSAFE/`): xHCI usb-storage 
 - [x] M3: UDP, DHCP client, DNS resolver; `net -dhcp`, `nslookup`, `ping google.com`, `udp`
 - [x] M4: virtio-blk on the framework (modern + legacy, queue depth 16, FLUSH, MSI-X)
 - [ ] TCP (hand-written vs smoltcp decision), then HTTP; TLS for HTTPS
-- [ ] Wi-Fi W0–W5 for the target laptop's Qualcomm WCN6855 (firmware loader, MHI, QMI/WMI, scan, open-network association, WPA2, WPA3); needs plain MSI
+- [x] Plain MSI (`drivers/bus/msi.rs`): exact power-of-two grants up to 32 messages from a naturally aligned vector block, per-vector masking when the device has it; `irq -msitest` proves it on QEMU's `edu` device
+- [ ] Wi-Fi W0–W5 for the target laptop's Qualcomm WCN6855 (firmware loader, MHI, QMI/WMI, scan, open-network association, WPA2, WPA3)
+  - [x] W0 (`drivers/wifi/ath11k.rs`): boot probe identifies the chip (BAR0, register window, hw2.0 / hw2.1); `wifi -reset` / `wifi -up` run the power-on reset, ASPM off, MSI (32 or 1), and read MHI / BHI state. Verified on the T14s: WCN6855 hw2.1, 32 MSI messages, EE PBL
+  - [x] W1 verified on the T14s (AMSS running, MHI M0, 0.8 s after the image read; needed bus mastering on the upstream root port, which firmware leaves off): pinned linux-firmware files (`scripts/firmware/wcn6855.manifest`, `core.sh firmware`) copied to `/FW/WCN6855` with a MANIFEST.TXT; read-only FAT32 reader (`fs/fat_ro.rs`) + SHA-256 check in the kernel (`wifi -fwcheck`, QEMU-tested); MHI host (`drivers/bus/mhi_host.rs`): SBL via BHI, READY, contexts, M0, full image via BHIe, AMSS
+  - [x] W2 on the T14s (chip id 18, board id 255, firmware WLAN.HSP.1.1-03125, board data 17aa:9309, FW_INIT_DONE; firmware memory must be naturally aligned or it crashes): MHI channels 20/21 (START_CHAN, transfer rings, device wake), QRTR (bus/qrtr.rs), QMI + WLFW messages (wifi/qmi.rs), board-2.bin lookup (wifi/board2.rs); flow: HELLO, WLFW service, indications, host capabilities, firmware memory request, capabilities (chip/board id, firmware build), regulatory database + board data, M3, FW_READY. (The MAC address arrives with WMI in W3.)
+  - [ ] W3: WMI, radio up, scan; `WirelessDevice` trait shared by future Wi-Fi drivers
+    - [x] W3a on the T14s: WLAN_INI, WLAN_CFG (9 copy engines, 14 service routes, 30 shadow registers, the QCA6390 tables WCN6855 uses), WLAN_MODE normal
+    - [ ] W3b in code, not yet run: copy engines CE0-CE3 on SRNG rings (ring registers through the window, host pointers through the WLAN_CFG shadow slots, hardware pointers in a host array), waiting for HTC READY
+    - [ ] W3c HTC + WMI init + ready (MAC address) · W3d first scan
+  - [ ] W4: open-network association, data path through the existing stack (several interfaces)
+  - [ ] W5: WPA2 (4-way handshake, CCMP keys)
 
 **Exit criteria:** Phase 0 inline I/O is gone from `src/core/`; `open`/`read`/`write`/`ioctl` work on `ttyS0`, `kbd`, `fb0`; QEMU reads virtio-blk sectors; PCI lists devices at boot.
 

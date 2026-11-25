@@ -9512,6 +9512,105 @@
   ]
  },
  {
+  "name": "irq_msi_edu_selftest",
+  "boot": "uefi",
+  "shard_start": true,
+  "qemu_env": {
+   "POPCORN_QEMU_EDU": "1"
+  },
+  "why": "Plain MSI (PCI capability 0x05, for devices without MSI-X such as the WCN6855 Wi-Fi card) end to end on QEMU's edu test device: a 32-message request is refused because edu offers one message, one message is granted from an aligned vector block, edu raises it and the vector fires exactly once. Run twice so the vector is freed and granted again.",
+  "steps": [
+   {
+    "send": "irq -msitest",
+    "expect": "msi: edu selftest ok: vector 0x[4-9a-e][0-9a-f] fired once in \\d+ ms \\(64-bit address, 32 messages refused: device cannot use that many MSI messages\\)",
+    "reject": "FAILED|no QEMU edu|#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   },
+   {
+    "send": "irq -msitest",
+    "expect": "msi: edu selftest ok: vector 0x[4-9a-e][0-9a-f] fired once",
+    "reject": "FAILED|#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   },
+   {
+    "send": "irq",
+    "expect": "lapic/msi[\\s\\S]*unexpected=0 spurious=\\d+ grant-violations=0",
+    "reject": "msi-test|#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   }
+  ]
+ },
+ {
+  "name": "irq_msitest_without_edu",
+  "boot": "both",
+  "shard_start": true,
+  "why": "Without QEMU's edu device the MSI self-test says so instead of failing or touching another device.",
+  "steps": [
+   {
+    "send": "irq -msitest",
+    "expect": "msi: no QEMU edu test device \\(start QEMU with -device edu\\)",
+    "reject": "selftest ok|FAILED|#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   }
+  ]
+ },
+ {
+  "name": "wifi_without_card",
+  "boot": "both",
+  "why": "QEMU has no Qualcomm WCN6855 (17CB:1103), so the ath11k driver never binds: `wifi` and `wifi -up` report that no card was found and touch nothing; `wifi -help` lists the commands.",
+  "steps": [
+   {
+    "send": "wifi",
+    "expect": "wifi: no supported Wi-Fi card found \\(Qualcomm WCN6855, PCI 17CB:1103\\)",
+    "reject": "wifi0:|#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   },
+   {
+    "send": "wifi -up",
+    "expect": "wifi: no supported Wi-Fi card found",
+    "reject": "bringing up|#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   },
+   {
+    "send": "wifi -help",
+    "expect": "wifi -up        reset the card \\(W0\\), load its firmware over MHI[\\s\\S]*wifi -reset     only the reset[\\s\\S]*wifi -fwcheck   check the firmware files on the boot stick",
+    "reject": "#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   }
+  ]
+ },
+ {
+  "name": "wifi_firmware_on_boot_stick_verified",
+  "boot": "uefi",
+  "shard_start": true,
+  "why": "Wi-Fi stage W1 loads Qualcomm's firmware from /FW/WCN6855 on the boot stick. The image build copies the pinned, SHA-256-checked linux-firmware files there with a MANIFEST.TXT; `wifi -fwcheck` reads every listed file through the read-only FAT32 reader (fs/fat_ro.rs, single-sector reads of the boot stick) and checks size and SHA-256 in the kernel. Needs no Wi-Fi card. Skips cleanly when the image was built without firmware (POPCORN_FIRMWARE=off or no network).",
+  "steps": [
+   {
+    "send": "wifi -fwcheck",
+    "expect": "(fw: AMSS\\.BIN 4988928 bytes ok \\(sha256 e12b23ddc4b8\\.\\.\\.\\)[\\s\\S]*fw: BOARD-2\\.BIN 7479440 bytes ok[\\s\\S]*fw: 6 of 6 files verified in \\d+ ms \\(/FW/WCN6855\\)|fw: no Wi-Fi firmware on the boot stick)",
+    "reject": "FAILED|manifest unusable|#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked",
+    "timeout": 240
+   }
+  ]
+ },
+ {
+  "name": "wifi_fwcheck_without_boot_stick",
+  "boot": "grub",
+  "why": "Booted from the GRUB ISO there is no boot stick to read firmware from; `wifi -fwcheck` says so instead of reading another disk.",
+  "steps": [
+   {
+    "send": "wifi -fwcheck",
+    "expect": "fw: no Wi-Fi firmware on the boot stick \\(no boot stick \\(not a UEFI USB boot\\)\\)",
+    "reject": "files verified|#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   }
+  ]
+ },
+ {
+  "name": "iommu_report_without_amd_iommu",
+  "boot": "both",
+  "why": "`iommu` reports whether an AMD IOMMU could be blocking device DMA (firmware 'Kernel DMA Protection'), the device-table entries of the Wi-Fi card and USB controllers, and logged faults. QEMU's q35 machine has no AMD IOMMU, so it says so and reads nothing else.",
+  "steps": [
+   {
+    "send": "iommu",
+    "expect": "iommu: no AMD IOMMU on the PCI bus",
+    "reject": "ENABLED|#PF|#GP|#DF|#UD|EXCEPTION|PANIC|panicked"
+   }
+  ]
+ },
+ {
   "name": "stop_halts_cleanly",
   "boot": "both",
   "why": "Run this LAST: stop prints the warning, then writes the QEMU (0x604/0xB004) and VirtualBox poweroff ports. QEMU should exit; if it doesn't, the kernel prints 'Halted. It is safe to power off.' and hlt-loops. QEMU exiting or no further prompt both pass (allow_exit) as long as the shutdown text appeared and no fault did. (Merged with the former stop_shutdown case.)",

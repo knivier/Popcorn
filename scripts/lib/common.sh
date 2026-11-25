@@ -193,6 +193,7 @@ uefi_stage_layout() {
     cp "$STAGE_EFI_LOADER" "$stage/EFI/BOOT/SAFEX64.EFI"
   fi
   popcorn_log_file "$stage/POPCORN.LOG"
+  if declare -F firmware_stage >/dev/null; then firmware_stage "$stage"; fi
 }
 
 # POPCORN.LOG: the kernel log file on the boot stick (src/rust/popcorn_kernel/src/klog).
@@ -245,6 +246,7 @@ populate_fat_image() {
     cp "$stage/EFI/BOOT/"* "$mnt/EFI/BOOT/"
     cp "$stage/boot/kernel" "$mnt/boot/kernel"
     [[ -f "$stage/POPCORN.LOG" ]] && cp "$stage/POPCORN.LOG" "$mnt/POPCORN.LOG"
+    [[ -d "$stage/FW" ]] && cp -R "$stage/FW" "$mnt/FW"
     umount "$mnt"
     hdiutil detach "$dev" >/dev/null
     rmdir "$mnt"

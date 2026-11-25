@@ -15,6 +15,7 @@ use super::bus::pci::{self, PciFunction};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DriverClass {
     Net,
+    Wifi,
     Block,
     Usb,
     Display,
@@ -24,6 +25,7 @@ impl DriverClass {
     pub fn as_str(self) -> &'static str {
         match self {
             DriverClass::Net => "net",
+            DriverClass::Wifi => "wifi",
             DriverClass::Block => "block",
             DriverClass::Usb => "usb",
             DriverClass::Display => "display",
@@ -58,6 +60,13 @@ pub static PCI_DRIVERS: &[PciDriver] = &[
         ids: &[(pci::VENDOR_VIRTIO, pci::DEV_VIRTIO_NET_LEGACY)],
         subsys: Some(1),
         probe: super::virtio::net::probe,
+    },
+    PciDriver {
+        name: "ath11k",
+        class: DriverClass::Wifi,
+        ids: &[(super::wifi::ath11k_hw::VENDOR_QCOM, super::wifi::ath11k_hw::DEV_WCN6855)],
+        subsys: None,
+        probe: super::wifi::ath11k::probe,
     },
 ];
 

@@ -197,18 +197,23 @@ pub extern "C" fn memory_print_map() {
     let mut raw = 0u32;
     let mut rows = 0u32;
     let mut run: Option<(u64, u64, u32)> = None;
-    walk_mmap(mbi_ptr, |(addr, len, ty)| {
+    // Firmware maps are not always sorted (the T14s lists some reserved ranges
+    // after the RAM above 4 GiB), so sort by base first.
+    let mut entries: alloc::vec::Vec<(u64, u64, u32)> = alloc::vec::Vec::new();
+    walk_mmap(mbi_ptr, |e| entries.push(e));
+    entries.sort_unstable_by_key(|e| e.0);
+    for &(addr, len, ty) in entries.iter() {
         raw += 1;
         if let Some((a, l, t)) = run {
             if t == ty && a.checked_add(l) == Some(addr) {
                 run = Some((a, l.saturating_add(len), t));
-                return;
+                continue;
             }
             map_row(a, l, t);
             rows += 1;
         }
         run = Some((addr, len, ty));
-    });
+    }
     if let Some((a, l, t)) = run {
         map_row(a, l, t);
         rows += 1;
@@ -220,7 +225,7 @@ pub extern "C" fn memory_print_map() {
     print(" regions (");
     let n = u64_to_dec(raw as u64, &mut num);
     print(core::str::from_utf8(&num[..n]).unwrap_or("0"));
-    println_color(" firmware entries, adjacent same-type entries merged)", COLOR_WHITE);
+    println_color(" firmware entries, sorted, adjacent same-type entries merged)", COLOR_WHITE);
 }
 
 fn map_row(addr: u64, len: u64, ty: u32) {

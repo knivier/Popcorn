@@ -113,3 +113,77 @@ pub extern "C" fn rust_virtio_blk_verify() {
 pub extern "C" fn rust_virtio_probe() {
     crate::drivers::virtio::probe::probe_command();
 }
+
+/// `irq -msitest`: prove plain MSI end to end on QEMU's `edu` test device
+/// (PCI 1234:11E8, one 64-bit MSI message, no per-vector masking). Checks that
+/// a 32-message request is refused, grants one message, makes the device raise
+/// it (edu register 0x60) and waits for the vector to fire.
+#[no_mangle]
+pub extern "C" fn rust_irq_msitest() {
+    use crate::drivers::bus::{msi, pci};
+    use crate::console_ffi::{COLOR_LIGHT_GREEN, COLOR_LIGHT_RED, COLOR_YELLOW};
+    let say = |color: u8, args: core::fmt::Arguments| {
+        let mut l = LineBuf::new();
+        let _ = l.write_str("msi: ");
+        let _ = l.write_fmt(args);
+        println_color(l.as_str(), color);
+    };
+    let Some(f) = pci::claim(&[(0x1234, 0x11E8)], None, 0) else {
+        say(COLOR_YELLOW, format_args!("no QEMU edu test device (start QEMU with -device edu)"));
+        return;
+    };
+    let bar = match f.bar(0) {
+        Ok(pci::Bar::Mmio(r)) => r,
+        _ => {
+            say(COLOR_LIGHT_RED, format_args!("edu BAR0 unusable"));
+            pci::release(f);
+            return;
+        }
+    };
+    f.enable(true, false, true);
+    let ident = bar.r32(0x00);
+    if ident & 0xFF != 0xED {
+        say(COLOR_LIGHT_RED, format_args!("edu identification {:#x} is wrong", ident));
+        pci::release(f);
+        return;
+    }
+    let refused = msi::alloc_irqs(&f, 32, "msi-test").err().unwrap_or("granted (wrong)");
+    let set = match msi::alloc_irqs(&f, 1, "msi-test") {
+        Ok(s) => s,
+        Err(e) => {
+            say(COLOR_LIGHT_RED, format_args!("could not grant 1 message: {}", e));
+            pci::release(f);
+            return;
+        }
+    };
+    let h = &set.handles[0];
+    let v = h.vector().unwrap_or(0);
+    let before = h.count();
+    bar.w32(0x60, 1); // raise
+    let got = crate::drivers::delay::poll_ms(500, || h.count() != before);
+    let status = bar.r32(0x24);
+    bar.w32(0x64, status); // acknowledge
+    let fired = h.count() - before;
+    let pending = h.take();
+    let info = msi::info(&f);
+    msi::disable(&f);
+    drop(set);
+    f.disable_bus_master();
+    pci::release(f);
+    match got {
+        Some(ms) if fired == 1 && pending => say(
+            COLOR_LIGHT_GREEN,
+            format_args!(
+                "edu selftest ok: vector {:#04x} fired once in {} ms ({}-bit address, 32 messages refused: {})",
+                v,
+                ms,
+                if info.map_or(false, |i| i.is_64) { 64 } else { 32 },
+                refused
+            ),
+        ),
+        _ => say(
+            COLOR_LIGHT_RED,
+            format_args!("edu selftest FAILED: vector {:#04x} fired {} time(s), edu status {:#x}", v, fired, status),
+        ),
+    }
+}

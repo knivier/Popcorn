@@ -11,11 +11,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-fn have(tool: &str) -> bool {
+pub(crate) fn have(tool: &str) -> bool {
     Command::new("sh").arg("-c").arg(format!("command -v {tool}")).output().map_or(false, |o| o.status.success())
 }
 
-fn tools() -> bool {
+pub(crate) fn tools() -> bool {
     let ok = have("mkfs.vfat") && have("mcopy") && have("mdel") && have("mmd") && have("bash");
     if !ok {
         eprintln!("klog image tests skipped: need mkfs.vfat, mtools and bash");
@@ -23,11 +23,11 @@ fn tools() -> bool {
     ok
 }
 
-fn repo() -> PathBuf {
+pub(crate) fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap()
 }
 
-fn scratch(tag: &str) -> PathBuf {
+pub(crate) fn scratch(tag: &str) -> PathBuf {
     static N: AtomicU32 = AtomicU32::new(0);
     let d = std::env::temp_dir().join(format!(
         "popcorn-klog-{}-{}-{}",
@@ -40,7 +40,7 @@ fn scratch(tag: &str) -> PathBuf {
     d
 }
 
-fn run(cmd: &mut Command) {
+pub(crate) fn run(cmd: &mut Command) {
     let o = cmd.output().expect("spawn");
     assert!(o.status.success(), "{:?} failed: {}", cmd, String::from_utf8_lossy(&o.stderr));
 }
@@ -64,7 +64,7 @@ fn build_log_file(dir: &Path) -> PathBuf {
 }
 
 /// Blank 64 MiB FAT32 superfloppy, formatted like `populate_fat_image`.
-fn blank_image(dir: &Path) -> PathBuf {
+pub(crate) fn blank_image(dir: &Path) -> PathBuf {
     let img = dir.join("stick.img");
     let f = std::fs::File::create(&img).unwrap();
     f.set_len(64 << 20).unwrap();
@@ -73,11 +73,11 @@ fn blank_image(dir: &Path) -> PathBuf {
     img
 }
 
-fn mcopy(img: &Path, src: &Path, dst: &str) {
+pub(crate) fn mcopy(img: &Path, src: &Path, dst: &str) {
     run(Command::new("mcopy").arg("-i").arg(img).arg(src).arg(format!("::{dst}")));
 }
 
-fn file_of(dir: &Path, name: &str, bytes: usize, seed: u8) -> PathBuf {
+pub(crate) fn file_of(dir: &Path, name: &str, bytes: usize, seed: u8) -> PathBuf {
     let p = dir.join(name);
     let v: Vec<u8> = (0..bytes).map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed)).collect();
     std::fs::write(&p, v).unwrap();
@@ -184,7 +184,7 @@ fn no_log_file_is_reported() {
 }
 
 /// FAT geometry of a mkfs.vfat image: (first FAT byte offset, data LBA, sectors per cluster).
-fn geometry(b: &[u8]) -> (usize, u64, u64) {
+pub(crate) fn geometry(b: &[u8]) -> (usize, u64, u64) {
     let le16 = |o: usize| u16::from_le_bytes([b[o], b[o + 1]]) as u64;
     let le32 = |o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]) as u64;
     let reserved = le16(14);
@@ -192,12 +192,12 @@ fn geometry(b: &[u8]) -> (usize, u64, u64) {
     (reserved as usize * SECTOR, data, b[13] as u64)
 }
 
-fn fat_get(b: &[u8], fat: usize, c: u32) -> u32 {
+pub(crate) fn fat_get(b: &[u8], fat: usize, c: u32) -> u32 {
     let o = fat + c as usize * 4;
     u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]) & 0x0FFF_FFFF
 }
 
-fn fat_set(b: &mut [u8], fat: usize, c: u32, v: u32) {
+pub(crate) fn fat_set(b: &mut [u8], fat: usize, c: u32, v: u32) {
     let o = fat + c as usize * 4;
     b[o..o + 4].copy_from_slice(&v.to_le_bytes());
 }

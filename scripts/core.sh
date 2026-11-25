@@ -25,6 +25,8 @@ source "$POPCORN_SCRIPTS/lib/iso-uefi.sh"
 source "$POPCORN_SCRIPTS/lib/qemu-uefi.sh"
 # shellcheck source=lib/lint.sh
 source "$POPCORN_SCRIPTS/lib/lint.sh"
+# shellcheck source=lib/firmware.sh
+source "$POPCORN_SCRIPTS/lib/firmware.sh"
 
 usage() {
   cat <<'EOF'
@@ -37,6 +39,8 @@ Build:
   iso         Build legacy target/popcorn.iso (GRUB + Multiboot2)
   iso-uefi    Build target/popcorn-uefi.iso
   all         build + uefi + img
+  firmware    Fetch + verify the Wi-Fi firmware (WCN6855) into target/firmware;
+              `all` also fetches it when missing (POPCORN_FIRMWARE=off skips)
 
 Run:
   run         QEMU with legacy ISO
@@ -258,6 +262,9 @@ main() {
       ;;
     lint)
       lint_grants
+      ;;
+    firmware)
+      firmware_fetch || die "firmware: some files are missing or did not verify"
       ;;
     test-host)
       have cargo || die "cargo required for test-host"

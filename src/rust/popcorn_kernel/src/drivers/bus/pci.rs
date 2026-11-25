@@ -42,7 +42,7 @@ pub fn cfg_write32(bus: u8, slot: u8, func: u8, offset: u8, value: u32) {
 }
 
 /// Atomic read-modify-write of one config dword.
-fn cfg_rmw32(bus: u8, slot: u8, func: u8, offset: u8, f: impl FnOnce(u32) -> u32) {
+pub(in crate::drivers) fn cfg_rmw32(bus: u8, slot: u8, func: u8, offset: u8, f: impl FnOnce(u32) -> u32) {
     let _g = CFG_LOCK.lock();
     unsafe {
         outl(CONFIG_ADDR, cfg_addr(bus, slot, func, offset));
@@ -367,6 +367,7 @@ pub fn scan_print() {
 
 // ------------------------------------------------------------- capabilities
 
+pub const CAP_PM: u8 = 0x01;
 pub const CAP_MSI: u8 = 0x05;
 pub const CAP_VENDOR: u8 = 0x09;
 pub const CAP_PCIE: u8 = 0x10;
@@ -493,6 +494,59 @@ impl PciFunction {
         let cmd = cfg_read16(a.bus, a.slot, a.func, 0x04);
         cfg_write16(a.bus, a.slot, a.func, 0x04, cmd & !4);
     }
+    /// Memory decode + bus mastering on every bridge between this function and
+    /// the CPU: a device's DMA and MSI writes only travel upstream through
+    /// bridges whose own Bus Master Enable is set, and firmware often clears it
+    /// on ports to devices it did not use. Returns (bridge, command before,
+    /// command after), nearest first.
+    pub fn enable_upstream(&self) -> alloc::vec::Vec<(PciAddr, u16, u16)> {
+        let mut out = alloc::vec::Vec::new();
+        for b in bridge_path(self.addr) {
+            let before = cfg_read16(b.bus, b.slot, b.func, 0x04);
+            if before & 0x6 != 0x6 {
+                cfg_write16(b.bus, b.slot, b.func, 0x04, before | 0x6);
+            }
+            out.push((b, before, cfg_read16(b.bus, b.slot, b.func, 0x04)));
+        }
+        out
+    }
+    /// Put the function in power state D0 (PCI PM capability 0x01, PMCSR bits
+    /// 1:0) if firmware left it in D1-D3hot, where its BARs read all-ones.
+    /// Returns the state it was in, or None without a PM capability. PME_Status
+    /// (RW1C) is written as 0, so it is left alone. The caller waits the 10 ms a
+    /// D3hot -> D0 transition needs.
+    pub fn set_power_d0(&self) -> Option<u8> {
+        let mut cap = None;
+        for_each_cap(self.addr, |id, off| {
+            if id == CAP_PM && cap.is_none() {
+                cap = Some(off);
+            }
+        });
+        let off = cap? + 4;
+        let a = self.addr;
+        let old = (cfg_read16(a.bus, a.slot, a.func, off) & 0b11) as u8;
+        if old != 0 {
+            cfg_rmw32(a.bus, a.slot, a.func, off, |v| v & 0x0000_7FFC);
+        }
+        Some(old)
+    }
+    /// Turn off ASPM (L0s/L1 link power states, Link Control bits 1:0) on this
+    /// PCIe function, as chip bring-up sequences require. Returns the old Link
+    /// Control value, or None without a PCIe capability. Link Status (the upper
+    /// half of the dword) is written as 0, a no-op for its RW1C bits.
+    pub fn pcie_aspm_disable(&self) -> Option<u16> {
+        let mut cap = None;
+        for_each_cap(self.addr, |id, off| {
+            if id == CAP_PCIE && cap.is_none() {
+                cap = Some(off);
+            }
+        });
+        let off = cap? + 0x10;
+        let a = self.addr;
+        let old = cfg_read16(a.bus, a.slot, a.func, off);
+        cfg_rmw32(a.bus, a.slot, a.func, off, |v| (v & 0xFFFF) & !0b11);
+        Some(old)
+    }
 }
 
 /// Functions handed out by `claim` (bus/slot/func), so two drivers never share one.
@@ -548,6 +602,90 @@ pub fn find_all(ids: &[(u16, u16)], mut f: impl FnMut(PciAddr, u16)) {
         if ids.iter().any(|&(iv, idv)| iv == v && idv == d) {
             f(addr, d);
         }
+        true
+    });
+}
+
+/// PCI-PCI bridges between `a` and the host bridge, nearest first: each one
+/// whose secondary..subordinate bus range holds the bus below it.
+pub fn bridge_path(a: PciAddr) -> alloc::vec::Vec<PciAddr> {
+    let mut path = alloc::vec::Vec::new();
+    let mut bus = a.bus;
+    for _ in 0..8 {
+        if bus == 0 {
+            break;
+        }
+        let mut up = None;
+        scan(|b, _id, class_reg| {
+            if (class_reg >> 16) == 0x0604 {
+                let buses = cfg_read32(b.bus, b.slot, b.func, 0x18);
+                let sec = ((buses >> 8) & 0xFF) as u8;
+                let sub = ((buses >> 16) & 0xFF) as u8;
+                if sec <= bus && bus <= sub && b.bus < bus {
+                    up = Some(b);
+                    return false;
+                }
+            }
+            true
+        });
+        match up {
+            Some(b) => {
+                path.push(b);
+                bus = b.bus;
+            }
+            None => break,
+        }
+    }
+    path
+}
+
+/// PCIe capability offset of `a`, if any.
+pub fn pcie_cap(a: PciAddr) -> Option<u8> {
+    let mut cap = None;
+    for_each_cap(a, |id, off| {
+        if id == CAP_PCIE && cap.is_none() {
+            cap = Some(off);
+        }
+    });
+    cap
+}
+
+/// Error-relevant status of one function: (command, status, secondary status
+/// for bridges, PCIe device status).
+#[derive(Clone, Copy, Debug)]
+pub struct ErrStatus {
+    pub command: u16,
+    pub status: u16,
+    pub sec_status: Option<u16>,
+    pub dev_status: Option<u16>,
+}
+
+pub fn err_status(a: PciAddr) -> ErrStatus {
+    let header = cfg_read8(a.bus, a.slot, a.func, 0x0E) & 0x7F;
+    ErrStatus {
+        command: cfg_read16(a.bus, a.slot, a.func, 0x04),
+        status: cfg_read16(a.bus, a.slot, a.func, 0x06),
+        sec_status: if header == 1 { Some(cfg_read16(a.bus, a.slot, a.func, 0x1E)) } else { None },
+        dev_status: pcie_cap(a).map(|c| cfg_read16(a.bus, a.slot, a.func, c + 0x0A)),
+    }
+}
+
+/// Clear the write-1-to-clear error bits of `a` (status, bridge secondary
+/// status, PCIe device status) so a later `err_status` shows only new errors.
+pub fn clear_err_status(a: PciAddr) {
+    cfg_write16(a.bus, a.slot, a.func, 0x06, 0xF900);
+    if cfg_read8(a.bus, a.slot, a.func, 0x0E) & 0x7F == 1 {
+        cfg_write16(a.bus, a.slot, a.func, 0x1E, 0xF900);
+    }
+    if let Some(c) = pcie_cap(a) {
+        cfg_write16(a.bus, a.slot, a.func, c + 0x0A, 0x000F);
+    }
+}
+
+/// Every present function: (address, vendor, device, class register).
+pub fn for_each_function(mut f: impl FnMut(PciAddr, u16, u16, u32)) {
+    scan(|addr, id, class_reg| {
+        f(addr, (id & 0xFFFF) as u16, (id >> 16) as u16, class_reg);
         true
     });
 }

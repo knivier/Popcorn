@@ -1243,6 +1243,18 @@ pub fn log_disk_check(idx: usize) -> Result<u64, &'static str> {
     entry(idx).map(|d| d.sectors).ok_or("boot stick is gone")
 }
 
+/// Sectors of the disk Popcorn booted from, for read-only file access
+/// (`fs::bootfs`): (index, sectors), or why there is none. Reads never need the
+/// write rules `log_allowed` enforces.
+pub fn boot_disk_for_read() -> Result<(usize, u64), &'static str> {
+    let idx = booted_disk().ok_or("no boot stick (not a UEFI USB boot)")?;
+    let d = entry(idx).ok_or("boot stick is gone")?;
+    if d.sector_size != 512 {
+        return Err("boot stick sector size is not 512");
+    }
+    Ok((idx, d.sectors))
+}
+
 /// Read one sector of disk `idx` (any LBA; reads change nothing).
 pub fn log_read(idx: usize, lba: u64, buf: &mut [u8]) -> i64 {
     let Some(d) = entry(idx) else { return -4 };

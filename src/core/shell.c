@@ -90,9 +90,9 @@ static const char* available_commands[] = {
     "mem", "mem -help", "mem -map", "mem -use", "mem -stats", "mem -info", "mem -debug",
     "cpu", "cpu -help", "cpu -hz", "cpu -info",
     "cl", "cl -help", "cl -gettime", "cl -getime",
-    "tasks", "timer", "syscalls", "irq", "pci", "pci -caps", "virtio", "virtio -probe", "virtio -blk",
+    "tasks", "timer", "syscalls", "irq", "irq -msitest", "iommu", "pci", "pci -caps", "virtio", "virtio -probe", "virtio -blk",
     "net", "net -help", "net -info", "net -stats", "net -up", "net -down", "net -arp", "net -dhcp", "ping",
-    "nslookup", "udp", "udp -send", "udp -echo", "log", "log -flush", "log -verify",
+    "nslookup", "udp", "udp -send", "udp -echo", "log", "log -flush", "log -verify", "wifi", "wifi -up",
     "mon", "mon -help", "mon -debug", "mon -list", "mon -kill", "mon -ultramon", "mon -stress",
     "dol", "dol -help", "dol -new", "dol -open", "dol -save", "dol -close",
     "drive", "drive -help", "drive -list", "drive -load", "drive -info", "drive -cmd",
@@ -357,7 +357,7 @@ void execute_command(const char *command) {
         console_println_color("System (use <cmd> -help)", CONSOLE_HEADER_COLOR);
         console_println("  sysinfo   mem   cpu   cl   tasks   timer   syscalls   mon   log");
         console_println_color("Devices (use <cmd> -help)", CONSOLE_HEADER_COLOR);
-        console_println("  drive   drv   dev   catalog   disk");
+        console_println("  drive   drv   dev   catalog   disk   wifi");
         console_println_color("Editor / keys", CONSOLE_HEADER_COLOR);
         console_println("  dol -help|-new|-open|-save|-close");
         console_println("  Up/Down scroll   Left/Right history");
@@ -804,6 +804,15 @@ void execute_command(const char *command) {
     } else if (strcmp(command, "irq") == 0) {
         extern void rust_irq_list(void);
         rust_irq_list();
+    } else if (strcmp(command, "iommu") == 0) {
+        extern void rust_iommu_cmd(void);
+        rust_iommu_cmd();
+    } else if (strcmp(command, "irq -msitest") == 0) {
+        extern void rust_irq_msitest(void);
+        rust_irq_msitest();
+    } else if (strcmp(command, "wifi") == 0 || strncmp(command, "wifi ", 5) == 0) {
+        extern void rust_wifi_cmd(const char* args);
+        rust_wifi_cmd(command[4] == ' ' ? command + 5 : "");
     } else if (strcmp(command, "pci") == 0 || strncmp(command, "pci ", 4) == 0) {
         const char* args = command[3] == ' ' ? command + 4 : "";
         if (strcmp(args, "-caps") == 0) {

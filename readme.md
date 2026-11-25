@@ -70,6 +70,27 @@ kernel only rewrites sectors inside that file (never the FAT or directories), an
 stops writing if the stick is opened for `disk -install` / `disk -wipe`. QEMU runs
 open the boot stick with `snapshot=on`, so they never change the flashable image.
 
+### Wi-Fi bring-up (Qualcomm WCN6855, in progress)
+
+The ThinkPad T14s Gen 4's Wi-Fi card is being brought up in stages (see
+`roadmap.md`). At boot the driver only identifies the card; nothing is reset.
+`wifi -up` resets the card (W0) and loads its firmware over MHI (W1); `wifi` shows
+the result; `wifi -reset` runs only W0. Every step is written to `POPCORN.LOG` as
+it happens, so the log shows how far it got even if the machine hangs.
+
+The firmware is Qualcomm's code for the processors inside the chip (every OS
+loads the same files). It is not stored in this repository: `core.sh firmware`
+(and `core.sh all`, when missing) downloads it from linux-firmware into
+`target/firmware/` and keeps a file only if its SHA-256 matches
+`scripts/firmware/wcn6855.manifest`. The image gets the verified files in
+`/FW/WCN6855` with Qualcomm's licence and a `MANIFEST.TXT`, which the kernel
+checks again before loading; `wifi -fwcheck` checks them on the stick. With
+`POPCORN_FIRMWARE=off` or no network the image builds without firmware.
+
+QEMU has no such card (`wifi` says so); `irq -msitest` checks the plain-MSI
+support the card needs, on QEMU's `edu` device, and `wifi -fwcheck` the firmware
+files.
+
 ### Try the Features
 
 - `help` — available commands

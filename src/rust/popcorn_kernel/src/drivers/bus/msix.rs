@@ -9,7 +9,7 @@
 //!    polling driver costs QEMU no interrupt work at all.
 
 use super::pci::{cfg_read16, cfg_write16, for_each_cap, Bar, PciFunction, CAP_MSIX};
-use crate::drivers::grant::irq::{alloc_vector, handle_for, IrqHandle, IrqSource};
+use crate::drivers::grant::irq::{alloc_vector, handle_for, IrqHandle, IrqSource, MaskCtl};
 use crate::drivers::grant::MmioRegion;
 
 extern "C" {
@@ -20,23 +20,38 @@ extern "C" {
 const MC_ENABLE: u16 = 1 << 15;
 const MC_FUNCTION_MASK: u16 = 1 << 14;
 const ENTRY_BYTES: usize = 16;
-pub const MAX_IRQS: usize = 4;
+/// Most interrupt sources one driver can hold (plain MSI allows 32 messages).
+pub const MAX_IRQS: usize = 32;
 
-/// Interrupt sources granted to one driver. `handles[i]` = MSI-X entry `i`.
+/// Interrupt sources granted to one driver. `handles[i]` = MSI-X entry `i`, or
+/// plain MSI message `i` (bus::msi).
 pub struct IrqSet {
     pub handles: [IrqHandle; MAX_IRQS],
     pub count: usize,
     /// Kept alive so entry masks stay reachable; never exposed to the driver.
     _table: Option<MmioRegion>,
+    /// Plain MSI only: the (address, base data) the capability was programmed
+    /// with. Some devices (Qualcomm MHI) must also be told this in their own
+    /// registers to signal their event rings.
+    msi_msg: Option<(u64, u32)>,
 }
 
 impl IrqSet {
     pub fn polled() -> IrqSet {
         IrqSet {
-            handles: [IrqHandle::polled(), IrqHandle::polled(), IrqHandle::polled(), IrqHandle::polled()],
+            handles: core::array::from_fn(|_| IrqHandle::polled()),
             count: 0,
             _table: None,
+            msi_msg: None,
         }
+    }
+    /// Plain MSI set (bus::msi).
+    pub(super) fn from_msi(handles: [IrqHandle; MAX_IRQS], count: usize, addr: u64, data: u32) -> IrqSet {
+        IrqSet { handles, count, _table: None, msi_msg: Some((addr, data)) }
+    }
+    /// Plain MSI: message address and base data (message `i` sends data + i).
+    pub fn msi_message(&self) -> Option<(u64, u32)> {
+        self.msi_msg
     }
     pub fn is_polled(&self) -> bool {
         self.count == 0
@@ -95,7 +110,7 @@ pub fn alloc_irqs(f: &PciFunction, want: usize, owner: &'static str) -> Result<I
             Some(v) => vectors[i] = v,
             None => {
                 for &v in &vectors[..i] {
-                    drop(handle_for(v, IrqSource::MsiX { entry: 0 }, 0)); // frees the vector
+                    drop(handle_for(v, IrqSource::MsiX { entry: 0 }, MaskCtl::None)); // frees the vector
                 }
                 return Err("no free interrupt vectors");
             }
@@ -116,7 +131,7 @@ pub fn alloc_irqs(f: &PciFunction, want: usize, owner: &'static str) -> Result<I
         }
     }
     for i in 0..want {
-        set.handles[i] = handle_for(vectors[i], IrqSource::MsiX { entry: i as u16 }, entry_ctrl_va(&table, i));
+        set.handles[i] = handle_for(vectors[i], IrqSource::MsiX { entry: i as u16 }, MaskCtl::MsixEntry(entry_ctrl_va(&table, i)));
     }
     set.count = want;
     // Unmask the function; entries stay individually masked until armed.

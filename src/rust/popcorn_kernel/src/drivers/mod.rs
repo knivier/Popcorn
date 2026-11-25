@@ -20,6 +20,8 @@ pub mod virtio;
 #[allow(dead_code)]
 pub mod net;
 pub mod pci_drivers;
+pub mod delay;
+pub mod wifi;
 
 pub use registry::{drive_cmd, init_drive, init_drives, list_devices, list_drives};
 pub use registry::{device_ioctl, device_read, device_write};

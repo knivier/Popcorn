@@ -150,6 +150,11 @@ qemu_uefi_data_disk_args() {
   )
   qemu_net_args
   QEMU_DATA_DISK_ARGS+=("${QEMU_NET_ARGS[@]}")
+  # POPCORN_QEMU_EDU=1: QEMU's edu test device (one plain-MSI message) for the
+  # `irq -msitest` shell case; real hardware never has it.
+  if [[ "${POPCORN_QEMU_EDU:-}" == 1 ]]; then
+    QEMU_DATA_DISK_ARGS+=(-device edu)
+  fi
   # Shell tests only: a modern-only (0x1042) virtio-blk that the legacy block
   # driver ignores; `virtio -probe` drives it through the new driver framework.
   if [[ -n "${MODERN_IMG:-}" ]]; then

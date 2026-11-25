@@ -21,7 +21,7 @@ use crate::drivers::dma::{dma_alloc, dma_free, DmaBuffer};
 use crate::drivers::queue::DeviceAddr;
 
 pub const RUN_BYTES: usize = 64 * 1024;
-const MAX_RUNS: usize = 32;
+const MAX_RUNS: usize = 96;
 const PAGE: usize = 4096;
 
 /// Types whose every bit pattern is valid and that are safe to share with a device.
@@ -129,6 +129,56 @@ impl DmaPool {
             s.dev[i] = dev;
         }
         Ok(s)
+    }
+
+    /// One zeroed, physically contiguous, page-aligned buffer of `len` bytes
+    /// below 4 GiB, bigger than a run allows (firmware images: 512 KiB BHI /
+    /// BHIe segments). Takes a run slot of its own; freed with the pool.
+    pub fn alloc_large(&mut self, len: usize) -> Result<DmaArray<u8>, GrantError> {
+        if len == 0 {
+            return Err(GrantError::OutOfRange);
+        }
+        let slot = self.runs.iter().position(|r| r.is_none()).ok_or(GrantError::NoMemory)?;
+        let pages = len.div_ceil(PAGE) as u32;
+        if self.pages + pages > self.page_limit {
+            return Err(GrantError::NoMemory);
+        }
+        let buf = dma_alloc(len).ok_or(GrantError::NoMemory)?;
+        let ptr = NonNull::new(buf.virt as *mut u8).ok_or(GrantError::NoMemory)?;
+        let dev = DeviceAddr(buf.phys);
+        self.pages += pages;
+        // `used` = the whole buffer, so `carve` never hands out parts of it.
+        let used = buf.len;
+        self.runs[slot] = Some(Run { buf, used });
+        Ok(DmaArray { ptr, dev, n: len })
+    }
+
+    /// Like `alloc_large`, but the buffer starts on a multiple of `align` (a
+    /// power of two). Over-allocates by `align` and uses the aligned part:
+    /// devices that map host memory with large pages (Qualcomm WLFW firmware)
+    /// expect what Linux's buddy allocator / IOMMU always give, a block
+    /// aligned to its own (power-of-two) size.
+    pub fn alloc_large_aligned(&mut self, len: usize, align: usize) -> Result<DmaArray<u8>, GrantError> {
+        if len == 0 || !align.is_power_of_two() || align > (64 << 20) {
+            return Err(GrantError::OutOfRange);
+        }
+        if align <= PAGE {
+            return self.alloc_large(len);
+        }
+        let total = len.checked_add(align).ok_or(GrantError::OutOfRange)?;
+        let slot = self.runs.iter().position(|r| r.is_none()).ok_or(GrantError::NoMemory)?;
+        let pages = total.div_ceil(PAGE) as u32;
+        if self.pages + pages > self.page_limit {
+            return Err(GrantError::NoMemory);
+        }
+        let buf = dma_alloc(total).ok_or(GrantError::NoMemory)?;
+        let off = ((buf.phys + align as u64 - 1) & !(align as u64 - 1)) - buf.phys;
+        let ptr = NonNull::new((buf.virt + off) as *mut u8).ok_or(GrantError::NoMemory)?;
+        let dev = DeviceAddr(buf.phys + off);
+        self.pages += pages;
+        let used = buf.len;
+        self.runs[slot] = Some(Run { buf, used });
+        Ok(DmaArray { ptr, dev, n: len })
     }
 
     /// The device may still DMA into this pool: leak it on drop instead of freeing.

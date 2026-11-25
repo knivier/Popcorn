@@ -45,26 +45,27 @@ pub fn pad_byte(file_offset: usize) -> u8 {
     }
 }
 
-fn le16(b: &[u8], o: usize) -> u32 {
+pub fn le16(b: &[u8], o: usize) -> u32 {
     u16::from_le_bytes([b[o], b[o + 1]]) as u32
 }
 
-fn le32(b: &[u8], o: usize) -> u32 {
+pub fn le32(b: &[u8], o: usize) -> u32 {
     u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
 }
 
 /// FAT32 geometry from a boot sector.
 #[derive(Clone, Copy, Debug)]
-struct Bpb {
-    sec_per_clus: u64,
-    fat_lba: u64,
-    data_lba: u64,
-    root_clus: u32,
-    clusters: u32,
-    total: u64,
+/// FAT32 geometry from the boot sector (shared with `fs::fat_ro`).
+pub struct Bpb {
+    pub sec_per_clus: u64,
+    pub fat_lba: u64,
+    pub data_lba: u64,
+    pub root_clus: u32,
+    pub clusters: u32,
+    pub total: u64,
 }
 
-fn parse_bpb(s: &[u8; SECTOR]) -> Result<Bpb, &'static str> {
+pub fn parse_bpb(s: &[u8; SECTOR]) -> Result<Bpb, &'static str> {
     if s[510] != 0x55 || s[511] != 0xAA {
         return Err("no boot signature at LBA 0");
     }
@@ -98,12 +99,12 @@ fn parse_bpb(s: &[u8; SECTOR]) -> Result<Bpb, &'static str> {
 }
 
 impl Bpb {
-    fn cluster_lba(&self, c: u32) -> u64 {
+    pub fn cluster_lba(&self, c: u32) -> u64 {
         self.data_lba + (c as u64 - 2) * self.sec_per_clus
     }
 
     /// Next cluster in the chain (first FAT copy). `None` on a read error.
-    fn next(&self, read: &mut dyn FnMut(u64, &mut [u8; SECTOR]) -> bool, c: u32) -> Option<u32> {
+    pub fn next(&self, read: &mut dyn FnMut(u64, &mut [u8; SECTOR]) -> bool, c: u32) -> Option<u32> {
         let off = c as u64 * 4;
         let mut s = [0u8; SECTOR];
         if !read(self.fat_lba + off / SECTOR as u64, &mut s) {
@@ -112,12 +113,12 @@ impl Bpb {
         Some(le32(&s, (off % SECTOR as u64) as usize) & 0x0FFF_FFFF)
     }
 
-    fn valid(&self, c: u32) -> bool {
+    pub fn valid(&self, c: u32) -> bool {
         c >= 2 && c < self.clusters + 2
     }
 }
 
-const EOC_MIN: u32 = 0x0FFF_FFF8;
+pub const EOC_MIN: u32 = 0x0FFF_FFF8;
 /// Root directory clusters walked at most (a loop in the chain must not hang boot).
 const MAX_ROOT_CLUSTERS: u32 = 64;
 

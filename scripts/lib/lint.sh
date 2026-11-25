@@ -6,7 +6,7 @@
 
 lint_grants() {
   local root="${POPCORN_SRC:?}/rust/popcorn_kernel/src"
-  local dirs=("$root/drivers/virtio" "$root/drivers/net" "$root/net")
+  local dirs=("$root/drivers/virtio" "$root/drivers/net" "$root/drivers/wifi" "$root/net")
   local pattern='asm!|drivers::io|grant::port::raw|\binl\(|\boutl\(|\binb\(|\boutb\(|\binw\(|\boutw\(|virt_to_phys|phys_to_virt|map_mmio|static mut'
   local hits=0 d
   for d in "${dirs[@]}"; do
@@ -24,5 +24,5 @@ lint_grants() {
     log ERROR "lint: raw hardware access or static mut found (see lines above)"
     return 1
   fi
-  log SUCCESS "lint: grant rules clean (virtio/, net/; no static mut in the crate)"
+  log SUCCESS "lint: grant rules clean (virtio/, net/, wifi/; no static mut in the crate)"
 }

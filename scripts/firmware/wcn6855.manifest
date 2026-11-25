@@ -1,0 +1,16 @@
+# Qualcomm WCN6855 (ath11k, hw2.0 and hw2.1) Wi-Fi firmware for the T14s Gen 4.
+# Firmware version WLAN.HSP.1.1-03125-QCAHSPSWPL_V1_V2_SILICONZ_LITE-3.6510.41
+# Source: linux-firmware (git.kernel.org); hw2.1 links to these hw2.0 files.
+# Licence: redistributable in unmodified binary form for use with Qualcomm
+# Atheros devices (LICENSE.QualcommAtheros_ath10k, copied onto the stick).
+#
+# Pinned: scripts/lib/firmware.sh refuses any download whose SHA-256 or size
+# differs, and the kernel re-checks both against /FW/WCN6855/MANIFEST.TXT.
+#
+# sha256                                                           bytes    source path (under linux-firmware)          name on the stick
+e12b23ddc4b8d2d2a10a651a5d6fdcd00f60fcae884d2cf5dad17627211fcdfd 4988928 ath11k/WCN6855/hw2.0/amss.bin AMSS.BIN
+0c590881870d0e6e98fc7d393ce05690e09287933b1b535e935bf5d98b77713f 266684 ath11k/WCN6855/hw2.0/m3.bin M3.BIN
+3a92de58509ee13d417241a6b17be446fa3b0fa938c4cbd8492b1be25ae0f4a7 7479440 ath11k/WCN6855/hw2.0/board-2.bin BOARD-2.BIN
+e1b774b1feda4cab01f5a26089124059539fc31544ac34129dce45c8ff26d645 24310 ath11k/WCN6855/hw2.0/regdb.bin REGDB.BIN
+770720d03de70ff503c6d9bb6f6932fc7833d078647fe8352c6d5d49d44bbc5f 152394 ath11k/WCN6855/hw2.0/Notice.txt NOTICE.TXT
+337a55102138d7baa143ee4a4c6c91693e0113fece35d380b2a12109e8c23b3f 2713 LICENSES/LICENSE.QualcommAtheros_ath10k LICENSE.TXT
